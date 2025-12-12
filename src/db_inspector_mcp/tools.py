@@ -4,24 +4,9 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from .config import check_data_access, get_backend, get_config
+from .backends.registry import get_registry
+from .config import check_data_access, get_config
 from .security import validate_readonly_sql
-
-# Global backend instance (initialized in main.py)
-_backend: Any = None
-
-
-def set_backend(backend: Any) -> None:
-    """Set the global backend instance."""
-    global _backend
-    _backend = backend
-
-
-def get_backend_instance() -> Any:
-    """Get the global backend instance."""
-    if _backend is None:
-        _backend = get_backend()
-    return _backend
 
 
 # Create FastMCP server instance
@@ -29,18 +14,20 @@ mcp = FastMCP("db-inspector-mcp")
 
 
 @mcp.tool()
-def db_row_count(sql: str) -> dict[str, Any]:
+def db_row_count(sql: str, database: str | None = None) -> dict[str, Any]:
     """
     Return the number of rows an arbitrary SQL query would produce.
     
     Args:
         sql: SQL SELECT query to count rows for
+        database: Name of the database backend to use (optional, uses default if not specified)
         
     Returns:
         Dictionary with "count" key containing the row count
     """
     validate_readonly_sql(sql)
-    backend = get_backend_instance()
+    registry = get_registry()
+    backend = registry.get(database)
     
     try:
         count = backend.get_row_count(sql)
@@ -50,18 +37,20 @@ def db_row_count(sql: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-def db_columns(sql: str) -> dict[str, Any]:
+def db_columns(sql: str, database: str | None = None) -> dict[str, Any]:
     """
     Return column names, data types, nullability, and precision/scale.
     
     Args:
         sql: SQL SELECT query to get columns for
+        database: Name of the database backend to use (optional, uses default if not specified)
         
     Returns:
         Dictionary with "columns" key containing list of column metadata
     """
     validate_readonly_sql(sql)
-    backend = get_backend_instance()
+    registry = get_registry()
+    backend = registry.get(database)
     
     try:
         columns = backend.get_columns(sql)
@@ -71,19 +60,21 @@ def db_columns(sql: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-def db_sum_column(sql: str, column: str) -> dict[str, Any]:
+def db_sum_column(sql: str, column: str, database: str | None = None) -> dict[str, Any]:
     """
     Compute the SUM() of a single column for validation scenarios.
     
     Args:
         sql: SQL SELECT query to sum a column from
         column: Column name to sum
+        database: Name of the database backend to use (optional, uses default if not specified)
         
     Returns:
         Dictionary with "sum" key containing the sum value (or None)
     """
     validate_readonly_sql(sql)
-    backend = get_backend_instance()
+    registry = get_registry()
+    backend = registry.get(database)
     
     try:
         sum_val = backend.sum_column(sql, column)
@@ -93,19 +84,21 @@ def db_sum_column(sql: str, column: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-def db_measure_query(sql: str, max_rows: int = 1000) -> dict[str, Any]:
+def db_measure_query(sql: str, max_rows: int = 1000, database: str | None = None) -> dict[str, Any]:
     """
     Return execution time, number of rows retrieved, and whether row cap was hit.
     
     Args:
         sql: SQL SELECT query to measure
         max_rows: Maximum number of rows to retrieve (default: 1000)
+        database: Name of the database backend to use (optional, uses default if not specified)
         
     Returns:
         Dictionary with execution_time_ms, row_count, and hit_limit
     """
     validate_readonly_sql(sql)
-    backend = get_backend_instance()
+    registry = get_registry()
+    backend = registry.get(database)
     
     try:
         result = backend.measure_query(sql, max_rows)
@@ -115,7 +108,7 @@ def db_measure_query(sql: str, max_rows: int = 1000) -> dict[str, Any]:
 
 
 @mcp.tool()
-def db_preview(sql: str, max_rows: int = 100) -> dict[str, Any]:
+def db_preview(sql: str, max_rows: int = 100, database: str | None = None) -> dict[str, Any]:
     """
     Sample N rows from a query result.
     
@@ -124,13 +117,15 @@ def db_preview(sql: str, max_rows: int = 100) -> dict[str, Any]:
     Args:
         sql: SQL SELECT query to preview
         max_rows: Maximum number of rows to return (default: 100)
+        database: Name of the database backend to use (optional, uses default if not specified)
         
     Returns:
         Dictionary with "rows" key containing list of row dictionaries
     """
     validate_readonly_sql(sql)
     check_data_access("db_preview")  # Check permission
-    backend = get_backend_instance()
+    registry = get_registry()
+    backend = registry.get(database)
     
     try:
         rows = backend.preview(sql, max_rows)
@@ -142,18 +137,20 @@ def db_preview(sql: str, max_rows: int = 100) -> dict[str, Any]:
 
 
 @mcp.tool()
-def db_explain(sql: str) -> dict[str, Any]:
+def db_explain(sql: str, database: str | None = None) -> dict[str, Any]:
     """
     Return database-native execution plan.
     
     Args:
         sql: SQL SELECT query to explain
+        database: Name of the database backend to use (optional, uses default if not specified)
         
     Returns:
         Dictionary with "plan" key containing execution plan as string
     """
     validate_readonly_sql(sql)
-    backend = get_backend_instance()
+    registry = get_registry()
+    backend = registry.get(database)
     
     try:
         plan = backend.explain_query(sql)
@@ -163,14 +160,26 @@ def db_explain(sql: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-def db_compare_queries(sql1: str, sql2: str, compare_samples: bool = False) -> dict[str, Any]:
+def db_compare_queries(
+    sql1: str,
+    sql2: str,
+    compare_samples: bool = False,
+    database1: str | None = None,
+    database2: str | None = None
+) -> dict[str, Any]:
     """
-    Compare two queries side-by-side.
+    Compare two queries side-by-side, optionally from different databases.
+    
+    This is especially useful for migration scenarios where you want to compare
+    a query from a source database (e.g., Access) with a query from a destination
+    database (e.g., SQL Server) to ensure they produce matching results.
     
     Args:
         sql1: First SQL SELECT query to compare
         sql2: Second SQL SELECT query to compare
         compare_samples: If True, compare sample data (requires data access permission)
+        database1: Name of the database backend for sql1 (optional, uses default if not specified)
+        database2: Name of the database backend for sql2 (optional, uses database1 if not specified)
         
     Returns:
         Dictionary with row_count_diff, column_differences, and optionally sample_differences
@@ -181,17 +190,20 @@ def db_compare_queries(sql1: str, sql2: str, compare_samples: bool = False) -> d
     if compare_samples:
         check_data_access("db_preview")  # Sample comparison requires data access
     
-    backend = get_backend_instance()
+    registry = get_registry()
+    backend1 = registry.get(database1)
+    # If database2 is not specified, use database1 (same database comparison)
+    backend2 = registry.get(database2 if database2 is not None else database1)
     
     try:
         # Get row counts
-        count1 = backend.get_row_count(sql1)
-        count2 = backend.get_row_count(sql2)
+        count1 = backend1.get_row_count(sql1)
+        count2 = backend2.get_row_count(sql2)
         row_count_diff = count2 - count1
         
         # Get column schemas
-        cols1 = backend.get_columns(sql1)
-        cols2 = backend.get_columns(sql2)
+        cols1 = backend1.get_columns(sql1)
+        cols2 = backend2.get_columns(sql2)
         
         # Compare columns
         col_names1 = {col["name"] for col in cols1}
@@ -223,13 +235,15 @@ def db_compare_queries(sql1: str, sql2: str, compare_samples: bool = False) -> d
             "columns_missing_in_2": list(missing_in_2),
             "columns_missing_in_1": list(missing_in_1),
             "type_mismatches": type_mismatches,
+            "database1": database1 or registry.get_default_name(),
+            "database2": database2 or database1 or registry.get_default_name(),
         }
         
         # Compare samples if requested
         if compare_samples:
             try:
-                samples1 = backend.preview(sql1, 10)
-                samples2 = backend.preview(sql2, 10)
+                samples1 = backend1.preview(sql1, 10)
+                samples2 = backend2.preview(sql2, 10)
                 result["sample_differences"] = {
                     "samples_1_count": len(samples1),
                     "samples_2_count": len(samples2),
@@ -247,14 +261,18 @@ def db_compare_queries(sql1: str, sql2: str, compare_samples: bool = False) -> d
 
 
 @mcp.tool()
-def db_list_tables() -> dict[str, Any]:
+def db_list_tables(database: str | None = None) -> dict[str, Any]:
     """
     List all tables in the database with metadata.
+    
+    Args:
+        database: Name of the database backend to use (optional, uses default if not specified)
     
     Returns:
         Dictionary with "tables" key containing list of table metadata
     """
-    backend = get_backend_instance()
+    registry = get_registry()
+    backend = registry.get(database)
     
     try:
         tables = backend.list_tables()
@@ -264,14 +282,18 @@ def db_list_tables() -> dict[str, Any]:
 
 
 @mcp.tool()
-def db_list_views() -> dict[str, Any]:
+def db_list_views(database: str | None = None) -> dict[str, Any]:
     """
     List all views in the database with their SQL definitions.
+    
+    Args:
+        database: Name of the database backend to use (optional, uses default if not specified)
     
     Returns:
         Dictionary with "views" key containing list of view metadata
     """
-    backend = get_backend_instance()
+    registry = get_registry()
+    backend = registry.get(database)
     
     try:
         views = backend.list_views()
@@ -281,20 +303,50 @@ def db_list_views() -> dict[str, Any]:
 
 
 @mcp.tool()
-def db_verify_readonly() -> dict[str, Any]:
+def db_verify_readonly(database: str | None = None) -> dict[str, Any]:
     """
     Verify that the database connection is read-only.
     
     Can be called by agents to confirm safety before performing operations.
     
+    Args:
+        database: Name of the database backend to use (optional, uses default if not specified)
+    
     Returns:
         Dictionary with "readonly" boolean and "details" string
     """
-    backend = get_backend_instance()
+    registry = get_registry()
+    backend = registry.get(database)
     
     try:
         result = backend.verify_readonly()
         return result
     except Exception as e:
         return {"readonly": False, "details": f"Error during verification: {str(e)}"}
+
+
+@mcp.tool()
+def db_list_databases() -> dict[str, Any]:
+    """
+    List all available database backends that have been configured.
+    
+    Returns:
+        Dictionary with "databases" key containing list of database names and default indicator
+    """
+    registry = get_registry()
+    backend_names = registry.list_backends()
+    default_name = registry.get_default_name()
+    
+    databases = [
+        {
+            "name": name,
+            "is_default": name == default_name
+        }
+        for name in backend_names
+    ]
+    
+    return {
+        "databases": databases,
+        "default": default_name
+    }
 

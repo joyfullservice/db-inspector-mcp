@@ -2,8 +2,8 @@
 
 import sys
 
-from .config import get_backend, get_config
-from .tools import mcp, set_backend
+from .backends.registry import get_registry
+from .config import get_config, initialize_backends
 
 
 def main() -> None:
@@ -11,32 +11,43 @@ def main() -> None:
     # Load configuration
     config = get_config()
     
-    # Initialize backend
+    # Initialize backends (supports both single and multi-database configurations)
     try:
-        backend = get_backend()
-        set_backend(backend)
+        registry = initialize_backends()
+        backends = registry.list_backends()
+        default_name = registry.get_default_name()
+        
+        print(f"Initialized {len(backends)} database backend(s): {', '.join(backends)}", file=sys.stderr)
+        if default_name:
+            print(f"Default backend: {default_name}", file=sys.stderr)
     except ValueError as e:
         print(f"Configuration error: {e}", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
-        print(f"Failed to initialize database backend: {e}", file=sys.stderr)
+        print(f"Failed to initialize database backends: {e}", file=sys.stderr)
         sys.exit(1)
     
     # Verify read-only if enabled
     verify_readonly = config.get("DB_VERIFY_READONLY", "true").lower() == "true"
     if verify_readonly:
-        try:
-            result = backend.verify_readonly()
-            readonly_status = "✓ Read-only" if result["readonly"] else "⚠ Write permissions detected"
-            print(f"{readonly_status}: {result['details']}", file=sys.stderr)
-            
-            # Check if we should fail on write permissions
-            fail_on_write = config.get("DB_READONLY_FAIL_ON_WRITE", "false").lower() == "true"
-            if not result["readonly"] and fail_on_write:
-                print("Failing startup due to write permissions (DB_READONLY_FAIL_ON_WRITE=true)", file=sys.stderr)
-                sys.exit(1)
-        except Exception as e:
-            print(f"Warning: Could not verify read-only status: {e}", file=sys.stderr)
+        fail_on_write = config.get("DB_READONLY_FAIL_ON_WRITE", "false").lower() == "true"
+        
+        for backend_name in backends:
+            try:
+                backend = registry.get(backend_name)
+                result = backend.verify_readonly()
+                readonly_status = "✓ Read-only" if result["readonly"] else "⚠ Write permissions detected"
+                print(f"[{backend_name}] {readonly_status}: {result['details']}", file=sys.stderr)
+                
+                # Check if we should fail on write permissions
+                if not result["readonly"] and fail_on_write:
+                    print(f"Failing startup due to write permissions on '{backend_name}' (DB_READONLY_FAIL_ON_WRITE=true)", file=sys.stderr)
+                    sys.exit(1)
+            except Exception as e:
+                print(f"Warning: Could not verify read-only status for '{backend_name}': {e}", file=sys.stderr)
+    
+    # Import mcp here to avoid circular imports
+    from .tools import mcp
     
     # Run the MCP server
     mcp.run(transport="stdio")
