@@ -20,7 +20,8 @@ def db_row_count(sql: str, database: str | None = None) -> dict[str, Any]:
     
     Args:
         sql: SQL SELECT query to count rows for
-        database: Name of the database backend to use (optional, uses default if not specified)
+        database: Name of the database to use. Use db_list_databases() to discover
+                  available database names. If not specified, uses the default database.
         
     Returns:
         Dictionary with "count" key containing the row count
@@ -32,6 +33,9 @@ def db_row_count(sql: str, database: str | None = None) -> dict[str, Any]:
     try:
         count = backend.get_row_count(sql)
         return {"count": count}
+    except ValueError as e:
+        # Re-raise ValueError from registry (includes available backends)
+        raise
     except Exception as e:
         return {"error": str(e), "count": None}
 
@@ -43,7 +47,8 @@ def db_columns(sql: str, database: str | None = None) -> dict[str, Any]:
     
     Args:
         sql: SQL SELECT query to get columns for
-        database: Name of the database backend to use (optional, uses default if not specified)
+        database: Name of the database to use. Use db_list_databases() to discover
+                  available database names. If not specified, uses the default database.
         
     Returns:
         Dictionary with "columns" key containing list of column metadata
@@ -55,6 +60,9 @@ def db_columns(sql: str, database: str | None = None) -> dict[str, Any]:
     try:
         columns = backend.get_columns(sql)
         return {"columns": columns}
+    except ValueError as e:
+        # Re-raise ValueError from registry (includes available backends)
+        raise
     except Exception as e:
         return {"error": str(e), "columns": []}
 
@@ -67,7 +75,8 @@ def db_sum_column(sql: str, column: str, database: str | None = None) -> dict[st
     Args:
         sql: SQL SELECT query to sum a column from
         column: Column name to sum
-        database: Name of the database backend to use (optional, uses default if not specified)
+        database: Name of the database to use. Use db_list_databases() to discover
+                  available database names. If not specified, uses the default database.
         
     Returns:
         Dictionary with "sum" key containing the sum value (or None)
@@ -79,6 +88,9 @@ def db_sum_column(sql: str, column: str, database: str | None = None) -> dict[st
     try:
         sum_val = backend.sum_column(sql, column)
         return {"sum": sum_val}
+    except ValueError as e:
+        # Re-raise ValueError from registry (includes available backends)
+        raise
     except Exception as e:
         return {"error": str(e), "sum": None}
 
@@ -91,7 +103,8 @@ def db_measure_query(sql: str, max_rows: int = 1000, database: str | None = None
     Args:
         sql: SQL SELECT query to measure
         max_rows: Maximum number of rows to retrieve (default: 1000)
-        database: Name of the database backend to use (optional, uses default if not specified)
+        database: Name of the database to use. Use db_list_databases() to discover
+                  available database names. If not specified, uses the default database.
         
     Returns:
         Dictionary with execution_time_ms, row_count, and hit_limit
@@ -103,6 +116,9 @@ def db_measure_query(sql: str, max_rows: int = 1000, database: str | None = None
     try:
         result = backend.measure_query(sql, max_rows)
         return result
+    except ValueError as e:
+        # Re-raise ValueError from registry (includes available backends)
+        raise
     except Exception as e:
         return {"error": str(e), "execution_time_ms": None, "row_count": 0, "hit_limit": False}
 
@@ -112,12 +128,13 @@ def db_preview(sql: str, max_rows: int = 100, database: str | None = None) -> di
     """
     Sample N rows from a query result.
     
-    Requires data access permission (DB_ALLOW_DATA_ACCESS or DB_ALLOW_PREVIEW).
+    Requires data access permission (DB_MCP_ALLOW_DATA_ACCESS or DB_MCP_ALLOW_PREVIEW).
     
     Args:
         sql: SQL SELECT query to preview
         max_rows: Maximum number of rows to return (default: 100)
-        database: Name of the database backend to use (optional, uses default if not specified)
+        database: Name of the database to use. Use db_list_databases() to discover
+                  available database names. If not specified, uses the default database.
         
     Returns:
         Dictionary with "rows" key containing list of row dictionaries
@@ -132,6 +149,9 @@ def db_preview(sql: str, max_rows: int = 100, database: str | None = None) -> di
         return {"rows": rows}
     except PermissionError:
         raise  # Re-raise permission errors
+    except ValueError as e:
+        # Re-raise ValueError from registry (includes available backends)
+        raise
     except Exception as e:
         return {"error": str(e), "rows": []}
 
@@ -143,7 +163,8 @@ def db_explain(sql: str, database: str | None = None) -> dict[str, Any]:
     
     Args:
         sql: SQL SELECT query to explain
-        database: Name of the database backend to use (optional, uses default if not specified)
+        database: Name of the database to use. Use db_list_databases() to discover
+                  available database names. If not specified, uses the default database.
         
     Returns:
         Dictionary with "plan" key containing execution plan as string
@@ -155,6 +176,9 @@ def db_explain(sql: str, database: str | None = None) -> dict[str, Any]:
     try:
         plan = backend.explain_query(sql)
         return {"plan": plan}
+    except ValueError as e:
+        # Re-raise ValueError from registry (includes available backends)
+        raise
     except Exception as e:
         return {"error": str(e), "plan": None}
 
@@ -170,16 +194,17 @@ def db_compare_queries(
     """
     Compare two queries side-by-side, optionally from different databases.
     
-    This is especially useful for migration scenarios where you want to compare
-    a query from a source database (e.g., Access) with a query from a destination
-    database (e.g., SQL Server) to ensure they produce matching results.
+    This is useful for comparing queries across databases (e.g., during migrations,
+    testing, or validation). Use db_list_databases() to discover available database names.
     
     Args:
         sql1: First SQL SELECT query to compare
         sql2: Second SQL SELECT query to compare
         compare_samples: If True, compare sample data (requires data access permission)
-        database1: Name of the database backend for sql1 (optional, uses default if not specified)
-        database2: Name of the database backend for sql2 (optional, uses database1 if not specified)
+        database1: Name of the database for sql1. Use db_list_databases() to discover
+                   available names. If not specified, uses the default database.
+        database2: Name of the database for sql2. Use db_list_databases() to discover
+                    available names. If not specified, uses database1 (same database comparison).
         
     Returns:
         Dictionary with row_count_diff, column_differences, and optionally sample_differences
@@ -256,6 +281,9 @@ def db_compare_queries(
         
     except PermissionError:
         raise  # Re-raise permission errors
+    except ValueError as e:
+        # Re-raise ValueError from registry (includes available backends)
+        raise
     except Exception as e:
         return {"error": str(e)}
 
@@ -266,7 +294,8 @@ def db_list_tables(database: str | None = None) -> dict[str, Any]:
     List all tables in the database with metadata.
     
     Args:
-        database: Name of the database backend to use (optional, uses default if not specified)
+        database: Name of the database to use. Use db_list_databases() to discover
+                  available database names. If not specified, uses the default database.
     
     Returns:
         Dictionary with "tables" key containing list of table metadata
@@ -277,6 +306,9 @@ def db_list_tables(database: str | None = None) -> dict[str, Any]:
     try:
         tables = backend.list_tables()
         return {"tables": tables}
+    except ValueError as e:
+        # Re-raise ValueError from registry (includes available backends)
+        raise
     except Exception as e:
         return {"error": str(e), "tables": []}
 
@@ -287,7 +319,8 @@ def db_list_views(database: str | None = None) -> dict[str, Any]:
     List all views in the database with their SQL definitions.
     
     Args:
-        database: Name of the database backend to use (optional, uses default if not specified)
+        database: Name of the database to use. Use db_list_databases() to discover
+                  available database names. If not specified, uses the default database.
     
     Returns:
         Dictionary with "views" key containing list of view metadata
@@ -298,6 +331,9 @@ def db_list_views(database: str | None = None) -> dict[str, Any]:
     try:
         views = backend.list_views()
         return {"views": views}
+    except ValueError as e:
+        # Re-raise ValueError from registry (includes available backends)
+        raise
     except Exception as e:
         return {"error": str(e), "views": []}
 
@@ -310,7 +346,8 @@ def db_verify_readonly(database: str | None = None) -> dict[str, Any]:
     Can be called by agents to confirm safety before performing operations.
     
     Args:
-        database: Name of the database backend to use (optional, uses default if not specified)
+        database: Name of the database to use. Use db_list_databases() to discover
+                  available database names. If not specified, uses the default database.
     
     Returns:
         Dictionary with "readonly" boolean and "details" string
@@ -321,6 +358,9 @@ def db_verify_readonly(database: str | None = None) -> dict[str, Any]:
     try:
         result = backend.verify_readonly()
         return result
+    except ValueError as e:
+        # Re-raise ValueError from registry (includes available backends)
+        raise
     except Exception as e:
         return {"readonly": False, "details": f"Error during verification: {str(e)}"}
 
@@ -330,8 +370,12 @@ def db_list_databases() -> dict[str, Any]:
     """
     List all available database backends that have been configured.
     
+    IMPORTANT: Call this tool first to discover available database names before using
+    other tools. Database names are user-defined and configured via environment variables.
+    
     Returns:
-        Dictionary with "databases" key containing list of database names and default indicator
+        Dictionary with "databases" key containing list of database names and default indicator.
+        Each database entry has "name" and "is_default" fields.
     """
     registry = get_registry()
     backend_names = registry.list_backends()

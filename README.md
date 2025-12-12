@@ -83,13 +83,17 @@ cp .env.example .env
 
 | Variable | Description | Default | Required |
 |----------|-------------|---------|----------|
-| `DB_BACKEND` | Database backend: `sqlserver`, `postgres`, or `access` | - | Yes* |
-| `DB_CONNECTION_STRING` | Database connection string | - | Yes |
-| `DB_QUERY_TIMEOUT_SECONDS` | Query timeout in seconds | `30` | No |
-| `DB_ALLOW_DATA_ACCESS` | Global flag to enable data access tools | `false` | No |
-| `DB_ALLOW_PREVIEW` | Per-tool override for `db_preview` | `false` | No |
-| `DB_VERIFY_READONLY` | Verify read-only at startup | `true` | No |
-| `DB_READONLY_FAIL_ON_WRITE` | Fail startup if write permissions detected | `false` | No |
+| `DB_MCP_DATABASE` | Database type: `sqlserver`, `postgres`, or `access` (single database) | - | Yes* |
+| `DB_MCP_CONNECTION_STRING` | Database connection string (single database) | - | Yes* |
+| `DB_MCP_<name>_DATABASE` | Database type for named database (multi-database) | - | Yes* |
+| `DB_MCP_<name>_CONNECTION_STRING` | Connection string for named database (multi-database) | - | Yes* |
+| `DB_MCP_QUERY_TIMEOUT_SECONDS` | Query timeout in seconds | `30` | No |
+| `DB_MCP_ALLOW_DATA_ACCESS` | Global flag to enable data access tools | `false` | No |
+| `DB_MCP_ALLOW_PREVIEW` | Per-tool override for `db_preview` | `false` | No |
+| `DB_MCP_VERIFY_READONLY` | Verify read-only at startup | `true` | No |
+| `DB_MCP_READONLY_FAIL_ON_WRITE` | Fail startup if write permissions detected | `false` | No |
+
+*Required for single-database configuration (`DB_MCP_DATABASE`/`DB_MCP_CONNECTION_STRING`) or multi-database configuration (`DB_MCP_<name>_DATABASE`/`DB_MCP_<name>_CONNECTION_STRING`).
 
 ### Connection Strings
 
@@ -97,73 +101,177 @@ cp .env.example .env
 
 ```bash
 # Using ODBC connection string
-DB_CONNECTION_STRING="Driver={ODBC Driver 17 for SQL Server};Server=localhost;Database=mydb;UID=user;PWD=password"
+DB_MCP_CONNECTION_STRING="Driver={ODBC Driver 17 for SQL Server};Server=localhost;Database=mydb;UID=user;PWD=password"
 
 # Or using DSN
-DB_CONNECTION_STRING="DSN=MySQLServerDSN"
+DB_MCP_CONNECTION_STRING="DSN=MySQLServerDSN"
 ```
 
 #### PostgreSQL
 
 ```bash
 # Using connection string format
-DB_CONNECTION_STRING="dbname=mydb user=postgres password=secret host=localhost port=5432"
+DB_MCP_CONNECTION_STRING="dbname=mydb user=postgres password=secret host=localhost port=5432"
 ```
 
 #### Microsoft Access
 
 ```bash
 # Using ODBC connection string (for .accdb files)
-DB_CONNECTION_STRING="Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\path\\to\\database.accdb;"
+DB_MCP_CONNECTION_STRING="Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\path\\to\\database.accdb;"
 
 # For .mdb files
-DB_CONNECTION_STRING="Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\path\\to\\database.mdb;"
+DB_MCP_CONNECTION_STRING="Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\path\\to\\database.mdb;"
 ```
 
 ### Multi-Database Configuration
 
-The tool supports connecting to multiple databases simultaneously, which is especially useful for migration scenarios where you need to compare queries between a source database (e.g., Access) and a destination database (e.g., SQL Server).
+The tool supports connecting to multiple databases simultaneously, which is useful for migration scenarios, refactoring validation, testing, and feature development.
 
 #### Configuration Pattern
 
-Use the pattern `DB_<name>_BACKEND` and `DB_<name>_CONNECTION_STRING` to configure multiple databases:
+Use the pattern `DB_MCP_<name>_DATABASE` and `DB_MCP_<name>_CONNECTION_STRING` to configure multiple databases:
 
 ```bash
-# Source database (Access)
-DB_SOURCE_BACKEND=access
-DB_SOURCE_CONNECTION_STRING="Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\path\\to\\source.accdb;"
+# Example: Migration scenario (Access to SQL Server)
+DB_MCP_LEGACY_DATABASE=access
+DB_MCP_LEGACY_CONNECTION_STRING="Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\path\\to\\legacy.accdb;"
 
-# Destination database (SQL Server)
-DB_DEST_BACKEND=sqlserver
-DB_DEST_CONNECTION_STRING="Driver={ODBC Driver 17 for SQL Server};Server=localhost;Database=mydb;UID=user;PWD=password"
+DB_MCP_NEW_DATABASE=sqlserver
+DB_MCP_NEW_CONNECTION_STRING="Driver={ODBC Driver 17 for SQL Server};Server=localhost;Database=mydb;UID=user;PWD=password"
 ```
 
-The first database configured (or one named "default") becomes the default backend. You can also use the legacy single-database configuration for backward compatibility:
+You can name databases according to your use case:
+- **Migration**: `legacy`/`new`, `old`/`refactored`
+- **Testing**: `prod`/`dev`, `staging`/`test`
+- **Versioning**: `v1`/`v2`, `before`/`after`
 
-```bash
-# Legacy single-database configuration (registered as "default")
-DB_BACKEND=sqlserver
-DB_CONNECTION_STRING="Driver={ODBC Driver 17 for SQL Server};Server=localhost;Database=mydb;UID=user;PWD=password"
-```
+The first database configured (or one named "default") becomes the default database.
 
 #### Using Multiple Databases in MCP
 
-When multiple databases are configured, all tools accept an optional `database` parameter to specify which backend to use:
+When multiple databases are configured, all tools accept an optional `database` parameter to specify which database to use:
 
 ```python
-# Query the source database
-db_row_count("SELECT * FROM customers", database="source")
+# Query the legacy database
+db_row_count("SELECT * FROM customers", database="legacy")
 
-# Query the destination database
-db_row_count("SELECT * FROM customers", database="dest")
+# Query the new database
+db_row_count("SELECT * FROM customers", database="new")
 
 # Compare queries across databases
 db_compare_queries(
     "SELECT * FROM customers WHERE active = 1",
     "SELECT * FROM customers WHERE status = 'active'",
-    database1="source",
-    database2="dest"
+    database1="legacy",
+    database2="new"
 )
+```
+
+**Important**: Call `db_list_databases()` first to discover available database names.
+
+## Project-Specific Configuration
+
+This tool supports per-project database configurations, similar to how git works - same commands, different repositories per project. This enables a hybrid approach where non-sensitive settings are in version-controlled `.cursor/mcp.json` and credentials are in gitignored `.env` files.
+
+### Why `DB_MCP_` Prefix?
+
+All environment variables use the `DB_MCP_` prefix to avoid collisions with other database-related variables (like `DB_HOST`, `DB_NAME`, etc.) that might already exist in your project's `.env` file. This allows the tool to coexist peacefully with other database configurations.
+
+### Why `_DATABASE` Suffix?
+
+The `_DATABASE` suffix (instead of `_BACKEND`) makes it clearer that you're configuring a database connection, not an internal backend component.
+
+### Configuration Pattern
+
+#### `.cursor/mcp.json` (Version Controlled)
+
+Store non-sensitive settings that can be shared with your team:
+
+```json
+{
+  "mcpServers": {
+    "db-inspector-mcp": {
+      "command": "db-inspector-mcp",
+      "env": {
+        "DB_MCP_QUERY_TIMEOUT_SECONDS": "30",
+        "DB_MCP_ALLOW_DATA_ACCESS": "false",
+        "DB_MCP_VERIFY_READONLY": "true"
+      }
+    }
+  }
+}
+```
+
+#### `.env` (Gitignored, Project-Specific)
+
+Store sensitive credentials and project-specific database connections:
+
+```bash
+# Single database configuration
+DB_MCP_DATABASE=sqlserver
+DB_MCP_CONNECTION_STRING=Driver={ODBC Driver 17 for SQL Server};Server=localhost;Database=mydb;UID=user;PWD=password
+
+# Or multi-database configuration
+DB_MCP_LEGACY_DATABASE=access
+DB_MCP_LEGACY_CONNECTION_STRING=Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\path\to\legacy.accdb;
+
+DB_MCP_NEW_DATABASE=sqlserver
+DB_MCP_NEW_CONNECTION_STRING=Driver={ODBC Driver 17 for SQL Server};Server=localhost;Database=mydb;UID=user;PWD=password
+```
+
+#### `.env.local` (Optional, Gitignored)
+
+For personal overrides that shouldn't affect the team:
+
+```bash
+# Override timeout for local development
+DB_MCP_QUERY_TIMEOUT_SECONDS=60
+```
+
+### Environment Variable Precedence
+
+1. **MCP server `env` section** (highest priority) - values in `.cursor/mcp.json` take precedence
+2. **`.env.local`** - personal overrides
+3. **`.env`** - project-specific configuration (lowest priority)
+
+This allows `.cursor/mcp.json` to override `.env` values when needed.
+
+### Use Case Examples
+
+#### Migration Scenario
+
+```bash
+# .env
+DB_MCP_LEGACY_DATABASE=access
+DB_MCP_LEGACY_CONNECTION_STRING=Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\path\to\legacy.accdb;
+
+DB_MCP_NEW_DATABASE=sqlserver
+DB_MCP_NEW_CONNECTION_STRING=Driver={ODBC Driver 17 for SQL Server};Server=localhost;Database=mydb;UID=user;PWD=password
+```
+
+#### Refactoring Validation
+
+```bash
+# .env - same database, different queries
+DB_MCP_PROD_DATABASE=sqlserver
+DB_MCP_PROD_CONNECTION_STRING=Driver={ODBC Driver 17 for SQL Server};Server=prod;Database=mydb;UID=user;PWD=password
+```
+
+Use `db_compare_queries()` to compare old and new query versions on the same database.
+
+#### Multi-Environment Testing
+
+```bash
+# .env
+DB_MCP_DEV_DATABASE=sqlserver
+DB_MCP_DEV_CONNECTION_STRING=Driver={ODBC Driver 17 for SQL Server};Server=dev;Database=mydb;UID=user;PWD=password
+
+DB_MCP_STAGING_DATABASE=sqlserver
+DB_MCP_STAGING_CONNECTION_STRING=Driver={ODBC Driver 17 for SQL Server};Server=staging;Database=mydb;UID=user;PWD=password
+
+DB_MCP_PROD_DATABASE=sqlserver
+DB_MCP_PROD_CONNECTION_STRING=Driver={ODBC Driver 17 for SQL Server};Server=prod;Database=mydb;UID=user;PWD=password
 ```
 
 ## MCP Integration
@@ -180,18 +288,23 @@ Add to `.cursor/mcp.json`:
     "db-inspector-mcp": {
       "command": "db-inspector-mcp",
       "env": {
-        "DB_BACKEND": "sqlserver",
-        "DB_CONNECTION_STRING": "Driver={ODBC Driver 17 for SQL Server};Server=localhost;Database=mydb;UID=user;PWD=password",
-        "DB_QUERY_TIMEOUT_SECONDS": "30",
-        "DB_ALLOW_DATA_ACCESS": "false",
-        "DB_VERIFY_READONLY": "true"
+        "DB_MCP_QUERY_TIMEOUT_SECONDS": "30",
+        "DB_MCP_ALLOW_DATA_ACCESS": "false",
+        "DB_MCP_VERIFY_READONLY": "true"
       }
     }
   }
 }
 ```
 
-#### Multi-Database Configuration (Migration Scenario)
+Then add credentials to `.env`:
+
+```bash
+DB_MCP_DATABASE=sqlserver
+DB_MCP_CONNECTION_STRING=Driver={ODBC Driver 17 for SQL Server};Server=localhost;Database=mydb;UID=user;PWD=password
+```
+
+#### Multi-Database Configuration
 
 For migration scenarios where you need to compare Access and SQL Server:
 
@@ -201,17 +314,23 @@ For migration scenarios where you need to compare Access and SQL Server:
     "db-inspector-mcp": {
       "command": "db-inspector-mcp",
       "env": {
-        "DB_SOURCE_BACKEND": "access",
-        "DB_SOURCE_CONNECTION_STRING": "Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\path\\to\\source.accdb;",
-        "DB_DEST_BACKEND": "sqlserver",
-        "DB_DEST_CONNECTION_STRING": "Driver={ODBC Driver 17 for SQL Server};Server=localhost;Database=mydb;UID=user;PWD=password",
-        "DB_QUERY_TIMEOUT_SECONDS": "30",
-        "DB_ALLOW_DATA_ACCESS": "true",
-        "DB_VERIFY_READONLY": "true"
+        "DB_MCP_QUERY_TIMEOUT_SECONDS": "30",
+        "DB_MCP_ALLOW_DATA_ACCESS": "true",
+        "DB_MCP_VERIFY_READONLY": "true"
       }
     }
   }
 }
+```
+
+Then add database connections to `.env`:
+
+```bash
+DB_MCP_LEGACY_DATABASE=access
+DB_MCP_LEGACY_CONNECTION_STRING=Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\path\to\legacy.accdb;
+
+DB_MCP_NEW_DATABASE=sqlserver
+DB_MCP_NEW_CONNECTION_STRING=Driver={ODBC Driver 17 for SQL Server};Server=localhost;Database=mydb;UID=user;PWD=password
 ```
 
 ### Claude Code Integration
@@ -224,13 +343,19 @@ Add to your Claude Code MCP configuration (similar format):
     "db-inspector-mcp": {
       "command": "db-inspector-mcp",
       "env": {
-        "DB_BACKEND": "postgres",
-        "DB_CONNECTION_STRING": "dbname=mydb user=postgres password=secret host=localhost port=5432",
-        "DB_ALLOW_DATA_ACCESS": "false"
+        "DB_MCP_QUERY_TIMEOUT_SECONDS": "30",
+        "DB_MCP_ALLOW_DATA_ACCESS": "false"
       }
     }
   }
 }
+```
+
+Then add credentials to `.env`:
+
+```bash
+DB_MCP_DATABASE=postgres
+DB_MCP_CONNECTION_STRING=dbname=mydb user=postgres password=secret host=localhost port=5432
 ```
 
 ## Available Tools
@@ -469,24 +594,28 @@ If write permissions are detected:
 When migrating queries from one database system to another (e.g., Access to SQL Server), use multi-database support to validate that the migrated query produces matching results:
 
 ```python
-# 1. Get schema information from source database
-source_columns = db_columns("SELECT * FROM customers WHERE active = 1", database="source")
-source_count = db_row_count("SELECT * FROM customers WHERE active = 1", database="source")
-source_sum = db_sum_column("SELECT * FROM customers WHERE active = 1", "revenue", database="source")
+# 1. Discover available databases
+databases = db_list_databases()
+# Returns: {"databases": [{"name": "legacy", "is_default": True}, {"name": "new", "is_default": False}]}
 
-# 2. Build and test query on destination database
-dest_columns = db_columns("SELECT * FROM customers WHERE status = 'active'", database="dest")
+# 2. Get schema information from legacy database
+legacy_columns = db_columns("SELECT * FROM customers WHERE active = 1", database="legacy")
+legacy_count = db_row_count("SELECT * FROM customers WHERE active = 1", database="legacy")
+legacy_sum = db_sum_column("SELECT * FROM customers WHERE active = 1", "revenue", database="legacy")
 
-# 3. Compare queries across databases
+# 3. Build and test query on new database
+new_columns = db_columns("SELECT * FROM customers WHERE status = 'active'", database="new")
+
+# 4. Compare queries across databases
 comparison = db_compare_queries(
     "SELECT * FROM customers WHERE active = 1",  # Access query
     "SELECT * FROM customers WHERE status = 'active'",  # SQL Server query
-    database1="source",
-    database2="dest",
+    database1="legacy",
+    database2="new",
     compare_samples=True
 )
 
-# 4. Iterate until row counts, columns, and samples match
+# 5. Iterate until row counts, columns, and samples match
 if comparison["row_count_diff"] == 0 and not comparison["type_mismatches"]:
     print("Migration successful! Queries produce matching results.")
 ```
@@ -505,11 +634,11 @@ db_compare_queries(
 )
 
 # Validate aggregates
-db_sum_column("SELECT amount FROM transactions", "amount", database="source")
-db_sum_column("SELECT amount FROM transactions", "amount", database="dest")
+db_sum_column("SELECT amount FROM transactions", "amount", database="legacy")
+db_sum_column("SELECT amount FROM transactions", "amount", database="new")
 
 # Spot-check samples (requires permission)
-db_preview("SELECT * FROM source ORDER BY id", max_rows=10, database="source")
+db_preview("SELECT * FROM transactions ORDER BY id", max_rows=10, database="legacy")
 ```
 
 ### Breaking Change Detection
@@ -599,8 +728,8 @@ Before running the MCP server, verify your database connection:
 
 ```bash
 # Set environment variables (or use .env file)
-$env:DB_BACKEND = "sqlserver"  # or "postgres"
-$env:DB_CONNECTION_STRING = "your-connection-string"
+$env:DB_MCP_DATABASE = "sqlserver"  # or "postgres", "access"
+$env:DB_MCP_CONNECTION_STRING = "your-connection-string"
 
 # Test the connection (will show configuration error if connection string is missing)
 db-inspector-mcp

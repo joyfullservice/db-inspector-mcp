@@ -84,13 +84,13 @@ def check_data_access_permission(tool_name: str, config: dict[str, Any]) -> bool
         return True
     
     # Check global flag first
-    allow_data_access = config.get("DB_ALLOW_DATA_ACCESS", "false").lower() == "true"
+    allow_data_access = config.get("DB_MCP_ALLOW_DATA_ACCESS", "false").lower() == "true"
     if allow_data_access:
         return True
     
     # Check per-tool override
     if tool_name == "db_preview":
-        allow_preview = config.get("DB_ALLOW_PREVIEW", "false").lower() == "true"
+        allow_preview = config.get("DB_MCP_ALLOW_PREVIEW", "false").lower() == "true"
         if allow_preview:
             return True
     
@@ -110,11 +110,11 @@ def get_permission_error_message(tool_name: str) -> str:
     if tool_name == "db_preview":
         return (
             "Data access not authorized. "
-            "Set DB_ALLOW_DATA_ACCESS=true or DB_ALLOW_PREVIEW=true to enable db_preview."
+            "Set DB_MCP_ALLOW_DATA_ACCESS=true or DB_MCP_ALLOW_PREVIEW=true to enable db_preview."
         )
     
     return (
         f"Data access not authorized for {tool_name}. "
-        "Set DB_ALLOW_DATA_ACCESS=true to enable data access tools."
+        "Set DB_MCP_ALLOW_DATA_ACCESS=true to enable data access tools."
     )
 

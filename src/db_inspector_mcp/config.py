@@ -1,7 +1,10 @@
 """Configuration management for db-inspector-mcp."""
 
 import os
+from pathlib import Path
 from typing import Any
+
+from dotenv import load_dotenv
 
 from .backends.access import AccessBackend
 from .backends.base import DatabaseBackend
@@ -11,21 +14,51 @@ from .backends.registry import BackendRegistry, get_registry
 from .security import check_data_access_permission, get_permission_error_message
 
 
+def _load_env_files() -> None:
+    """
+    Load .env files from the current working directory (project root).
+    
+    Loads in order:
+    1. .env (base configuration)
+    2. .env.local (local overrides, if exists)
+    
+    Environment variables already set (e.g., from MCP server env section) take precedence.
+    """
+    # Get current working directory (project root)
+    cwd = Path.cwd()
+    
+    # Load .env file if it exists
+    env_path = cwd / ".env"
+    if env_path.exists():
+        load_dotenv(env_path, override=False)
+    
+    # Load .env.local if it exists (takes precedence over .env)
+    env_local_path = cwd / ".env.local"
+    if env_local_path.exists():
+        load_dotenv(env_local_path, override=True)
+
+
 def load_config() -> dict[str, Any]:
     """
     Load configuration from environment variables.
     
+    Automatically loads .env and .env.local files from the project root.
+    Environment variables passed via MCP server env section take precedence.
+    
     Returns:
         Dictionary with configuration values
     """
+    # Load .env files first (if not already loaded)
+    _load_env_files()
+    
     return {
-        "DB_BACKEND": os.getenv("DB_BACKEND", "").lower(),
-        "DB_CONNECTION_STRING": os.getenv("DB_CONNECTION_STRING", ""),
-        "DB_QUERY_TIMEOUT_SECONDS": int(os.getenv("DB_QUERY_TIMEOUT_SECONDS", "30")),
-        "DB_ALLOW_DATA_ACCESS": os.getenv("DB_ALLOW_DATA_ACCESS", "false"),
-        "DB_ALLOW_PREVIEW": os.getenv("DB_ALLOW_PREVIEW", "false"),
-        "DB_VERIFY_READONLY": os.getenv("DB_VERIFY_READONLY", "true"),
-        "DB_READONLY_FAIL_ON_WRITE": os.getenv("DB_READONLY_FAIL_ON_WRITE", "false"),
+        "DB_MCP_DATABASE": os.getenv("DB_MCP_DATABASE", "").lower(),
+        "DB_MCP_CONNECTION_STRING": os.getenv("DB_MCP_CONNECTION_STRING", ""),
+        "DB_MCP_QUERY_TIMEOUT_SECONDS": int(os.getenv("DB_MCP_QUERY_TIMEOUT_SECONDS", "30")),
+        "DB_MCP_ALLOW_DATA_ACCESS": os.getenv("DB_MCP_ALLOW_DATA_ACCESS", "false"),
+        "DB_MCP_ALLOW_PREVIEW": os.getenv("DB_MCP_ALLOW_PREVIEW", "false"),
+        "DB_MCP_VERIFY_READONLY": os.getenv("DB_MCP_VERIFY_READONLY", "true"),
+        "DB_MCP_READONLY_FAIL_ON_WRITE": os.getenv("DB_MCP_READONLY_FAIL_ON_WRITE", "false"),
     }
 
 
@@ -75,19 +108,19 @@ def get_backend() -> DatabaseBackend:
     """
     config = load_config()
     
-    backend_name = config["DB_BACKEND"]
-    connection_string = config["DB_CONNECTION_STRING"]
-    query_timeout = config["DB_QUERY_TIMEOUT_SECONDS"]
+    backend_name = config["DB_MCP_DATABASE"]
+    connection_string = config["DB_MCP_CONNECTION_STRING"]
+    query_timeout = config["DB_MCP_QUERY_TIMEOUT_SECONDS"]
     
     if not backend_name:
         raise ValueError(
-            "DB_BACKEND environment variable is required. "
-            "Set DB_BACKEND=sqlserver, postgres, or access"
+            "DB_MCP_DATABASE environment variable is required. "
+            "Set DB_MCP_DATABASE=sqlserver, postgres, or access"
         )
     
     if not connection_string:
         raise ValueError(
-            "DB_CONNECTION_STRING environment variable is required. "
+            "DB_MCP_CONNECTION_STRING environment variable is required. "
             "Provide a valid database connection string."
         )
     
@@ -99,19 +132,19 @@ def initialize_backends() -> BackendRegistry:
     Initialize multiple database backends from environment variables.
     
     Supports two configuration patterns:
-    1. Legacy single-database: DB_BACKEND, DB_CONNECTION_STRING (registered as "default")
-    2. Multi-database: DB_<name>_BACKEND, DB_<name>_CONNECTION_STRING for each database
+    1. Single database: DB_MCP_DATABASE, DB_MCP_CONNECTION_STRING (registered as "default")
+    2. Multi-database: DB_MCP_<name>_DATABASE, DB_MCP_<name>_CONNECTION_STRING for each database
     
     Examples:
-        # Single database (backward compatible)
-        DB_BACKEND=sqlserver
-        DB_CONNECTION_STRING=...
+        # Single database
+        DB_MCP_DATABASE=sqlserver
+        DB_MCP_CONNECTION_STRING=...
         
         # Multiple databases
-        DB_SOURCE_BACKEND=access
-        DB_SOURCE_CONNECTION_STRING=...
-        DB_DEST_BACKEND=sqlserver
-        DB_DEST_CONNECTION_STRING=...
+        DB_MCP_LEGACY_DATABASE=access
+        DB_MCP_LEGACY_CONNECTION_STRING=...
+        DB_MCP_NEW_DATABASE=sqlserver
+        DB_MCP_NEW_CONNECTION_STRING=...
         
     Returns:
         BackendRegistry with all configured backends
@@ -121,27 +154,27 @@ def initialize_backends() -> BackendRegistry:
     """
     registry = get_registry()
     config = load_config()
-    query_timeout = config["DB_QUERY_TIMEOUT_SECONDS"]
+    query_timeout = config["DB_MCP_QUERY_TIMEOUT_SECONDS"]
     
     # Collect all database configurations
     db_configs: dict[str, dict[str, str]] = {}
     
-    # Check for legacy single-database configuration
-    if config["DB_BACKEND"] and config["DB_CONNECTION_STRING"]:
+    # Check for single-database configuration
+    if config["DB_MCP_DATABASE"] and config["DB_MCP_CONNECTION_STRING"]:
         db_configs["default"] = {
-            "backend": config["DB_BACKEND"],
-            "connection_string": config["DB_CONNECTION_STRING"],
+            "backend": config["DB_MCP_DATABASE"],
+            "connection_string": config["DB_MCP_CONNECTION_STRING"],
         }
     
-    # Scan for multi-database configurations (DB_<name>_BACKEND pattern)
+    # Scan for multi-database configurations (DB_MCP_<name>_DATABASE pattern)
     env_vars = dict(os.environ)
     for key, value in env_vars.items():
-        if key.startswith("DB_") and key.endswith("_BACKEND"):
-            # Extract database name (e.g., "SOURCE" from "DB_SOURCE_BACKEND")
-            name_part = key[3:-7]  # Remove "DB_" prefix and "_BACKEND" suffix
+        if key.startswith("DB_MCP_") and key.endswith("_DATABASE"):
+            # Extract database name (e.g., "LEGACY" from "DB_MCP_LEGACY_DATABASE")
+            name_part = key[7:-8]  # Remove "DB_MCP_" prefix and "_DATABASE" suffix
             if name_part:
                 db_name = name_part.lower()
-                conn_key = f"DB_{name_part}_CONNECTION_STRING"
+                conn_key = f"DB_MCP_{name_part}_CONNECTION_STRING"
                 
                 if conn_key in env_vars:
                     db_configs[db_name] = {
@@ -152,8 +185,8 @@ def initialize_backends() -> BackendRegistry:
     if not db_configs:
         raise ValueError(
             "No database configuration found. "
-            "Set DB_BACKEND/DB_CONNECTION_STRING for single database, "
-            "or DB_<name>_BACKEND/DB_<name>_CONNECTION_STRING for multiple databases."
+            "Set DB_MCP_DATABASE/DB_MCP_CONNECTION_STRING for single database, "
+            "or DB_MCP_<name>_DATABASE/DB_MCP_<name>_CONNECTION_STRING for multiple databases."
         )
     
     # Register all backends

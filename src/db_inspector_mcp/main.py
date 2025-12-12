@@ -2,12 +2,25 @@
 
 import sys
 
+from dotenv import load_dotenv
+from pathlib import Path
+
 from .backends.registry import get_registry
 from .config import get_config, initialize_backends
 
 
 def main() -> None:
     """Main entry point for the MCP server."""
+    # Load .env files first (before any config access)
+    # This ensures .env values are available, but MCP server env vars take precedence
+    cwd = Path.cwd()
+    env_path = cwd / ".env"
+    if env_path.exists():
+        load_dotenv(env_path, override=False)
+    env_local_path = cwd / ".env.local"
+    if env_local_path.exists():
+        load_dotenv(env_local_path, override=True)
+    
     # Load configuration
     config = get_config()
     
@@ -28,9 +41,9 @@ def main() -> None:
         sys.exit(1)
     
     # Verify read-only if enabled
-    verify_readonly = config.get("DB_VERIFY_READONLY", "true").lower() == "true"
+    verify_readonly = config.get("DB_MCP_VERIFY_READONLY", "true").lower() == "true"
     if verify_readonly:
-        fail_on_write = config.get("DB_READONLY_FAIL_ON_WRITE", "false").lower() == "true"
+        fail_on_write = config.get("DB_MCP_READONLY_FAIL_ON_WRITE", "false").lower() == "true"
         
         for backend_name in backends:
             try:
@@ -41,7 +54,7 @@ def main() -> None:
                 
                 # Check if we should fail on write permissions
                 if not result["readonly"] and fail_on_write:
-                    print(f"Failing startup due to write permissions on '{backend_name}' (DB_READONLY_FAIL_ON_WRITE=true)", file=sys.stderr)
+                    print(f"Failing startup due to write permissions on '{backend_name}' (DB_MCP_READONLY_FAIL_ON_WRITE=true)", file=sys.stderr)
                     sys.exit(1)
             except Exception as e:
                 print(f"Warning: Could not verify read-only status for '{backend_name}': {e}", file=sys.stderr)
