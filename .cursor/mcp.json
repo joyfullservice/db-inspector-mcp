@@ -1,0 +1,12 @@
+﻿{
+  "mcpServers": {
+    "db-inspector-mcp": {
+      "command": "db-inspector-mcp",
+      "env": {
+        "DB_MCP_QUERY_TIMEOUT_SECONDS": "30",
+        "DB_MCP_ALLOW_DATA_ACCESS": "false",
+        "DB_MCP_VERIFY_READONLY": "true"
+      }
+    }
+  }
+}

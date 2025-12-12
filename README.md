@@ -77,6 +77,142 @@ cp .env.example .env
 # See Configuration section below for details
 ```
 
+## Quick Start
+
+Get up and running with db-inspector-mcp in Cursor in just a few steps:
+
+### Step 1: Install the Package
+
+Make sure the package is installed (if you haven't already):
+
+```bash
+pip install -e ".[dev]"
+```
+
+Verify the command is available:
+
+```bash
+db-inspector-mcp --help
+```
+
+### Step 2: Configure Cursor
+
+The MCP configuration file (`.cursor/mcp.json`) is already created in this repository. It contains the basic settings needed to connect the MCP server to Cursor.
+
+**Note:** If you're using this in a different project, create `.cursor/mcp.json` in your project root:
+
+```json
+{
+  "mcpServers": {
+    "db-inspector-mcp": {
+      "command": "db-inspector-mcp",
+      "env": {
+        "DB_MCP_QUERY_TIMEOUT_SECONDS": "30",
+        "DB_MCP_ALLOW_DATA_ACCESS": "false",
+        "DB_MCP_VERIFY_READONLY": "true"
+      }
+    }
+  }
+}
+```
+
+### Step 3: Set Up Your Database Connection
+
+Create a `.env` file in your project root with your database connection details:
+
+**For SQL Server:**
+```bash
+DB_MCP_DATABASE=sqlserver
+DB_MCP_CONNECTION_STRING=Driver={ODBC Driver 17 for SQL Server};Server=localhost;Database=mydb;UID=user;PWD=password
+```
+
+**For PostgreSQL:**
+```bash
+DB_MCP_DATABASE=postgres
+DB_MCP_CONNECTION_STRING=dbname=mydb user=postgres password=secret host=localhost port=5432
+```
+
+**For Microsoft Access:**
+```bash
+DB_MCP_DATABASE=access
+DB_MCP_CONNECTION_STRING=Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\path\\to\\database.accdb;
+```
+
+See the [Connection Strings](#connection-strings) section below for more details.
+
+### Step 4: Restart Cursor
+
+After creating the `.env` file:
+1. **Close Cursor completely** (not just the window - fully quit the application)
+2. **Reopen Cursor** in your project directory
+3. Cursor will automatically detect and load the MCP server
+
+### Step 5: Test the Tool
+
+Once Cursor restarts, the MCP tools will be available. You can test them by asking the AI assistant in Cursor to:
+
+- **List available databases:**
+  > "Can you list the available databases using db_list_databases?"
+
+- **Explore your database schema:**
+  > "What tables are in the database? Use db_list_tables"
+
+- **Query row counts:**
+  > "How many rows are in the users table? Use db_row_count with a SELECT query"
+
+- **Get column information:**
+  > "What are the columns in the users table? Use db_columns"
+
+- **Verify read-only status:**
+  > "Verify the database is read-only using db_verify_readonly"
+
+### Troubleshooting
+
+If the MCP server doesn't load:
+
+1. **Check MCP logs in Cursor:**
+   - Open Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`)
+   - Search for "MCP" or check the Output panel for MCP-related messages
+
+2. **Verify the command is available:**
+   - Run `db-inspector-mcp --help` in your terminal
+   - If it's not found, make sure the package is installed and the virtual environment is activated
+
+3. **Test the connection manually:**
+   ```powershell
+   # Set environment variables
+   $env:DB_MCP_DATABASE = "sqlserver"
+   $env:DB_MCP_CONNECTION_STRING = "your-connection-string"
+   
+   # Test the server (should show initialization messages)
+   db-inspector-mcp
+   ```
+
+4. **Check your `.env` file:**
+   - Make sure it's in the project root (same directory as `.cursor/mcp.json`)
+   - Verify the connection string format matches your database type
+   - Ensure there are no syntax errors
+
+5. **Alternative command format:**
+   If `db-inspector-mcp` isn't in your PATH, you can update `.cursor/mcp.json` to use Python directly:
+   ```json
+   {
+     "mcpServers": {
+       "db-inspector-mcp": {
+         "command": "python",
+         "args": ["-m", "db_inspector_mcp.main"],
+         "env": {
+           "DB_MCP_QUERY_TIMEOUT_SECONDS": "30",
+           "DB_MCP_ALLOW_DATA_ACCESS": "false",
+           "DB_MCP_VERIFY_READONLY": "true"
+         }
+       }
+     }
+   }
+   ```
+
+For more advanced configuration options, see the [Configuration](#configuration) section below.
+
 ## Configuration
 
 ### Environment Variables
