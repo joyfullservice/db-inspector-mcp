@@ -28,8 +28,15 @@ from .config import check_data_access, get_config
 from .security import validate_readonly_sql
 
 
-# Create FastMCP server instance
-mcp = FastMCP("db-inspector-mcp")
+# Create FastMCP server instance with proper metadata
+mcp = FastMCP(
+    name="db-inspector-mcp",
+    instructions=(
+        "A lightweight, extensible, cross-database MCP server for database introspection. "
+        "Provides read-only tools for exploring database schemas, validating queries, "
+        "and comparing databases. Supports SQL Server, PostgreSQL, and Microsoft Access."
+    )
+)
 
 
 @mcp.tool()
