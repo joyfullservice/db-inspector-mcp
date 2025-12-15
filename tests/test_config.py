@@ -80,3 +80,34 @@ def test_get_backend_postgres():
         backend = get_backend()
         assert backend.__class__.__name__ == "PostgresBackend"
 
+
+def test_get_backend_access_odbc():
+    """Test that Access ODBC backend is created."""
+    with patch.dict(
+        os.environ,
+        {
+            "DB_MCP_DATABASE": "access_odbc",
+            "DB_MCP_CONNECTION_STRING": "Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\test.accdb;",
+        },
+        clear=True,
+    ):
+        from db_inspector_mcp.config import _create_backend
+        backend = _create_backend("access_odbc", "test_connection_string", 30)
+        assert backend.__class__.__name__ == "AccessODBCBackend"
+
+
+def test_get_backend_access_com():
+    """Test that Access COM backend is created."""
+    with patch.dict(
+        os.environ,
+        {
+            "DB_MCP_DATABASE": "access_com",
+            "DB_MCP_CONNECTION_STRING": "Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\test.accdb;",
+        },
+        clear=True,
+    ):
+        from db_inspector_mcp.config import _create_backend
+        with patch('db_inspector_mcp.backends.access_com.win32com.client'):
+            backend = _create_backend("access_com", "test_connection_string", 30)
+            assert backend.__class__.__name__ == "AccessCOMBackend"
+

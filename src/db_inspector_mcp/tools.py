@@ -23,6 +23,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from .backends.access_com import AccessCOMBackend
 from .backends.registry import get_registry
 from .config import check_data_access, get_config
 from .security import validate_readonly_sql
@@ -464,6 +465,49 @@ def db_verify_readonly(database: str | None = None) -> dict[str, Any]:
         raise
     except Exception as e:
         return {"readonly": False, "details": f"Error during verification: {str(e)}"}
+
+
+@mcp.tool()
+def db_get_access_query(name: str, database: str | None = None) -> dict[str, Any]:
+    """
+    Get Access query SQL by name (requires access_com backend).
+    
+    Use this tool to:
+    - Retrieve native SQL from Access queries by name
+    - Get query definitions for migration workflows
+    - Understand Access query structure
+    
+    **Note**: This tool requires the `access_com` backend (not `access_odbc`).
+    Set DB_MCP_DATABASE=access_com to use this functionality.
+    
+    Args:
+        name: Name of the Access query to retrieve
+        database: Name of the database to use. Call db_list_databases() first to discover
+                  available database names. If not specified, uses the default database.
+    
+    Returns:
+        Dictionary with:
+        - "name": Query name
+        - "sql": Native SQL definition
+        - "type": Query type (Select, Union, etc.)
+    """
+    registry = get_registry()
+    backend = registry.get(database)
+    
+    if not isinstance(backend, AccessCOMBackend):
+        raise ValueError(
+            f"db_get_access_query requires access_com backend, but database '{database or 'default'}' "
+            f"uses {type(backend).__name__}. Set DB_MCP_DATABASE=access_com to use this feature."
+        )
+    
+    try:
+        query = backend.get_query_by_name(name)
+        return query
+    except ValueError as e:
+        # Re-raise ValueError from registry (includes available backends)
+        raise
+    except Exception as e:
+        return {"error": str(e), "name": name, "sql": None, "type": None}
 
 
 @mcp.tool()

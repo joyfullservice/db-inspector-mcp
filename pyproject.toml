@@ -26,6 +26,7 @@ dependencies = [
     "pyodbc>=5.0.0",
     "psycopg2-binary>=2.9.0",
     "python-dotenv>=1.0.0",
+    "pywin32>=306; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]

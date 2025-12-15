@@ -1,6 +1,7 @@
 """Database backend implementations."""
 
-from .access import AccessBackend
+from .access_com import AccessCOMBackend
+from .access_odbc import AccessODBCBackend
 from .base import DatabaseBackend
 from .mssql import MSSQLBackend
 from .postgres import PostgresBackend
@@ -10,7 +11,8 @@ __all__ = [
     "DatabaseBackend",
     "MSSQLBackend",
     "PostgresBackend",
-    "AccessBackend",
+    "AccessODBCBackend",
+    "AccessCOMBackend",
     "BackendRegistry",
     "get_registry",
 ]

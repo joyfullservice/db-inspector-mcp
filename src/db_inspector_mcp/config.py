@@ -6,7 +6,8 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from .backends.access import AccessBackend
+from .backends.access_com import AccessCOMBackend
+from .backends.access_odbc import AccessODBCBackend
 from .backends.base import DatabaseBackend
 from .backends.mssql import MSSQLBackend
 from .backends.postgres import PostgresBackend
@@ -67,7 +68,7 @@ def _create_backend(backend_type: str, connection_string: str, query_timeout: in
     Create a backend instance based on type.
     
     Args:
-        backend_type: Type of backend (sqlserver, postgres, access)
+        backend_type: Type of backend (sqlserver, postgres, access_odbc, access_com)
         connection_string: Database connection string
         query_timeout: Query timeout in seconds
         
@@ -83,12 +84,14 @@ def _create_backend(backend_type: str, connection_string: str, query_timeout: in
         return MSSQLBackend(connection_string, query_timeout)
     elif backend_type == "postgres":
         return PostgresBackend(connection_string, query_timeout)
-    elif backend_type == "access":
-        return AccessBackend(connection_string, query_timeout)
+    elif backend_type == "access_odbc":
+        return AccessODBCBackend(connection_string, query_timeout)
+    elif backend_type == "access_com":
+        return AccessCOMBackend(connection_string, query_timeout)
     else:
         raise ValueError(
             f"Unsupported backend: {backend_type}. "
-            "Supported backends: sqlserver, postgres, access"
+            "Supported backends: sqlserver, postgres, access_odbc, access_com"
         )
 
 
@@ -115,7 +118,7 @@ def get_backend() -> DatabaseBackend:
     if not backend_name:
         raise ValueError(
             "DB_MCP_DATABASE environment variable is required. "
-            "Set DB_MCP_DATABASE=sqlserver, postgres, or access"
+            "Set DB_MCP_DATABASE=sqlserver, postgres, access_odbc, or access_com"
         )
     
     if not connection_string:

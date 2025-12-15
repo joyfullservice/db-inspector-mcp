@@ -133,8 +133,19 @@ DB_MCP_CONNECTION_STRING=dbname=mydb user=postgres password=secret host=localhos
 ```
 
 **For Microsoft Access:**
+
+Two backends are available:
+
+- **`access_odbc`**: Standard SQL queries via ODBC (works without Access installed)
+- **`access_com`**: Query-by-name and native SQL extraction via COM (requires Access installed)
+
 ```bash
-DB_MCP_DATABASE=access
+# ODBC backend (standard SQL queries)
+DB_MCP_DATABASE=access_odbc
+DB_MCP_CONNECTION_STRING=Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\path\\to\\database.accdb;
+
+# COM backend (query-by-name, requires Access installed)
+DB_MCP_DATABASE=access_com
 DB_MCP_CONNECTION_STRING=Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\path\\to\\database.accdb;
 ```
 
@@ -219,7 +230,7 @@ For more advanced configuration options, see the [Configuration](#configuration)
 
 | Variable | Description | Default | Required |
 |----------|-------------|---------|----------|
-| `DB_MCP_DATABASE` | Database type: `sqlserver`, `postgres`, or `access` (single database) | - | Yes* |
+| `DB_MCP_DATABASE` | Database type: `sqlserver`, `postgres`, `access_odbc`, or `access_com` (single database) | - | Yes* |
 | `DB_MCP_CONNECTION_STRING` | Database connection string (single database) | - | Yes* |
 | `DB_MCP_<name>_DATABASE` | Database type for named database (multi-database) | - | Yes* |
 | `DB_MCP_<name>_CONNECTION_STRING` | Connection string for named database (multi-database) | - | Yes* |
@@ -252,13 +263,21 @@ DB_MCP_CONNECTION_STRING="dbname=mydb user=postgres password=secret host=localho
 
 #### Microsoft Access
 
-```bash
-# Using ODBC connection string (for .accdb files)
-DB_MCP_CONNECTION_STRING="Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\path\\to\\database.accdb;"
+Two backends are available:
 
-# For .mdb files
-DB_MCP_CONNECTION_STRING="Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\path\\to\\database.mdb;"
+**`access_odbc`** - Standard SQL queries (works without Access installed):
+```bash
+DB_MCP_DATABASE=access_odbc
+DB_MCP_CONNECTION_STRING="Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\path\\to\\database.accdb;"
 ```
+
+**`access_com`** - Query-by-name and native SQL extraction (requires Access installed):
+```bash
+DB_MCP_DATABASE=access_com
+DB_MCP_CONNECTION_STRING="Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\path\\to\\database.accdb;"
+```
+
+Use `access_odbc` for standard SQL operations. Use `access_com` when you need to retrieve Access queries by name (see `db_get_access_query` tool).
 
 ### Multi-Database Configuration
 
@@ -270,7 +289,7 @@ Use the pattern `DB_MCP_<name>_DATABASE` and `DB_MCP_<name>_CONNECTION_STRING` t
 
 ```bash
 # Example: Migration scenario (Access to SQL Server)
-DB_MCP_LEGACY_DATABASE=access
+DB_MCP_LEGACY_DATABASE=access_com  # Use COM backend for query-by-name
 DB_MCP_LEGACY_CONNECTION_STRING="Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\path\\to\\legacy.accdb;"
 
 DB_MCP_NEW_DATABASE=sqlserver
@@ -349,7 +368,7 @@ DB_MCP_DATABASE=sqlserver
 DB_MCP_CONNECTION_STRING=Driver={ODBC Driver 17 for SQL Server};Server=localhost;Database=mydb;UID=user;PWD=password
 
 # Or multi-database configuration
-DB_MCP_LEGACY_DATABASE=access
+DB_MCP_LEGACY_DATABASE=access_com  # Use COM backend for query-by-name
 DB_MCP_LEGACY_CONNECTION_STRING=Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\path\to\legacy.accdb;
 
 DB_MCP_NEW_DATABASE=sqlserver
@@ -379,7 +398,7 @@ This allows `.cursor/mcp.json` to override `.env` values when needed.
 
 ```bash
 # .env
-DB_MCP_LEGACY_DATABASE=access
+DB_MCP_LEGACY_DATABASE=access_com  # Use COM backend for query-by-name
 DB_MCP_LEGACY_CONNECTION_STRING=Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\path\to\legacy.accdb;
 
 DB_MCP_NEW_DATABASE=sqlserver
@@ -462,7 +481,7 @@ For migration scenarios where you need to compare Access and SQL Server:
 Then add database connections to `.env`:
 
 ```bash
-DB_MCP_LEGACY_DATABASE=access
+DB_MCP_LEGACY_DATABASE=access_com  # Use COM backend for query-by-name
 DB_MCP_LEGACY_CONNECTION_STRING=Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\path\to\legacy.accdb;
 
 DB_MCP_NEW_DATABASE=sqlserver
@@ -680,6 +699,25 @@ db_list_views(database="source")
 # Returns: {"views": [{"name": "active_users", "schema": "dbo", "definition": "SELECT ..."}, ...]}
 ```
 
+**Note for Access COM backend**: `list_views()` returns query names without SQL (SQL extraction is expensive). Use `db_get_access_query()` to get SQL for specific queries.
+
+#### `db_get_access_query(name: str, database: str | None = None)`
+
+Get Access query SQL by name. **Requires `access_com` backend** (not `access_odbc`).
+
+**Args:**
+- `name`: Name of the Access query to retrieve
+- `database`: Name of the database backend to use (optional, uses default if not specified)
+
+**Example:**
+```python
+# Get Access query by name (requires access_com backend)
+query = db_get_access_query("ActiveCustomers", database="legacy")
+# Returns: {"name": "ActiveCustomers", "sql": "SELECT * FROM Customers WHERE Active = True", "type": "Select"}
+```
+
+**Note**: This tool requires the `access_com` backend. Set `DB_MCP_DATABASE=access_com` to use this functionality.
+
 ### Security Tool
 
 #### `db_verify_readonly(database: str | None = None)`
@@ -864,7 +902,7 @@ Before running the MCP server, verify your database connection:
 
 ```bash
 # Set environment variables (or use .env file)
-$env:DB_MCP_DATABASE = "sqlserver"  # or "postgres", "access"
+$env:DB_MCP_DATABASE = "sqlserver"  # or "postgres", "access_odbc", "access_com"
 $env:DB_MCP_CONNECTION_STRING = "your-connection-string"
 
 # Test the connection (will show configuration error if connection string is missing)

@@ -8,12 +8,12 @@ import pyodbc
 from .base import DatabaseBackend
 
 
-class AccessBackend(DatabaseBackend):
+class AccessODBCBackend(DatabaseBackend):
     """Microsoft Access database backend using pyodbc."""
     
     def __init__(self, connection_string: str, query_timeout_seconds: int = 30):
         """
-        Initialize Access backend.
+        Initialize Access ODBC backend.
         
         Args:
             connection_string: ODBC connection string or path to .accdb/.mdb file
