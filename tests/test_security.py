@@ -49,7 +49,7 @@ def test_validate_readonly_sql_handles_comments():
 
 def test_check_data_access_permission_allows_metadata_tools():
     """Test that metadata tools don't require permission."""
-    config = {"DB_ALLOW_DATA_ACCESS": "false"}
+    config = {"DB_MCP_ALLOW_DATA_ACCESS": "false"}
     assert check_data_access_permission("db_row_count", config) is True
     assert check_data_access_permission("db_columns", config) is True
     assert check_data_access_permission("db_explain", config) is True
@@ -57,24 +57,24 @@ def test_check_data_access_permission_allows_metadata_tools():
 
 def test_check_data_access_permission_requires_permission_for_preview():
     """Test that db_preview requires permission."""
-    config = {"DB_ALLOW_DATA_ACCESS": "false", "DB_ALLOW_PREVIEW": "false"}
+    config = {"DB_MCP_ALLOW_DATA_ACCESS": "false", "DB_MCP_ALLOW_PREVIEW": "false"}
     assert check_data_access_permission("db_preview", config) is False
 
 
 def test_check_data_access_permission_allows_with_global_flag():
     """Test that global flag enables data access."""
-    config = {"DB_ALLOW_DATA_ACCESS": "true"}
+    config = {"DB_MCP_ALLOW_DATA_ACCESS": "true"}
     assert check_data_access_permission("db_preview", config) is True
 
 
 def test_check_data_access_permission_allows_with_per_tool_flag():
     """Test that per-tool flag enables specific tool."""
-    config = {"DB_ALLOW_DATA_ACCESS": "false", "DB_ALLOW_PREVIEW": "true"}
+    config = {"DB_MCP_ALLOW_DATA_ACCESS": "false", "DB_MCP_ALLOW_PREVIEW": "true"}
     assert check_data_access_permission("db_preview", config) is True
 
 
 def test_get_permission_error_message():
     """Test that error messages are clear."""
     msg = get_permission_error_message("db_preview")
-    assert "DB_ALLOW_DATA_ACCESS" in msg or "DB_ALLOW_PREVIEW" in msg
+    assert "DB_MCP_ALLOW_DATA_ACCESS" in msg or "DB_MCP_ALLOW_PREVIEW" in msg
 

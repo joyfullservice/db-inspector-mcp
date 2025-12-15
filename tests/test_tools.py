@@ -16,7 +16,6 @@ from db_inspector_mcp.tools import (
     db_row_count,
     db_sum_column,
     db_verify_readonly,
-    set_backend,
 )
 
 
@@ -44,31 +43,40 @@ def mock_backend():
         "readonly": True,
         "details": "✓ Read-only",
     }
-    set_backend(backend)
     return backend
 
 
-def test_db_row_count(mock_backend):
+@pytest.fixture
+def mock_registry(mock_backend):
+    """Mock the registry to return mock_backend."""
+    with patch("db_inspector_mcp.tools.get_registry") as mock_get_registry:
+        registry = MagicMock()
+        registry.get.return_value = mock_backend
+        mock_get_registry.return_value = registry
+        yield mock_backend
+
+
+def test_db_row_count(mock_registry):
     """Test db_row_count tool."""
     result = db_row_count("SELECT * FROM users")
     assert result["count"] == 100
-    mock_backend.get_row_count.assert_called_once_with("SELECT * FROM users")
+    mock_registry.get_row_count.assert_called_once_with("SELECT * FROM users")
 
 
-def test_db_columns(mock_backend):
+def test_db_columns(mock_registry):
     """Test db_columns tool."""
     result = db_columns("SELECT * FROM users")
     assert "columns" in result
     assert len(result["columns"]) == 1
 
 
-def test_db_sum_column(mock_backend):
+def test_db_sum_column(mock_registry):
     """Test db_sum_column tool."""
     result = db_sum_column("SELECT amount FROM transactions", "amount")
     assert result["sum"] == 1234.56
 
 
-def test_db_measure_query(mock_backend):
+def test_db_measure_query(mock_registry):
     """Test db_measure_query tool."""
     result = db_measure_query("SELECT * FROM users", max_rows=1000)
     assert result["execution_time_ms"] == 50.0
@@ -76,7 +84,7 @@ def test_db_measure_query(mock_backend):
     assert result["hit_limit"] is False
 
 
-def test_db_preview_requires_permission(mock_backend):
+def test_db_preview_requires_permission(mock_registry):
     """Test that db_preview requires permission."""
     with patch("db_inspector_mcp.tools.check_data_access") as mock_check:
         mock_check.side_effect = PermissionError("Not authorized")
@@ -84,34 +92,34 @@ def test_db_preview_requires_permission(mock_backend):
             db_preview("SELECT * FROM users", max_rows=10)
 
 
-def test_db_explain(mock_backend):
+def test_db_explain(mock_registry):
     """Test db_explain tool."""
     result = db_explain("SELECT * FROM users")
     assert result["plan"] == "<plan>"
 
 
-def test_db_list_tables(mock_backend):
+def test_db_list_tables(mock_registry):
     """Test db_list_tables tool."""
     result = db_list_tables()
     assert "tables" in result
     assert len(result["tables"]) == 1
 
 
-def test_db_list_views(mock_backend):
+def test_db_list_views(mock_registry):
     """Test db_list_views tool."""
     result = db_list_views()
     assert "views" in result
     assert len(result["views"]) == 1
 
 
-def test_db_verify_readonly(mock_backend):
+def test_db_verify_readonly(mock_registry):
     """Test db_verify_readonly tool."""
     result = db_verify_readonly()
     assert result["readonly"] is True
     assert "details" in result
 
 
-def test_tools_reject_write_operations(mock_backend):
+def test_tools_reject_write_operations(mock_registry):
     """Test that tools reject write operations."""
     with pytest.raises(ValueError, match="INSERT"):
         db_row_count("INSERT INTO users VALUES (1)")

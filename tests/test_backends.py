@@ -73,15 +73,18 @@ def test_access_com_get_query_by_name():
     mock_query_def = MockQueryDef()
     
     # Create a proper mock for QueryDefs collection
-    # In COM, QueryDefs is accessed with parentheses: db.QueryDefs(query_name)
-    # Use side_effect to make it return the query_def when called
     mock_query_defs = MagicMock(side_effect=lambda name: mock_query_def if name == "TestQuery" else None)
     
+    # Mock database returned by DBEngine.OpenDatabase()
     mock_db = MagicMock()
     mock_db.QueryDefs = mock_query_defs
     
+    # Mock DBEngine
+    mock_dbe = MagicMock()
+    mock_dbe.OpenDatabase.return_value = mock_db
+    
     mock_app = MagicMock()
-    mock_app.CurrentDb.return_value = mock_db
+    mock_app.DBEngine = mock_dbe
     
     with patch('db_inspector_mcp.backends.access_com.win32com.client') as mock_win32com:
         # Make GetObject raise an exception so it falls back to Dispatch
@@ -109,11 +112,16 @@ def test_access_com_list_views():
     mock_query_defs = MagicMock()
     mock_query_defs.__iter__ = MagicMock(return_value=iter([mock_query_def1, mock_query_def2]))
     
+    # Mock database returned by DBEngine.OpenDatabase()
     mock_db = MagicMock()
     mock_db.QueryDefs = mock_query_defs
     
+    # Mock DBEngine
+    mock_dbe = MagicMock()
+    mock_dbe.OpenDatabase.return_value = mock_db
+    
     mock_app = MagicMock()
-    mock_app.CurrentDb.return_value = mock_db
+    mock_app.DBEngine = mock_dbe
     
     with patch('db_inspector_mcp.backends.access_com.win32com.client') as mock_win32com:
         # Make GetObject raise an exception so it falls back to Dispatch
@@ -153,10 +161,12 @@ def temp_access_db():
         pytest.skip("Access COM tests only run on Windows")
     
     import win32com.client
+    import uuid
     
-    # Create temporary database file
+    # Create temporary database file with unique name
     temp_dir = tempfile.gettempdir()
-    db_path = os.path.join(temp_dir, f"test_db_{os.getpid()}.accdb")
+    unique_id = uuid.uuid4().hex[:8]
+    db_path = os.path.join(temp_dir, f"test_db_{os.getpid()}_{unique_id}.accdb")
     
     app = None
     try:
@@ -165,21 +175,52 @@ def temp_access_db():
         app.NewCurrentDatabase(db_path)
         db = app.CurrentDb()
         
-        # Create a test table
-        db.Execute(
-            "CREATE TABLE TestTable (ID AUTOINCREMENT PRIMARY KEY, Name TEXT(50), Value NUMBER)"
-        )
+        # Create table using DAO TableDefs (more reliable than SQL DDL)
+        # DAO constants
+        dbAutoIncrField = 16  # Field attribute for AutoIncrement
+        dbLong = 4            # Long integer type
+        dbText = 10           # Text type
+        dbDouble = 7          # Double type
         
-        # Insert some test data
-        db.Execute("INSERT INTO TestTable (Name, Value) VALUES ('Test1', 100)")
-        db.Execute("INSERT INTO TestTable (Name, Value) VALUES ('Test2', 200)")
+        tbl = db.CreateTableDef("TestTable")
+        
+        # Create ID field (AutoIncrement)
+        fld_id = tbl.CreateField("ID", dbLong)
+        fld_id.Attributes = dbAutoIncrField
+        tbl.Fields.Append(fld_id)
+        
+        # Create Name field (Text)
+        fld_name = tbl.CreateField("Name", dbText, 50)
+        tbl.Fields.Append(fld_name)
+        
+        # Create Amount field (Double) - avoid "Value" as it's a reserved word
+        fld_amount = tbl.CreateField("Amount", dbDouble)
+        tbl.Fields.Append(fld_amount)
+        
+        # Append table to database
+        db.TableDefs.Append(tbl)
+        
+        # Insert some test data using DoCmd
+        app.DoCmd.SetWarnings(False)
+        app.DoCmd.RunSQL("INSERT INTO TestTable (Name, Amount) VALUES ('Test1', 100)")
+        app.DoCmd.RunSQL("INSERT INTO TestTable (Name, Amount) VALUES ('Test2', 200)")
+        app.DoCmd.SetWarnings(True)
         
         # Create a test query
-        query_sql = "SELECT * FROM TestTable WHERE Value > 150"
+        query_sql = "SELECT * FROM TestTable WHERE Amount > 150"
         db.CreateQueryDef("TestQuery", query_sql)
         
-        # Close the database but keep Access open to test GetObject
+        # Close the database and quit the setup Access instance
+        # The test will create its own Access instance
         app.CloseCurrentDatabase()
+        app.Quit()
+        app = None
+        
+        # Wait for Access to fully release the file
+        import time
+        import gc
+        gc.collect()  # Force garbage collection to release COM objects
+        time.sleep(2)
         
         yield db_path
         
@@ -187,14 +228,27 @@ def temp_access_db():
         pytest.skip(f"Could not create test database: {e}")
         
     finally:
-        # Cleanup: close Access and delete database file
-        try:
-            if app is not None:
+        # Cleanup: close Access if still open (only if setup failed mid-way)
+        if app is not None:
+            try:
                 app.Quit()
+            except Exception:
+                pass
+        
+        # Wait for file release
+        import time
+        import gc
+        gc.collect()
+        time.sleep(1)
+        
+        # Delete the database file and lock file
+        try:
+            lock_file = db_path.replace('.accdb', '.laccdb')
+            if os.path.exists(lock_file):
+                os.remove(lock_file)
         except Exception:
             pass
         
-        # Delete the database file
         try:
             if os.path.exists(db_path):
                 os.remove(db_path)
@@ -234,8 +288,14 @@ def test_access_com_getobject_existing_database(temp_access_db):
         assert query["type"] == "Select"
         
     finally:
-        app.CloseCurrentDatabase()
-        app.Quit()
+        try:
+            app.CloseCurrentDatabase()
+        except Exception:
+            pass  # Database may already be closed
+        try:
+            app.Quit()
+        except Exception:
+            pass  # App may already be quit
 
 
 @pytest.mark.integration
