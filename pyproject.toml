@@ -46,4 +46,7 @@ testpaths = ["tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
+markers = [
+    "integration: marks tests as integration tests (require Access installed)",
+]
 

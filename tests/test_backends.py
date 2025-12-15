@@ -1,10 +1,13 @@
 """Tests for database backends."""
 
+import os
+import sys
+import tempfile
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from db_inspector_mcp.backends.access_com import AccessCOMBackend
+from db_inspector_mcp.backends.access_com import AccessCOMBackend, COM_AVAILABLE
 from db_inspector_mcp.backends.access_odbc import AccessODBCBackend
 from db_inspector_mcp.backends.base import DatabaseBackend
 from db_inspector_mcp.backends.mssql import MSSQLBackend
@@ -81,6 +84,8 @@ def test_access_com_get_query_by_name():
     mock_app.CurrentDb.return_value = mock_db
     
     with patch('db_inspector_mcp.backends.access_com.win32com.client') as mock_win32com:
+        # Make GetObject raise an exception so it falls back to Dispatch
+        mock_win32com.GetObject.side_effect = Exception("No existing database")
         mock_win32com.Dispatch.return_value = mock_app
         
         backend = AccessCOMBackend(connection_string, 30)
@@ -111,6 +116,8 @@ def test_access_com_list_views():
     mock_app.CurrentDb.return_value = mock_db
     
     with patch('db_inspector_mcp.backends.access_com.win32com.client') as mock_win32com:
+        # Make GetObject raise an exception so it falls back to Dispatch
+        mock_win32com.GetObject.side_effect = Exception("No existing database")
         mock_win32com.Dispatch.return_value = mock_app
         
         backend = AccessCOMBackend(connection_string, 30)
@@ -123,7 +130,131 @@ def test_access_com_list_views():
         assert views[1]["definition"] is None
 
 
-# Note: Integration tests that actually connect to databases
-# would require test database instances and are not included here.
-# These would be added in a real project with proper test infrastructure.
+# =============================================================================
+# Integration tests for Access COM backend
+# These tests require Access to be installed and will be skipped if not available
+# =============================================================================
+
+@pytest.fixture
+def temp_access_db():
+    """
+    Create a temporary Access database for testing.
+    
+    This fixture:
+    - Creates a temporary .accdb file
+    - Opens it in Access and creates a test table and query
+    - Yields the database path
+    - Cleans up by closing Access and deleting the file
+    """
+    if not COM_AVAILABLE:
+        pytest.skip("pywin32 not available")
+    
+    if sys.platform != "win32":
+        pytest.skip("Access COM tests only run on Windows")
+    
+    import win32com.client
+    
+    # Create temporary database file
+    temp_dir = tempfile.gettempdir()
+    db_path = os.path.join(temp_dir, f"test_db_{os.getpid()}.accdb")
+    
+    app = None
+    try:
+        # Create new Access database
+        app = win32com.client.Dispatch("Access.Application")
+        app.NewCurrentDatabase(db_path)
+        db = app.CurrentDb()
+        
+        # Create a test table
+        db.Execute(
+            "CREATE TABLE TestTable (ID AUTOINCREMENT PRIMARY KEY, Name TEXT(50), Value NUMBER)"
+        )
+        
+        # Insert some test data
+        db.Execute("INSERT INTO TestTable (Name, Value) VALUES ('Test1', 100)")
+        db.Execute("INSERT INTO TestTable (Name, Value) VALUES ('Test2', 200)")
+        
+        # Create a test query
+        query_sql = "SELECT * FROM TestTable WHERE Value > 150"
+        db.CreateQueryDef("TestQuery", query_sql)
+        
+        # Close the database but keep Access open to test GetObject
+        app.CloseCurrentDatabase()
+        
+        yield db_path
+        
+    except Exception as e:
+        pytest.skip(f"Could not create test database: {e}")
+        
+    finally:
+        # Cleanup: close Access and delete database file
+        try:
+            if app is not None:
+                app.Quit()
+        except Exception:
+            pass
+        
+        # Delete the database file
+        try:
+            if os.path.exists(db_path):
+                os.remove(db_path)
+        except Exception:
+            pass
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not COM_AVAILABLE, reason="Access COM not available")
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows only")
+def test_access_com_getobject_existing_database(temp_access_db):
+    """Test that GetObject can reference an existing open database."""
+    import win32com.client
+    
+    # Open the database in Access
+    app = win32com.client.Dispatch("Access.Application")
+    app.OpenCurrentDatabase(temp_access_db)
+    
+    try:
+        # Now create backend - it should use GetObject to get the existing database
+        backend = AccessCOMBackend(temp_access_db, 30)
+        
+        # Verify it can access the database
+        tables = backend.list_tables()
+        table_names = [t["name"] for t in tables]
+        assert "TestTable" in table_names
+        
+        # Verify it can access the query
+        views = backend.list_views()
+        view_names = [v["name"] for v in views]
+        assert "TestQuery" in view_names
+        
+        # Get the query details
+        query = backend.get_query_by_name("TestQuery")
+        assert query["name"] == "TestQuery"
+        assert "TestTable" in query["sql"]
+        assert query["type"] == "Select"
+        
+    finally:
+        app.CloseCurrentDatabase()
+        app.Quit()
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not COM_AVAILABLE, reason="Access COM not available")
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows only")
+def test_access_com_with_closed_database(temp_access_db):
+    """Test that backend opens database if it's not already open."""
+    backend = AccessCOMBackend(temp_access_db, 30)
+    
+    try:
+        # Should be able to access the database even though it wasn't open
+        tables = backend.list_tables()
+        table_names = [t["name"] for t in tables]
+        assert "TestTable" in table_names
+    finally:
+        # Cleanup: close the Access instance created by the backend
+        if backend._app is not None:
+            try:
+                backend._app.Quit()
+            except Exception:
+                pass
 

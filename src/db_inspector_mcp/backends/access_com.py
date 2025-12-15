@@ -47,8 +47,32 @@ class AccessCOMBackend(DatabaseBackend):
     def _get_access_app(self):
         """Get or create Access COM application."""
         if self._app is None:
-            self._app = win32com.client.Dispatch("Access.Application")
-            self._app.OpenCurrentDatabase(self._db_path)
+            try:
+                # First, try to get the specific database file directly
+                # This will work if the database is already open in any Access instance
+                # Similar to VBA: GetObject("path\to\file.accdb")
+                db = win32com.client.GetObject(self._db_path)
+                # Get the Application object from the database
+                self._app = db.Application
+            except Exception:
+                # Database not open, try to get any Access.Application instance
+                try:
+                    self._app = win32com.client.GetObject(None, "Access.Application")
+                    # Check if it has a database open and if it matches our path
+                    try:
+                        current_db = self._app.CurrentDb()
+                        # Compare database names (normalize paths for comparison)
+                        current_db_name = current_db.Name
+                        if current_db_name.lower() != self._db_path.lower():
+                            # Different database open, need to open ours
+                            self._app.OpenCurrentDatabase(self._db_path)
+                    except Exception:
+                        # No database open or error accessing it, open our database
+                        self._app.OpenCurrentDatabase(self._db_path)
+                except Exception:
+                    # No running Access instance, create new one and open database
+                    self._app = win32com.client.Dispatch("Access.Application")
+                    self._app.OpenCurrentDatabase(self._db_path)
         return self._app
     
     def _get_current_db(self):
