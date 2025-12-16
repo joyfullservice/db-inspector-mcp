@@ -2,26 +2,14 @@
 
 import sys
 
-from dotenv import load_dotenv
-from pathlib import Path
-
 from .backends.registry import get_registry
 from .config import get_config, initialize_backends
 
 
 def main() -> None:
     """Main entry point for the MCP server."""
-    # Load .env files first (before any config access)
-    # This ensures .env values are available, but MCP server env vars take precedence
-    cwd = Path.cwd()
-    env_path = cwd / ".env"
-    if env_path.exists():
-        load_dotenv(env_path, override=False)
-    env_local_path = cwd / ".env.local"
-    if env_local_path.exists():
-        load_dotenv(env_local_path, override=True)
-    
-    # Load configuration
+    # Load configuration (automatically loads .env files from project root)
+    # Environment variables from MCP server env section take precedence
     config = get_config()
     
     # Initialize backends (supports both single and multi-database configurations)

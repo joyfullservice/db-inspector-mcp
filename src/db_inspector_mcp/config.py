@@ -15,28 +15,88 @@ from .backends.registry import BackendRegistry, get_registry
 from .security import check_data_access_permission, get_permission_error_message
 
 
+def _find_project_root() -> Path:
+    """
+    Find the project root by searching for .env file or common project markers.
+    
+    Searches upward from multiple starting points:
+    1. Current working directory
+    2. Location of this script (if available)
+    
+    For each starting point, searches upward for:
+    1. .env file (primary indicator)
+    2. .cursor/mcp.json (MCP configuration)
+    3. pyproject.toml (Python project marker)
+    
+    Returns:
+        Path to project root, or current working directory if not found
+    """
+    import sys
+    
+    # Try multiple starting points
+    search_roots = [Path.cwd().resolve()]
+    
+    # Also try to find project root relative to this package's location
+    try:
+        # Get the directory containing this config.py file
+        package_dir = Path(__file__).parent.parent.parent.resolve()
+        # Walk up to find project root (should be parent of src/)
+        if (package_dir.parent / "pyproject.toml").exists():
+            search_roots.append(package_dir.parent)
+        search_roots.append(package_dir.parent)
+    except Exception:
+        pass
+    
+    # Search from each starting point
+    for root in search_roots:
+        current = root
+        # Walk up the directory tree
+        while current != current.parent:
+            # Check for .env file (primary indicator)
+            if (current / ".env").exists():
+                return current
+            # Check for MCP config (secondary indicator)
+            if (current / ".cursor" / "mcp.json").exists():
+                return current
+            # Check for Python project marker (tertiary indicator)
+            if (current / "pyproject.toml").exists():
+                return current
+            
+            current = current.parent
+    
+    # Fall back to current working directory
+    return Path.cwd().resolve()
+
+
 def _load_env_files() -> None:
     """
-    Load .env files from the current working directory (project root).
+    Load .env files from the project root.
     
-    Loads in order:
+    Searches for project root by looking for .env file or project markers,
+    then loads:
     1. .env (base configuration)
     2. .env.local (local overrides, if exists)
     
     Environment variables already set (e.g., from MCP server env section) take precedence.
     """
-    # Get current working directory (project root)
-    cwd = Path.cwd()
+    import sys
+    
+    # Find project root (searches upward from current working directory)
+    project_root = _find_project_root()
     
     # Load .env file if it exists
-    env_path = cwd / ".env"
+    env_path = project_root / ".env"
     if env_path.exists():
-        load_dotenv(env_path, override=False)
+        # Convert Path to string for load_dotenv compatibility
+        result = load_dotenv(str(env_path), override=False)
+        if not result:
+            print(f"Warning: .env file exists at {env_path} but no variables were loaded", file=sys.stderr)
     
     # Load .env.local if it exists (takes precedence over .env)
-    env_local_path = cwd / ".env.local"
+    env_local_path = project_root / ".env.local"
     if env_local_path.exists():
-        load_dotenv(env_local_path, override=True)
+        # Convert Path to string for load_dotenv compatibility
+        load_dotenv(str(env_local_path), override=True)
 
 
 def load_config() -> dict[str, Any]:
@@ -155,6 +215,8 @@ def initialize_backends() -> BackendRegistry:
     Raises:
         ValueError: If configuration is invalid
     """
+    import sys
+    
     registry = get_registry()
     config = load_config()
     query_timeout = config["DB_MCP_QUERY_TIMEOUT_SECONDS"]
@@ -174,7 +236,9 @@ def initialize_backends() -> BackendRegistry:
     for key, value in env_vars.items():
         if key.startswith("DB_MCP_") and key.endswith("_DATABASE"):
             # Extract database name (e.g., "LEGACY" from "DB_MCP_LEGACY_DATABASE")
-            name_part = key[7:-8]  # Remove "DB_MCP_" prefix and "_DATABASE" suffix
+            # Remove "DB_MCP_" prefix (7 chars) and "_DATABASE" suffix (8 chars)
+            # The name_part includes the trailing underscore, so we need to remove it
+            name_part = key[7:-8].rstrip("_")  # Remove prefix, suffix, and trailing underscore
             if name_part:
                 db_name = name_part.lower()
                 conn_key = f"DB_MCP_{name_part}_CONNECTION_STRING"
@@ -184,6 +248,8 @@ def initialize_backends() -> BackendRegistry:
                         "backend": value.lower(),
                         "connection_string": env_vars[conn_key],
                     }
+                else:
+                    print(f"Warning: Found {key} but missing {conn_key}", file=sys.stderr)
     
     if not db_configs:
         raise ValueError(
