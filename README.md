@@ -41,9 +41,11 @@ venv\Scripts\activate
 # On macOS/Linux:
 source venv/bin/activate
 
-# Install in development mode
+# Install in development mode (editable install)
 pip install -e ".[dev]"
 ```
+
+**Note:** The `-e` flag installs the package in "editable" mode, which means changes to the source code are immediately reflected without needing to reinstall. This is recommended for development. See the [Building and Installing After Making Changes](#building-and-installing-after-making-changes) section for more details.
 
 ### Windows PATH Configuration
 
@@ -147,6 +149,9 @@ DB_MCP_CONNECTION_STRING=Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C
 # COM backend (query-by-name, requires Access installed)
 DB_MCP_DATABASE=access_com
 DB_MCP_CONNECTION_STRING=Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\path\\to\\database.accdb;
+
+# Note: Both backends also support .accda files (Access Database Executable)
+# Example: DBQ=C:\\path\\to\\database.accda;
 ```
 
 See the [Connection Strings](#connection-strings) section below for more details.
@@ -277,6 +282,8 @@ DB_MCP_DATABASE=access_com
 DB_MCP_CONNECTION_STRING="Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\path\\to\\database.accdb;"
 ```
 
+**Note:** Both backends support `.accdb`, `.accda` (Access Database Executable), and `.mdb` file formats. The driver name in the connection string remains the same regardless of file extension.
+
 Use `access_odbc` for standard SQL operations. Use `access_com` when you need to retrieve Access queries by name (see `db_get_access_query` tool).
 
 ### Multi-Database Configuration
@@ -291,6 +298,7 @@ Use the pattern `DB_MCP_<name>_DATABASE` and `DB_MCP_<name>_CONNECTION_STRING` t
 # Example: Migration scenario (Access to SQL Server)
 DB_MCP_LEGACY_DATABASE=access_com  # Use COM backend for query-by-name
 DB_MCP_LEGACY_CONNECTION_STRING="Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\path\\to\\legacy.accdb;"
+# Note: Also supports .accda and .mdb files
 
 DB_MCP_NEW_DATABASE=sqlserver
 DB_MCP_NEW_CONNECTION_STRING="Driver={ODBC Driver 17 for SQL Server};Server=localhost;Database=mydb;UID=user;PWD=password"
@@ -370,6 +378,8 @@ DB_MCP_CONNECTION_STRING=Driver={ODBC Driver 17 for SQL Server};Server=localhost
 # Or multi-database configuration
 DB_MCP_LEGACY_DATABASE=access_com  # Use COM backend for query-by-name
 DB_MCP_LEGACY_CONNECTION_STRING=Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\path\to\legacy.accdb;
+# Note: Also supports .accda and .mdb files
+# Note: Also supports .accda and .mdb files
 
 DB_MCP_NEW_DATABASE=sqlserver
 DB_MCP_NEW_CONNECTION_STRING=Driver={ODBC Driver 17 for SQL Server};Server=localhost;Database=mydb;UID=user;PWD=password
@@ -400,6 +410,8 @@ This allows `.cursor/mcp.json` to override `.env` values when needed.
 # .env
 DB_MCP_LEGACY_DATABASE=access_com  # Use COM backend for query-by-name
 DB_MCP_LEGACY_CONNECTION_STRING=Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\path\to\legacy.accdb;
+# Note: Also supports .accda and .mdb files
+# Note: Also supports .accda and .mdb files
 
 DB_MCP_NEW_DATABASE=sqlserver
 DB_MCP_NEW_CONNECTION_STRING=Driver={ODBC Driver 17 for SQL Server};Server=localhost;Database=mydb;UID=user;PWD=password
@@ -483,6 +495,7 @@ Then add database connections to `.env`:
 ```bash
 DB_MCP_LEGACY_DATABASE=access_com  # Use COM backend for query-by-name
 DB_MCP_LEGACY_CONNECTION_STRING=Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\path\to\legacy.accdb;
+# Note: Also supports .accda and .mdb files
 
 DB_MCP_NEW_DATABASE=sqlserver
 DB_MCP_NEW_CONNECTION_STRING=Driver={ODBC Driver 17 for SQL Server};Server=localhost;Database=mydb;UID=user;PWD=password
@@ -895,6 +908,73 @@ db_explain("SELECT * FROM large_table WHERE condition = 'value'")
    # Run specific test file
    pytest tests/test_backends.py
    ```
+
+### Building and Installing After Making Changes
+
+After modifying the source code, you need to rebuild and reinstall the package. The method depends on how it was originally installed:
+
+#### If Installed in Editable Mode (Recommended for Development)
+
+If you installed with `pip install -e ".[dev]"` (editable mode), **changes are automatically reflected** - no rebuild needed! Just:
+
+1. Make your code changes
+2. Test immediately - the changes are already active
+3. Restart Cursor (if using the MCP server) to pick up changes
+
+**Note:** Editable mode links directly to your source code, so changes take effect immediately without reinstalling.
+
+#### If You Need to Reinstall
+
+If you need to reinstall (e.g., after adding new dependencies or changing package metadata):
+
+```bash
+# Reinstall in editable mode with dev dependencies
+pip install -e ".[dev]"
+
+# Or reinstall without dev dependencies
+pip install -e .
+```
+
+#### Building Distribution Packages
+
+To create installable distribution packages (wheel or source distribution):
+
+```bash
+# Install build tool (if not already installed)
+pip install build
+
+# Build both wheel and source distribution
+python -m build
+
+# Or build just a wheel
+python -m build --wheel
+
+# Or build just a source distribution
+python -m build --sdist
+```
+
+This creates packages in the `dist/` directory that can be installed with `pip install dist/db_inspector_mcp-*.whl`.
+
+#### Verifying the Build
+
+After building or reinstalling, verify it works:
+
+```bash
+# Check the command is available
+db-inspector-mcp --help
+
+# Or test the import
+python -c "from db_inspector_mcp import main; print('Import successful')"
+```
+
+#### Quick Reference
+
+| Scenario | Command | When Changes Take Effect |
+|----------|---------|-------------------------|
+| Development (editable) | `pip install -e ".[dev]"` | Immediately (no rebuild needed) |
+| Reinstall after metadata changes | `pip install -e ".[dev]"` | After reinstall |
+| Build distribution | `python -m build` | After installing the built package |
+| Standard install | `pip install .` | After reinstall (not recommended for development) |
 
 ### Testing Database Connections
 

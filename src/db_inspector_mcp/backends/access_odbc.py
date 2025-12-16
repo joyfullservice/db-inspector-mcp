@@ -1,5 +1,6 @@
 """Microsoft Access backend implementation using pyodbc."""
 
+import re
 import time
 from typing import Any
 
@@ -16,11 +17,44 @@ class AccessODBCBackend(DatabaseBackend):
         Initialize Access ODBC backend.
         
         Args:
-            connection_string: ODBC connection string or path to .accdb/.mdb file
+            connection_string: ODBC connection string or path to .accdb/.accda/.mdb file
             query_timeout_seconds: Query timeout in seconds
         """
+        # Ensure connection string includes DBQ parameter for ODBC connections
+        connection_string = self._ensure_dbq_parameter(connection_string)
         super().__init__(connection_string, query_timeout_seconds)
         self._connection: pyodbc.Connection | None = None
+    
+    def _ensure_dbq_parameter(self, connection_string: str) -> str:
+        """
+        Ensure the connection string includes the DBQ parameter.
+        
+        For Access ODBC connections, the DBQ parameter is required to specify
+        the database file path. This method validates and adds it if missing.
+        
+        Args:
+            connection_string: Original connection string
+            
+        Returns:
+            Connection string with DBQ parameter ensured
+        """
+        # Check if connection string already contains DBQ (case-insensitive)
+        if re.search(r'DBQ\s*=', connection_string, re.IGNORECASE):
+            return connection_string
+        
+        # If connection string looks like an ODBC connection string (contains Driver=)
+        # but is missing DBQ, raise an error
+        if re.search(r'Driver\s*=', connection_string, re.IGNORECASE):
+            raise ValueError(
+                "Access ODBC connection string must include the DBQ parameter. "
+                "Example: Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\path\\to\\database.accdb;"
+            )
+        
+        # If connection string is just a file path (no Driver=), construct full connection string
+        # This handles the case where user provides just the file path
+        # Assume it's a file path and construct the connection string
+        driver = "{Microsoft Access Driver (*.mdb, *.accdb)}"
+        return f"Driver={driver};DBQ={connection_string};"
     
     def _get_connection(self) -> pyodbc.Connection:
         """Get or create a database connection."""
@@ -146,7 +180,12 @@ class AccessODBCBackend(DatabaseBackend):
         return "Execution plans are not available for Microsoft Access databases. Access uses a query optimizer, but detailed execution plans are not exposed via ODBC."
     
     def list_tables(self) -> list[dict[str, Any]]:
-        """List all tables using MSysObjects system table."""
+        """
+        List all tables using MSysObjects system table.
+        
+        Falls back to ODBC catalog functions if MSysObjects is not accessible.
+        """
+        # First, try MSysObjects (most reliable when accessible)
         sql = """
             SELECT 
                 MSysObjects.Name AS table_name,
@@ -157,18 +196,74 @@ class AccessODBCBackend(DatabaseBackend):
             AND MSysObjects.Name NOT LIKE 'MSys%'
             ORDER BY MSysObjects.Name
         """
-        cursor = self._execute_query(sql)
-        rows = cursor.fetchall()
+        try:
+            cursor = self._execute_query(sql)
+            rows = cursor.fetchall()
+            
+            tables = []
+            for row in rows:
+                tables.append({
+                    "name": row[0],
+                    "schema": "dbo",  # Access doesn't have schemas, use default
+                    "row_count": None,  # Could add count if needed
+                })
+            
+            cursor.close()
+            return tables
+        except pyodbc.ProgrammingError as e:
+            # Check if it's a permission error on MSysObjects
+            error_msg = str(e).lower()
+            if "msysobjects" in error_msg or "no read permission" in error_msg or "-1907" in str(e):
+                # Try alternative method using ODBC catalog functions
+                try:
+                    return self._list_tables_via_catalog()
+                except Exception as catalog_error:
+                    # If catalog method also fails, raise a helpful error
+                    raise RuntimeError(
+                        f"Cannot list tables: MSysObjects system table is not accessible "
+                        f"(permission denied). This is common with Access databases that have "
+                        f"restricted system table access. Consider using the 'access_com' backend "
+                        f"instead, which uses COM automation and can access table definitions directly. "
+                        f"Original error: {e}. Catalog method also failed: {catalog_error}"
+                    ) from e
+            # Re-raise if it's a different error
+            raise
+        except Exception as e:
+            # For other errors, try catalog method as fallback
+            try:
+                return self._list_tables_via_catalog()
+            except Exception:
+                # If catalog method fails, raise original error
+                raise RuntimeError(
+                    f"Failed to list tables: {e}. "
+                    f"Consider using the 'access_com' backend for better compatibility."
+                ) from e
+    
+    def _list_tables_via_catalog(self) -> list[dict[str, Any]]:
+        """
+        List tables using ODBC catalog functions as fallback.
         
+        This method uses pyodbc's tables() method which queries the ODBC catalog.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        # Use ODBC catalog function to get table names
+        # table_type='TABLE' filters for user tables (excludes system tables and views)
         tables = []
-        for row in rows:
-            tables.append({
-                "name": row[0],
-                "schema": "dbo",  # Access doesn't have schemas, use default
-                "row_count": None,  # Could add count if needed
-            })
+        try:
+            for row in cursor.tables(tableType='TABLE'):
+                table_name = row.table_name
+                # Skip system tables (MSys*)
+                if not table_name.startswith('MSys'):
+                    tables.append({
+                        "name": table_name,
+                        "schema": row.table_schem or "dbo",  # Use schema if available
+                        "row_count": None,
+                    })
+        finally:
+            cursor.close()
         
-        cursor.close()
         return tables
     
     def list_views(self) -> list[dict[str, Any]]:

@@ -21,7 +21,7 @@ class AccessCOMBackend(DatabaseBackend):
         Initialize Access COM backend.
         
         Args:
-            connection_string: ODBC connection string or path to .accdb/.mdb file
+            connection_string: ODBC connection string or path to .accdb/.accda/.mdb file
             query_timeout_seconds: Query timeout in seconds
         """
         super().__init__(connection_string, query_timeout_seconds)

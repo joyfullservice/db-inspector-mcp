@@ -32,6 +32,8 @@ ENV/
 # Environment variables
 .env
 .env.local
+# Explicitly track .env.example (should be in version control)
+!.env.example
 
 # IDE
 .vscode/
