@@ -7,15 +7,15 @@ import pytest
 from db_inspector_mcp.config import check_data_access
 from db_inspector_mcp.security import validate_readonly_sql
 from db_inspector_mcp.tools import (
-    db_columns,
+    db_check_readonly_status,
+    db_count_query_results,
     db_explain,
+    db_get_query_columns,
     db_list_tables,
     db_list_views,
     db_measure_query,
     db_preview,
-    db_row_count,
-    db_sum_column,
-    db_verify_readonly,
+    db_sum_query_column,
 )
 
 
@@ -23,11 +23,11 @@ from db_inspector_mcp.tools import (
 def mock_backend():
     """Create a mock backend for testing."""
     backend = MagicMock()
-    backend.get_row_count.return_value = 100
-    backend.get_columns.return_value = [
+    backend.count_query_results.return_value = 100
+    backend.get_query_columns.return_value = [
         {"name": "id", "type": "int", "nullable": False}
     ]
-    backend.sum_column.return_value = 1234.56
+    backend.sum_query_column.return_value = 1234.56
     backend.measure_query.return_value = {
         "execution_time_ms": 50.0,
         "row_count": 10,
@@ -56,23 +56,23 @@ def mock_registry(mock_backend):
         yield mock_backend
 
 
-def test_db_row_count(mock_registry):
-    """Test db_row_count tool."""
-    result = db_row_count("SELECT * FROM users")
+def test_db_count_query_results(mock_registry):
+    """Test db_count_query_results tool."""
+    result = db_count_query_results("SELECT * FROM users")
     assert result["count"] == 100
-    mock_registry.get_row_count.assert_called_once_with("SELECT * FROM users")
+    mock_registry.count_query_results.assert_called_once_with("SELECT * FROM users")
 
 
-def test_db_columns(mock_registry):
-    """Test db_columns tool."""
-    result = db_columns("SELECT * FROM users")
+def test_db_get_query_columns(mock_registry):
+    """Test db_get_query_columns tool."""
+    result = db_get_query_columns("SELECT * FROM users")
     assert "columns" in result
     assert len(result["columns"]) == 1
 
 
-def test_db_sum_column(mock_registry):
-    """Test db_sum_column tool."""
-    result = db_sum_column("SELECT amount FROM transactions", "amount")
+def test_db_sum_query_column(mock_registry):
+    """Test db_sum_query_column tool."""
+    result = db_sum_query_column("SELECT amount FROM transactions", "amount")
     assert result["sum"] == 1234.56
 
 
@@ -112,9 +112,9 @@ def test_db_list_views(mock_registry):
     assert len(result["views"]) == 1
 
 
-def test_db_verify_readonly(mock_registry):
-    """Test db_verify_readonly tool."""
-    result = db_verify_readonly()
+def test_db_check_readonly_status(mock_registry):
+    """Test db_check_readonly_status tool."""
+    result = db_check_readonly_status()
     assert result["readonly"] is True
     assert "details" in result
 
@@ -122,5 +122,5 @@ def test_db_verify_readonly(mock_registry):
 def test_tools_reject_write_operations(mock_registry):
     """Test that tools reject write operations."""
     with pytest.raises(ValueError, match="INSERT"):
-        db_row_count("INSERT INTO users VALUES (1)")
+        db_count_query_results("INSERT INTO users VALUES (1)")
 

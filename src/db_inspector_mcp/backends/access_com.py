@@ -242,29 +242,29 @@ class AccessCOMBackend(DatabaseBackend):
         }
     
     # Delegate all standard DatabaseBackend methods to ODBC backend
-    def get_row_count(self, sql: str) -> int:
-        """Get row count by wrapping query in SELECT COUNT(*)."""
-        return self._odbc_backend.get_row_count(sql)
+    def count_query_results(self, query: str) -> int:
+        """Count row count by wrapping query in SELECT COUNT(*)."""
+        return self._odbc_backend.count_query_results(query)
     
-    def get_columns(self, sql: str) -> list[dict[str, Any]]:
+    def get_query_columns(self, query: str) -> list[dict[str, Any]]:
         """Get column metadata using TOP 0 to get metadata without fetching data."""
-        return self._odbc_backend.get_columns(sql)
+        return self._odbc_backend.get_query_columns(query)
     
-    def sum_column(self, sql: str, column: str) -> float | None:
-        """Compute SUM of a column."""
-        return self._odbc_backend.sum_column(sql, column)
+    def sum_query_column(self, query: str, column: str) -> float | None:
+        """Compute SUM of a column from query results."""
+        return self._odbc_backend.sum_query_column(query, column)
     
-    def measure_query(self, sql: str, max_rows: int) -> dict[str, Any]:
+    def measure_query(self, query: str, max_rows: int) -> dict[str, Any]:
         """Measure query execution time and retrieve limited rows."""
-        return self._odbc_backend.measure_query(sql, max_rows)
+        return self._odbc_backend.measure_query(query, max_rows)
     
-    def preview(self, sql: str, max_rows: int) -> list[dict[str, Any]]:
+    def preview(self, query: str, max_rows: int) -> list[dict[str, Any]]:
         """Sample N rows from a query result."""
-        return self._odbc_backend.preview(sql, max_rows)
+        return self._odbc_backend.preview(query, max_rows)
     
-    def explain_query(self, sql: str) -> str:
+    def explain_query(self, query: str) -> str:
         """Get execution plan."""
-        return self._odbc_backend.explain_query(sql)
+        return self._odbc_backend.explain_query(query)
     
     def list_tables(self) -> list[dict[str, Any]]:
         """List all tables using COM TableDefs."""

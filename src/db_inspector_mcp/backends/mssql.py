@@ -50,19 +50,19 @@ class MSSQLBackend(DatabaseBackend):
             return cursor
         return None
     
-    def get_row_count(self, sql: str) -> int:
-        """Get row count by wrapping query in SELECT COUNT(*)."""
-        wrapped_sql = f"SELECT COUNT(*) as cnt FROM ({sql}) AS subquery"
-        cursor = self._execute_query(wrapped_sql)
+    def count_query_results(self, query: str) -> int:
+        """Count row count by wrapping query in SELECT COUNT(*)."""
+        wrapped_query = f"SELECT COUNT(*) as cnt FROM ({query}) AS subquery"
+        cursor = self._execute_query(wrapped_query)
         result = cursor.fetchone()
         cursor.close()
         return result[0] if result else 0
     
-    def get_columns(self, sql: str) -> list[dict[str, Any]]:
-        """Get column metadata using INFORMATION_SCHEMA or cursor description."""
+    def get_query_columns(self, query: str) -> list[dict[str, Any]]:
+        """Get column metadata using cursor description."""
         # Use a subquery with TOP 0 to get metadata without fetching data
-        wrapped_sql = f"SELECT TOP 0 * FROM ({sql}) AS subquery"
-        cursor = self._execute_query(wrapped_sql)
+        wrapped_query = f"SELECT TOP 0 * FROM ({query}) AS subquery"
+        cursor = self._execute_query(wrapped_query)
         
         columns = []
         for col in cursor.description:
@@ -78,28 +78,28 @@ class MSSQLBackend(DatabaseBackend):
         cursor.close()
         return columns
     
-    def sum_column(self, sql: str, column: str) -> float | None:
-        """Compute SUM of a column."""
-        wrapped_sql = f"SELECT SUM([{column}]) as sum_val FROM ({sql}) AS subquery"
-        cursor = self._execute_query(wrapped_sql)
+    def sum_query_column(self, query: str, column: str) -> float | None:
+        """Compute SUM of a column from query results."""
+        wrapped_query = f"SELECT SUM([{column}]) as sum_val FROM ({query}) AS subquery"
+        cursor = self._execute_query(wrapped_query)
         result = cursor.fetchone()
         cursor.close()
         return result[0] if result and result[0] is not None else None
     
-    def measure_query(self, sql: str, max_rows: int) -> dict[str, Any]:
+    def measure_query(self, query: str, max_rows: int) -> dict[str, Any]:
         """Measure query execution time and retrieve limited rows."""
         # Add TOP clause to limit rows
-        if "TOP " not in sql.upper():
+        if "TOP " not in query.upper():
             # Simple approach: add TOP before SELECT
-            sql_upper = sql.upper().strip()
-            if sql_upper.startswith("SELECT"):
-                sql = f"SELECT TOP {max_rows} " + sql[6:].lstrip()
+            query_upper = query.upper().strip()
+            if query_upper.startswith("SELECT"):
+                query = f"SELECT TOP {max_rows} " + query[6:].lstrip()
             else:
                 # If it's a complex query, wrap it
-                sql = f"SELECT TOP {max_rows} * FROM ({sql}) AS subquery"
+                query = f"SELECT TOP {max_rows} * FROM ({query}) AS subquery"
         
         start_time = time.time()
-        cursor = self._execute_query(sql)
+        cursor = self._execute_query(query)
         rows = cursor.fetchall()
         execution_time_ms = (time.time() - start_time) * 1000
         
@@ -118,17 +118,17 @@ class MSSQLBackend(DatabaseBackend):
             "hit_limit": hit_limit,
         }
     
-    def preview(self, sql: str, max_rows: int) -> list[dict[str, Any]]:
+    def preview(self, query: str, max_rows: int) -> list[dict[str, Any]]:
         """Sample N rows from a query result."""
         # Add TOP clause to limit rows
-        if "TOP " not in sql.upper():
-            sql_upper = sql.upper().strip()
-            if sql_upper.startswith("SELECT"):
-                sql = f"SELECT TOP {max_rows} " + sql[6:].lstrip()
+        if "TOP " not in query.upper():
+            query_upper = query.upper().strip()
+            if query_upper.startswith("SELECT"):
+                query = f"SELECT TOP {max_rows} " + query[6:].lstrip()
             else:
-                sql = f"SELECT TOP {max_rows} * FROM ({sql}) AS subquery"
+                query = f"SELECT TOP {max_rows} * FROM ({query}) AS subquery"
         
-        cursor = self._execute_query(sql)
+        cursor = self._execute_query(query)
         rows = cursor.fetchall()
         
         # Convert rows to dictionaries
@@ -138,7 +138,7 @@ class MSSQLBackend(DatabaseBackend):
         cursor.close()
         return result
     
-    def explain_query(self, sql: str) -> str:
+    def explain_query(self, query: str) -> str:
         """Get execution plan using SHOWPLAN_XML."""
         conn = self._get_connection()
         cursor = conn.cursor()
@@ -148,7 +148,7 @@ class MSSQLBackend(DatabaseBackend):
             cursor.execute("SET SHOWPLAN_XML ON")
             
             # Execute the query (won't actually run, just generate plan)
-            cursor.execute(sql)
+            cursor.execute(query)
             
             # Get the plan
             plan_xml = None

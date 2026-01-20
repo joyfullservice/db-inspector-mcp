@@ -16,6 +16,31 @@ A lightweight, extensible, cross-database MCP server (Model Context Protocol ser
 - **Read-Only by Default**: Designed for safe introspection with explicit permission controls
 - **Security Guardrails**: SQL validation prevents write operations
 
+## Breaking Changes in v2.0
+
+The MCP tool API has been improved for clarity in version 2.0. Function names are now more explicit and self-documenting.
+
+### Function Renames
+
+| Old Function | New Function | Notes |
+|--------------|--------------|-------|
+| `db_row_count(sql, ...)` | `db_count_query_results(query, ...)` | More explicit - counts YOUR query's results |
+| `db_columns(sql, ...)` | `db_get_query_columns(query, ...)` | Standard "get" verb prefix |
+| `db_sum_column(sql, column, ...)` | `db_sum_query_column(query, column, ...)` | More explicit - sums from YOUR query |
+| `db_verify_readonly(...)` | `db_check_readonly_status(...)` | More intuitive verb |
+| `db_get_access_query(name, ...)` | `db_get_access_query_definition(name, ...)` | More explicit about return value |
+
+### Parameter Renames
+
+All tools that accepted `sql` parameter now use `query` for consistency and clarity:
+- More concise and conventional
+- Matches common database terminology
+- Applied consistently across all tools
+
+### No Behavioral Changes
+
+The tools work exactly the same way - only names have changed for clarity. Update your integration code to use the new names.
+
 ## Prerequisites
 
 - **Python**: 3.10 or higher
@@ -23,6 +48,7 @@ A lightweight, extensible, cross-database MCP server (Model Context Protocol ser
   - **SQL Server**: ODBC Driver 17 (or later) for SQL Server. Download from [Microsoft](https://learn.microsoft.com/en-us/sql/connect/odbc/download-odbc-driver-for-sql-server)
   - **PostgreSQL**: No additional driver needed (uses `psycopg2-binary`)
   - **Microsoft Access**: Microsoft Access Database Engine (ACE) - usually pre-installed on Windows, or download from [Microsoft](https://www.microsoft.com/en-us/download/details.aspx?id=54920)
+    - **32-bit Access compatibility**: If you need to connect to 32-bit versions of Microsoft Access, you must install a 32-bit version of Python so that the ODBC drivers are compatible. Note that some databases like PostgreSQL may not have 32-bit ODBC drivers available.
 
 ## Installation
 
@@ -174,13 +200,13 @@ Once Cursor restarts, the MCP tools will be available. You can test them by aski
   > "What tables are in the database? Use db_list_tables"
 
 - **Query row counts:**
-  > "How many rows are in the users table? Use db_row_count with a SELECT query"
+  > "How many rows are in the users table? Use db_count_query_results with a SELECT query"
 
 - **Get column information:**
-  > "What are the columns in the users table? Use db_columns"
+  > "What are the columns in the users table? Use db_get_query_columns"
 
 - **Verify read-only status:**
-  > "Verify the database is read-only using db_verify_readonly"
+  > "Verify the database is read-only using db_check_readonly_status"
 
 ### Troubleshooting
 
@@ -284,6 +310,8 @@ DB_MCP_CONNECTION_STRING="Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=
 
 **Note:** Both backends support `.accdb`, `.accda` (Access Database Executable), and `.mdb` file formats. The driver name in the connection string remains the same regardless of file extension.
 
+**Important - 32-bit Access compatibility**: If you need to connect to 32-bit versions of Microsoft Access, you must install a 32-bit version of Python so that the ODBC drivers are compatible. Note that some databases like PostgreSQL may not have 32-bit ODBC drivers available.
+
 Use `access_odbc` for standard SQL operations. Use `access_com` when you need to retrieve Access queries by name (see `db_get_access_query` tool).
 
 ### Multi-Database Configuration
@@ -317,10 +345,10 @@ When multiple databases are configured, all tools accept an optional `database` 
 
 ```python
 # Query the legacy database
-db_row_count("SELECT * FROM customers", database="legacy")
+db_count_query_results("SELECT * FROM customers", database="legacy")
 
 # Query the new database
-db_row_count("SELECT * FROM customers", database="new")
+db_count_query_results("SELECT * FROM customers", database="new")
 
 # Compare queries across databases
 db_compare_queries(
@@ -548,50 +576,56 @@ db_list_databases()
 
 ### Query Analysis Tools
 
-#### `db_row_count(sql: str, database: str | None = None)`
+#### `db_count_query_results(query: str, database: str | None = None)`
 
-Return the number of rows an arbitrary SQL query would produce.
+Count the number of rows a SELECT query returns.
+
+This tool wraps your query in `SELECT COUNT(*) FROM (your_query)` to efficiently count results without fetching all data.
 
 **Args:**
-- `sql`: SQL SELECT query to count rows for
+- `query`: A SELECT query to count results from
 - `database`: Name of the database backend to use (optional, uses default if not specified)
 
 **Example:**
 ```python
 # Use default database
-db_row_count("SELECT * FROM users WHERE active = 1")
+db_count_query_results("SELECT * FROM users WHERE active = 1")
 # Returns: {"count": 1234}
 
 # Use specific database
-db_row_count("SELECT * FROM users WHERE active = 1", database="source")
+db_count_query_results("SELECT * FROM users WHERE active = 1", database="source")
 ```
 
-#### `db_columns(sql: str, database: str | None = None)`
+#### `db_get_query_columns(query: str, database: str | None = None)`
 
-Return column names, data types, nullability, and precision/scale.
+Analyze the column schema of a SELECT query's results.
+
+This tool executes your query with a limit to fetch 0 rows, inspecting column metadata without retrieving data.
 
 **Args:**
-- `sql`: SQL SELECT query to get columns for
+- `query`: A SELECT query to analyze
 - `database`: Name of the database backend to use (optional, uses default if not specified)
 
 **Example:**
 ```python
-db_columns("SELECT * FROM users", database="source")
+db_get_query_columns("SELECT * FROM users", database="source")
 # Returns: {"columns": [{"name": "id", "type": "int", "nullable": false, ...}, ...]}
 ```
 
-#### `db_sum_column(sql: str, column: str, database: str | None = None)`
+#### `db_sum_query_column(query: str, column: str, database: str | None = None)`
 
-Compute the SUM() of a single column for validation scenarios.
+Sum a specific column from a SELECT query's results.
+
+This tool wraps your query to compute `SUM(column)` efficiently.
 
 **Args:**
-- `sql`: SQL SELECT query to sum a column from
-- `column`: Column name to sum
+- `query`: A SELECT query that returns rows with the column to sum
+- `column`: Name of the column to sum
 - `database`: Name of the database backend to use (optional, uses default if not specified)
 
 **Example:**
 ```python
-db_sum_column("SELECT amount FROM transactions", "amount", database="source")
+db_sum_query_column("SELECT amount FROM transactions", "amount", database="source")
 # Returns: {"sum": 12345.67}
 ```
 
@@ -712,11 +746,11 @@ db_list_views(database="source")
 # Returns: {"views": [{"name": "active_users", "schema": "dbo", "definition": "SELECT ..."}, ...]}
 ```
 
-**Note for Access COM backend**: `list_views()` returns query names without SQL (SQL extraction is expensive). Use `db_get_access_query()` to get SQL for specific queries.
+**Note for Access COM backend**: `list_views()` returns query names without SQL (SQL extraction is expensive). Use `db_get_access_query_definition()` to get SQL for specific queries.
 
-#### `db_get_access_query(name: str, database: str | None = None)`
+#### `db_get_access_query_definition(name: str, database: str | None = None)`
 
-Get Access query SQL by name. **Requires `access_com` backend** (not `access_odbc`).
+Get Access query SQL definition by name. **Requires `access_com` backend** (not `access_odbc`).
 
 **Args:**
 - `name`: Name of the Access query to retrieve
@@ -725,7 +759,7 @@ Get Access query SQL by name. **Requires `access_com` backend** (not `access_odb
 **Example:**
 ```python
 # Get Access query by name (requires access_com backend)
-query = db_get_access_query("ActiveCustomers", database="legacy")
+query = db_get_access_query_definition("ActiveCustomers", database="legacy")
 # Returns: {"name": "ActiveCustomers", "sql": "SELECT * FROM Customers WHERE Active = True", "type": "Select"}
 ```
 
@@ -733,16 +767,16 @@ query = db_get_access_query("ActiveCustomers", database="legacy")
 
 ### Security Tool
 
-#### `db_verify_readonly(database: str | None = None)`
+#### `db_check_readonly_status(database: str | None = None)`
 
-Verify that the database connection is read-only. Can be called by agents to confirm safety.
+Verify that the database connection is read-only for safety confirmation.
 
 **Args:**
 - `database`: Name of the database backend to use (optional, uses default if not specified)
 
 **Example:**
 ```python
-db_verify_readonly(database="source")
+db_check_readonly_status(database="source")
 # Returns: {"readonly": true, "details": "✓ Read-only verification passed"}
 ```
 
@@ -786,12 +820,12 @@ databases = db_list_databases()
 # Returns: {"databases": [{"name": "legacy", "is_default": True}, {"name": "new", "is_default": False}]}
 
 # 2. Get schema information from legacy database
-legacy_columns = db_columns("SELECT * FROM customers WHERE active = 1", database="legacy")
-legacy_count = db_row_count("SELECT * FROM customers WHERE active = 1", database="legacy")
-legacy_sum = db_sum_column("SELECT * FROM customers WHERE active = 1", "revenue", database="legacy")
+legacy_columns = db_get_query_columns("SELECT * FROM customers WHERE active = 1", database="legacy")
+legacy_count = db_count_query_results("SELECT * FROM customers WHERE active = 1", database="legacy")
+legacy_sum = db_sum_query_column("SELECT * FROM customers WHERE active = 1", "revenue", database="legacy")
 
 # 3. Build and test query on new database
-new_columns = db_columns("SELECT * FROM customers WHERE status = 'active'", database="new")
+new_columns = db_get_query_columns("SELECT * FROM customers WHERE status = 'active'", database="new")
 
 # 4. Compare queries across databases
 comparison = db_compare_queries(
@@ -821,8 +855,8 @@ db_compare_queries(
 )
 
 # Validate aggregates
-db_sum_column("SELECT amount FROM transactions", "amount", database="legacy")
-db_sum_column("SELECT amount FROM transactions", "amount", database="new")
+db_sum_query_column("SELECT amount FROM transactions", "amount", database="legacy")
+db_sum_query_column("SELECT amount FROM transactions", "amount", database="new")
 
 # Spot-check samples (requires permission)
 db_preview("SELECT * FROM transactions ORDER BY id", max_rows=10, database="legacy")
@@ -837,8 +871,8 @@ When modifying views or stored procedures:
 db_list_views()
 
 # Compare column schemas
-db_columns("SELECT * FROM old_view")
-db_columns("SELECT * FROM new_view")
+db_get_query_columns("SELECT * FROM old_view")
+db_get_query_columns("SELECT * FROM new_view")
 
 # Check execution plans
 db_explain("SELECT * FROM modified_view")

@@ -7,12 +7,12 @@ All tools are read-only by default and designed for safe database exploration an
 **Getting Started Workflow:**
 1. Always start with db_list_databases() to discover available databases
 2. Use db_list_tables() or db_list_views() to explore the schema
-3. Use db_columns() to understand query structure
-4. Use db_row_count() to validate query results
+3. Use db_get_query_columns() to understand query structure
+4. Use db_count_query_results() to validate query results
 5. Use db_compare_queries() for migration validation
 
 **Key Features:**
-- Multi-database support (SQL Server, PostgreSQL, Access)
+- Multi-database support (discover available databases with db_list_databases())
 - Cross-database comparison for migrations
 - Read-only by default (write operations are blocked)
 - Schema discovery and query analysis
@@ -33,38 +33,67 @@ from .security import validate_readonly_sql
 mcp = FastMCP(
     name="db-inspector-mcp",
     instructions=(
-        "A lightweight, extensible, cross-database MCP server for database introspection. "
-        "Provides read-only tools for exploring database schemas, validating queries, "
-        "and comparing databases. Supports SQL Server, PostgreSQL, and Microsoft Access."
+        "A cross-database MCP server for database introspection and migration validation. "
+        "Provides read-only tools for exploring schemas, analyzing queries, and comparing databases.\n\n"
+        "**Recommended workflow:**\n"
+        "1. Start with db_list_databases() to discover available databases\n"
+        "2. Use db_list_tables() and db_list_views() to explore schemas\n"
+        "3. Use db_count_query_results(), db_get_query_columns(), and db_sum_query_column() "
+        "to analyze queries (these tools wrap YOUR query for efficiency - pass the base query)\n"
+        "4. Use db_compare_queries() to validate migrations across databases\n\n"
+        "**How query analysis tools work:**\n"
+        "- db_count_query_results(query) wraps your query in SELECT COUNT(*) FROM (query)\n"
+        "- db_sum_query_column(query, column) wraps your query to sum the specified column\n"
+        "- db_get_query_columns(query) executes your query with 0 rows to get metadata\n"
+        "Pass your base SELECT query; the tool handles aggregation."
     )
 )
 
 
 @mcp.tool()
-def db_row_count(sql: str, database: str | None = None) -> dict[str, Any]:
+def db_count_query_results(query: str, database: str | None = None) -> dict[str, Any]:
     """
-    Return the number of rows an arbitrary SQL query would produce.
+    Count the number of rows a SELECT query returns.
+    
+    This tool wraps your query in SELECT COUNT(*) FROM (your_query) to efficiently
+    count results without fetching all data. Pass your base query; the tool handles
+    the COUNT aggregation.
     
     Use this tool to:
-    - Validate query results match expectations
+    - Count how many rows a query returns without fetching all data
+    - Validate query results match expected counts
     - Compare row counts between queries or databases
     - Check data volume before running operations
-    - Verify migrations by comparing row counts
+    
+    Examples:
+        # Count active users
+        db_count_query_results("SELECT * FROM users WHERE active = 1")
+        # Returns: {"count": 1234}
+        
+        # Count with complex filtering
+        db_count_query_results("SELECT * FROM orders WHERE status = 'completed' AND total > 100")
+        # Returns: {"count": 567}
+        
+        # Works with complex queries (CTEs, subqueries, etc.)
+        db_count_query_results('''
+            WITH recent AS (SELECT * FROM events WHERE date > '2024-01-01')
+            SELECT * FROM recent WHERE type = 'purchase'
+        ''')
+        # Returns: {"count": 89}
     
     Args:
-        sql: SQL SELECT query to count rows for (must be a SELECT statement, read-only)
-        database: Name of the database to use. Call db_list_databases() first to discover
-                  available database names. If not specified, uses the default database.
+        query: A SELECT query to count results from
+        database: Database name (call db_list_databases() first, uses default if not specified)
         
     Returns:
         Dictionary with "count" key containing the row count as an integer
     """
-    validate_readonly_sql(sql)
+    validate_readonly_sql(query)
     registry = get_registry()
     backend = registry.get(database)
     
     try:
-        count = backend.get_row_count(sql)
+        count = backend.count_query_results(query)
         return {"count": count}
     except ValueError as e:
         # Re-raise ValueError from registry (includes available backends)
@@ -74,32 +103,56 @@ def db_row_count(sql: str, database: str | None = None) -> dict[str, Any]:
 
 
 @mcp.tool()
-def db_columns(sql: str, database: str | None = None) -> dict[str, Any]:
+def db_get_query_columns(query: str, database: str | None = None) -> dict[str, Any]:
     """
-    Return column names, data types, nullability, and precision/scale for a SQL query.
+    Analyze the column schema of a SELECT query's results.
+    
+    This tool executes your query with a limit to fetch 0 rows, allowing it to
+    inspect column metadata without retrieving data. Useful for understanding
+    query structure before execution.
     
     Use this tool to:
-    - Understand the schema/structure of query results
+    - Understand the structure of query results before executing
     - Validate column types match expectations
     - Compare schemas between queries or databases
     - Build type-safe code based on query results
     - Debug schema mismatches during migrations
     
+    Examples:
+        # Analyze columns from a simple query
+        db_get_query_columns("SELECT id, name, email FROM users WHERE active = 1")
+        # Returns: {"columns": [
+        #   {"name": "id", "type": "int", "nullable": false, ...},
+        #   {"name": "name", "type": "varchar", "nullable": false, ...},
+        #   {"name": "email", "type": "varchar", "nullable": true, ...}
+        # ]}
+        
+        # Analyze columns from a JOIN
+        db_get_query_columns('''
+            SELECT u.id, u.name, o.total 
+            FROM users u 
+            JOIN orders o ON u.id = o.user_id
+        ''')
+        # Returns column metadata including types and nullability
+        
+        # Works with aggregations and expressions
+        db_get_query_columns("SELECT COUNT(*) as total, category FROM products GROUP BY category")
+        # Returns: {"columns": [{"name": "total", ...}, {"name": "category", ...}]}
+    
     Args:
-        sql: SQL SELECT query to get columns for (must be a SELECT statement, read-only)
-        database: Name of the database to use. Call db_list_databases() first to discover
-                  available database names. If not specified, uses the default database.
+        query: A SELECT query to analyze
+        database: Database name (call db_list_databases() first, uses default if not specified)
         
     Returns:
         Dictionary with "columns" key containing list of column metadata dictionaries.
         Each column dict includes: name, type, nullable, precision, scale, etc.
     """
-    validate_readonly_sql(sql)
+    validate_readonly_sql(query)
     registry = get_registry()
     backend = registry.get(database)
     
     try:
-        columns = backend.get_columns(sql)
+        columns = backend.get_query_columns(query)
         return {"columns": columns}
     except ValueError as e:
         # Re-raise ValueError from registry (includes available backends)
@@ -109,31 +162,54 @@ def db_columns(sql: str, database: str | None = None) -> dict[str, Any]:
 
 
 @mcp.tool()
-def db_sum_column(sql: str, column: str, database: str | None = None) -> dict[str, Any]:
+def db_sum_query_column(query: str, column: str, database: str | None = None) -> dict[str, Any]:
     """
-    Compute the SUM() of a single column for validation and aggregation checks.
+    Sum a specific column from a SELECT query's results.
+    
+    This tool wraps your query to compute SUM(column) efficiently. Pass your base
+    query; the tool handles the SUM aggregation.
     
     Use this tool to:
+    - Compute totals from filtered results (e.g., revenue, transaction amounts)
     - Validate aggregate values match expectations
     - Compare totals across databases during migrations
     - Verify financial/transaction totals
-    - Check data integrity through aggregate validation
+    
+    Examples:
+        # Sum transaction amounts for 2024
+        db_sum_query_column("SELECT amount FROM transactions WHERE year = 2024", "amount")
+        # Returns: {"sum": 12345.67}
+        
+        # Sum with complex filtering
+        db_sum_query_column(
+            "SELECT price FROM products WHERE category = 'electronics' AND in_stock = 1",
+            "price"
+        )
+        # Returns: {"sum": 98765.43}
+        
+        # Sum from a JOIN
+        db_sum_query_column('''
+            SELECT o.total 
+            FROM orders o 
+            JOIN users u ON o.user_id = u.id 
+            WHERE u.region = 'west'
+        ''', "total")
+        # Returns: {"sum": 54321.00}
     
     Args:
-        sql: SQL SELECT query to sum a column from (must be SELECT, read-only)
-        column: Column name to sum (must exist in the query result)
-        database: Name of the database to use. Call db_list_databases() first to discover
-                  available database names. If not specified, uses the default database.
+        query: A SELECT query that returns rows with the column to sum
+        column: Name of the column to sum (must exist in query results)
+        database: Database name (call db_list_databases() first, uses default if not specified)
         
     Returns:
-        Dictionary with "sum" key containing the sum value (numeric) or None if column not found
+        Dictionary with "sum" key containing the sum value (numeric) or None if all values are NULL
     """
-    validate_readonly_sql(sql)
+    validate_readonly_sql(query)
     registry = get_registry()
     backend = registry.get(database)
     
     try:
-        sum_val = backend.sum_column(sql, column)
+        sum_val = backend.sum_query_column(query, column)
         return {"sum": sum_val}
     except ValueError as e:
         # Re-raise ValueError from registry (includes available backends)
@@ -143,21 +219,40 @@ def db_sum_column(sql: str, column: str, database: str | None = None) -> dict[st
 
 
 @mcp.tool()
-def db_measure_query(sql: str, max_rows: int = 1000, database: str | None = None) -> dict[str, Any]:
+def db_measure_query(query: str, max_rows: int = 1000, database: str | None = None) -> dict[str, Any]:
     """
     Measure query execution time and retrieve limited rows for performance testing.
+    
+    This tool executes your query and measures how long it takes, stopping after
+    fetching a specified number of rows. Useful for performance benchmarking.
     
     Use this tool to:
     - Measure query performance (execution time)
     - Test query speed before running full queries
     - Validate queries return expected row counts
-    - Performance benchmarking
+    - Performance benchmarking and optimization
+    
+    Examples:
+        # Measure a simple query
+        db_measure_query("SELECT * FROM users WHERE active = 1")
+        # Returns: {"execution_time_ms": 45.2, "row_count": 850, "hit_limit": false}
+        
+        # Measure with custom row limit
+        db_measure_query("SELECT * FROM large_table", max_rows=100)
+        # Returns: {"execution_time_ms": 123.5, "row_count": 100, "hit_limit": true}
+        
+        # Benchmark complex query
+        db_measure_query('''
+            SELECT u.name, COUNT(o.id) as order_count
+            FROM users u
+            LEFT JOIN orders o ON u.id = o.user_id
+            GROUP BY u.id, u.name
+        ''', max_rows=500)
     
     Args:
-        sql: SQL SELECT query to measure (must be SELECT, read-only)
+        query: SQL SELECT query to measure (must be SELECT, read-only)
         max_rows: Maximum number of rows to retrieve (default: 1000). Query stops after this limit.
-        database: Name of the database to use. Call db_list_databases() first to discover
-                  available database names. If not specified, uses the default database.
+        database: Database name (call db_list_databases() first, uses default if not specified)
         
     Returns:
         Dictionary with:
@@ -165,12 +260,12 @@ def db_measure_query(sql: str, max_rows: int = 1000, database: str | None = None
         - row_count: Number of rows actually retrieved
         - hit_limit: Boolean indicating if max_rows limit was reached
     """
-    validate_readonly_sql(sql)
+    validate_readonly_sql(query)
     registry = get_registry()
     backend = registry.get(database)
     
     try:
-        result = backend.measure_query(sql, max_rows)
+        result = backend.measure_query(query, max_rows)
         return result
     except ValueError as e:
         # Re-raise ValueError from registry (includes available backends)
@@ -180,36 +275,49 @@ def db_measure_query(sql: str, max_rows: int = 1000, database: str | None = None
 
 
 @mcp.tool()
-def db_preview(sql: str, max_rows: int = 100, database: str | None = None) -> dict[str, Any]:
+def db_preview(query: str, max_rows: int = 100, database: str | None = None) -> dict[str, Any]:
     """
     Sample N rows from a query result to preview actual data.
     
     **Requires data access permission** (set DB_MCP_ALLOW_DATA_ACCESS=true or DB_MCP_ALLOW_PREVIEW=true in .env).
     
+    This tool executes your query and returns a limited number of actual data rows.
+    Useful for spot-checking data quality and debugging.
+    
     Use this tool to:
-    - Preview query results
-    - Spot-check data values
-    - Validate data quality
+    - Preview query results before processing all data
+    - Spot-check data values and quality
+    - Validate data format and content
     - Debug data issues
     - Compare sample data across databases
     
+    Examples:
+        # Preview first 10 users
+        db_preview("SELECT * FROM users WHERE active = 1 ORDER BY created_at DESC", max_rows=10)
+        # Returns: {"rows": [{"id": 1, "name": "Alice", ...}, ...]}
+        
+        # Preview with specific columns
+        db_preview("SELECT id, email, created_at FROM users WHERE role = 'admin'", max_rows=5)
+        
+        # Preview aggregated results
+        db_preview("SELECT category, COUNT(*) as count FROM products GROUP BY category")
+    
     Args:
-        sql: SQL SELECT query to preview (must be SELECT, read-only)
+        query: SQL SELECT query to preview (must be SELECT, read-only)
         max_rows: Maximum number of rows to return (default: 100)
-        database: Name of the database to use. Call db_list_databases() first to discover
-                  available database names. If not specified, uses the default database.
+        database: Database name (call db_list_databases() first, uses default if not specified)
         
     Returns:
         Dictionary with "rows" key containing list of row dictionaries.
         Each row is a dict mapping column names to values.
     """
-    validate_readonly_sql(sql)
+    validate_readonly_sql(query)
     check_data_access("db_preview")  # Check permission
     registry = get_registry()
     backend = registry.get(database)
     
     try:
-        rows = backend.preview(sql, max_rows)
+        rows = backend.preview(query, max_rows)
         return {"rows": rows}
     except PermissionError:
         raise  # Re-raise permission errors
@@ -221,32 +329,50 @@ def db_preview(sql: str, max_rows: int = 100, database: str | None = None) -> di
 
 
 @mcp.tool()
-def db_explain(sql: str, database: str | None = None) -> dict[str, Any]:
+def db_explain(query: str, database: str | None = None) -> dict[str, Any]:
     """
     Return database-native execution plan (EXPLAIN/EXPLAIN PLAN output).
     
+    This tool analyzes how the database will execute your query, showing the
+    execution strategy, index usage, and estimated costs.
+    
     Use this tool to:
-    - Analyze query performance
+    - Analyze query performance characteristics
     - Identify missing indexes
     - Understand query execution strategy
     - Debug slow queries
     - Optimize query performance
     
+    Examples:
+        # Get execution plan for a simple query
+        db_explain("SELECT * FROM users WHERE email = 'test@example.com'")
+        # Returns: {"plan": "<execution plan XML/JSON>"}
+        
+        # Analyze JOIN performance
+        db_explain('''
+            SELECT u.name, o.total
+            FROM users u
+            JOIN orders o ON u.id = o.user_id
+            WHERE o.status = 'completed'
+        ''')
+        
+        # Check if index is used
+        db_explain("SELECT * FROM products WHERE category = 'electronics' AND price > 100")
+    
     Args:
-        sql: SQL SELECT query to explain (must be SELECT, read-only)
-        database: Name of the database to use. Call db_list_databases() first to discover
-                  available database names. If not specified, uses the default database.
+        query: SQL SELECT query to explain (must be SELECT, read-only)
+        database: Database name (call db_list_databases() first, uses default if not specified)
         
     Returns:
         Dictionary with "plan" key containing execution plan as string (format varies by database).
         For SQL Server: XML execution plan. For PostgreSQL: EXPLAIN output.
     """
-    validate_readonly_sql(sql)
+    validate_readonly_sql(query)
     registry = get_registry()
     backend = registry.get(database)
     
     try:
-        plan = backend.explain_query(sql)
+        plan = backend.explain_query(query)
         return {"plan": plan}
     except ValueError as e:
         # Re-raise ValueError from registry (includes available backends)
@@ -266,7 +392,11 @@ def db_compare_queries(
     """
     Compare two queries side-by-side, optionally from different databases.
     
-    **Perfect for migration validation!** Use this tool to:
+    **Perfect for migration validation!** This tool compares row counts, column schemas,
+    and optionally sample data between two queries. Essential for verifying database
+    migrations and query refactoring.
+    
+    Use this tool to:
     - Validate migrated queries produce matching results
     - Compare query performance and structure
     - Verify refactored queries maintain correctness
@@ -275,14 +405,36 @@ def db_compare_queries(
     
     Always call db_list_databases() first to discover available database names.
     
+    Examples:
+        # Compare queries in the same database
+        db_compare_queries(
+            "SELECT * FROM source_table",
+            "SELECT * FROM target_table"
+        )
+        # Returns row count diff, column differences, type mismatches
+        
+        # Compare across databases (migration scenario)
+        db_compare_queries(
+            "SELECT * FROM customers WHERE active = 1",  # Access query
+            "SELECT * FROM customers WHERE status = 'active'",  # SQL Server query
+            database1="legacy",
+            database2="new",
+            compare_samples=True
+        )
+        
+        # Verify refactored query
+        db_compare_queries(
+            "SELECT * FROM old_view",
+            "SELECT * FROM new_view",
+            compare_samples=False
+        )
+    
     Args:
         sql1: First SQL SELECT query to compare (must be SELECT, read-only)
         sql2: Second SQL SELECT query to compare (must be SELECT, read-only)
         compare_samples: If True, compare sample data (requires DB_MCP_ALLOW_DATA_ACCESS=true)
-        database1: Name of the database for sql1. Call db_list_databases() to discover
-                   available names. If not specified, uses the default database.
-        database2: Name of the database for sql2. Call db_list_databases() to discover
-                    available names. If not specified, uses database1 (same database comparison).
+        database1: Database name for sql1 (call db_list_databases() first, uses default if not specified)
+        database2: Database name for sql2 (call db_list_databases() first, uses database1 if not specified)
         
     Returns:
         Dictionary with:
@@ -290,6 +442,7 @@ def db_compare_queries(
         - row_count_1, row_count_2: Individual row counts
         - columns_missing_in_2, columns_missing_in_1: Column name differences
         - type_mismatches: List of columns with different types
+        - database1, database2: Database names used
         - sample_differences: (if compare_samples=True) Sample data comparison
     """
     validate_readonly_sql(sql1)
@@ -305,13 +458,13 @@ def db_compare_queries(
     
     try:
         # Get row counts
-        count1 = backend1.get_row_count(sql1)
-        count2 = backend2.get_row_count(sql2)
+        count1 = backend1.count_query_results(sql1)
+        count2 = backend2.count_query_results(sql2)
         row_count_diff = count2 - count1
         
         # Get column schemas
-        cols1 = backend1.get_columns(sql1)
-        cols2 = backend2.get_columns(sql2)
+        cols1 = backend1.get_query_columns(sql1)
+        cols2 = backend2.get_query_columns(sql2)
         
         # Compare columns
         col_names1 = {col["name"] for col in cols1}
@@ -374,7 +527,10 @@ def db_compare_queries(
 @mcp.tool()
 def db_list_tables(database: str | None = None) -> dict[str, Any]:
     """
-    List all tables in the database with metadata (name, schema, row counts, etc.).
+    List all tables in the database with metadata.
+    
+    This tool queries the database schema to discover all available tables,
+    including row counts and other metadata.
     
     Use this tool to:
     - Explore the database schema
@@ -382,9 +538,21 @@ def db_list_tables(database: str | None = None) -> dict[str, Any]:
     - Understand database structure
     - Find tables for queries
     
+    Examples:
+        # List all tables in default database
+        db_list_tables()
+        # Returns: {"tables": [{"name": "users", "schema": "dbo", "row_count": 1234}, ...]}
+        
+        # List tables in specific database
+        db_list_tables(database="legacy")
+        
+        # Use with db_list_databases() to explore all databases
+        databases = db_list_databases()
+        for db in databases["databases"]:
+            tables = db_list_tables(database=db["name"])
+    
     Args:
-        database: Name of the database to use. Call db_list_databases() first to discover
-                  available database names. If not specified, uses the default database.
+        database: Database name (call db_list_databases() first, uses default if not specified)
     
     Returns:
         Dictionary with "tables" key containing list of table metadata dictionaries.
@@ -408,19 +576,37 @@ def db_list_views(database: str | None = None) -> dict[str, Any]:
     """
     List all views in the database with their SQL definitions.
     
+    This tool queries the database schema to discover all views and their
+    underlying SQL definitions.
+    
     Use this tool to:
     - Discover available views
     - Understand view definitions and logic
     - Compare views across databases
     - Debug view-related issues
     
+    Examples:
+        # List all views in default database
+        db_list_views()
+        # Returns: {"views": [{"name": "active_users", "schema": "dbo", "definition": "SELECT ..."}, ...]}
+        
+        # List views in specific database
+        db_list_views(database="new")
+        
+        # Compare views across databases
+        legacy_views = db_list_views(database="legacy")
+        new_views = db_list_views(database="new")
+    
     Args:
-        database: Name of the database to use. Call db_list_databases() first to discover
-                  available database names. If not specified, uses the default database.
+        database: Database name (call db_list_databases() first, uses default if not specified)
     
     Returns:
         Dictionary with "views" key containing list of view metadata dictionaries.
         Each view dict includes: name, schema, definition (SQL), and other metadata.
+        
+    Note:
+        For Access COM backend, list_views() returns query names without SQL definitions
+        (SQL extraction is expensive). Use db_get_access_query_definition() to get SQL for specific queries.
     """
     registry = get_registry()
     backend = registry.get(database)
@@ -436,18 +622,34 @@ def db_list_views(database: str | None = None) -> dict[str, Any]:
 
 
 @mcp.tool()
-def db_verify_readonly(database: str | None = None) -> dict[str, Any]:
+def db_check_readonly_status(database: str | None = None) -> dict[str, Any]:
     """
     Verify that the database connection is read-only for safety confirmation.
+    
+    This tool checks database permissions to confirm the connection cannot
+    perform write operations, providing safety verification before operations.
     
     Use this tool to:
     - Confirm database safety before operations
     - Validate read-only configuration
     - Check security settings
+    - Verify permissions are correctly restricted
+    
+    Examples:
+        # Check default database
+        db_check_readonly_status()
+        # Returns: {"readonly": true, "details": "✓ Read-only verification passed"}
+        
+        # Check specific database
+        db_check_readonly_status(database="prod")
+        
+        # Verify all databases are read-only
+        for db in db_list_databases()["databases"]:
+            status = db_check_readonly_status(database=db["name"])
+            print(f"{db['name']}: {status['readonly']}")
     
     Args:
-        database: Name of the database to use. Call db_list_databases() first to discover
-                  available database names. If not specified, uses the default database.
+        database: Database name (call db_list_databases() first, uses default if not specified)
     
     Returns:
         Dictionary with:
@@ -468,22 +670,39 @@ def db_verify_readonly(database: str | None = None) -> dict[str, Any]:
 
 
 @mcp.tool()
-def db_get_access_query(name: str, database: str | None = None) -> dict[str, Any]:
+def db_get_access_query_definition(name: str, database: str | None = None) -> dict[str, Any]:
     """
-    Get Access query SQL by name (requires access_com backend).
+    Get Access query SQL definition by name (requires access_com backend).
+    
+    This tool retrieves the native SQL definition of a saved Access query by name.
+    Only available with the access_com backend (not access_odbc).
     
     Use this tool to:
     - Retrieve native SQL from Access queries by name
     - Get query definitions for migration workflows
     - Understand Access query structure
+    - Extract queries for conversion to other database systems
     
     **Note**: This tool requires the `access_com` backend (not `access_odbc`).
     Set DB_MCP_DATABASE=access_com to use this functionality.
     
+    Examples:
+        # Get a specific Access query by name
+        db_get_access_query_definition("ActiveCustomers")
+        # Returns: {"name": "ActiveCustomers", "sql": "SELECT * FROM Customers WHERE Active = True", "type": "Select"}
+        
+        # Get query for migration
+        query = db_get_access_query_definition("MonthlyRevenue", database="legacy")
+        # Use the SQL to create equivalent query in new database
+        
+        # List all queries then get specific ones
+        views = db_list_views(database="legacy")
+        for view in views["views"]:
+            definition = db_get_access_query_definition(view["name"], database="legacy")
+    
     Args:
         name: Name of the Access query to retrieve
-        database: Name of the database to use. Call db_list_databases() first to discover
-                  available database names. If not specified, uses the default database.
+        database: Database name (call db_list_databases() first, uses default if not specified)
     
     Returns:
         Dictionary with:
@@ -496,7 +715,7 @@ def db_get_access_query(name: str, database: str | None = None) -> dict[str, Any
     
     if not isinstance(backend, AccessCOMBackend):
         raise ValueError(
-            f"db_get_access_query requires access_com backend, but database '{database or 'default'}' "
+            f"db_get_access_query_definition requires access_com backend, but database '{database or 'default'}' "
             f"uses {type(backend).__name__}. Set DB_MCP_DATABASE=access_com to use this feature."
         )
     
@@ -518,14 +737,35 @@ def db_list_databases() -> dict[str, Any]:
     **IMPORTANT: Always call this tool first** to discover available database names before using
     other tools. Database names are user-defined and configured via environment variables.
     
+    This tool returns which databases are available in the current configuration,
+    allowing you to discover and work with multiple databases simultaneously.
+    
     Use this tool when:
     - Starting any database operation to see what databases are available
     - Working with multi-database configurations (migrations, testing, etc.)
     - You need to know which database is the default
     
+    Examples:
+        # List all configured databases
+        db_list_databases()
+        # Returns: {
+        #   "databases": [
+        #     {"name": "legacy", "is_default": true},
+        #     {"name": "new", "is_default": false}
+        #   ],
+        #   "default": "legacy"
+        # }
+        
+        # Use to iterate over all databases
+        dbs = db_list_databases()
+        for db in dbs["databases"]:
+            tables = db_list_tables(database=db["name"])
+            print(f"{db['name']} has {len(tables['tables'])} tables")
+    
     Returns:
         Dictionary with "databases" key containing list of database names and default indicator.
         Each database entry has "name" and "is_default" fields.
+        Also includes "default" key with the default database name.
     """
     registry = get_registry()
     backend_names = registry.list_backends()
@@ -543,4 +783,3 @@ def db_list_databases() -> dict[str, Any]:
         "databases": databases,
         "default": default_name
     }
-

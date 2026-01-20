@@ -19,12 +19,12 @@ class DatabaseBackend(ABC):
         self.query_timeout_seconds = query_timeout_seconds
     
     @abstractmethod
-    def get_row_count(self, sql: str) -> int:
+    def count_query_results(self, query: str) -> int:
         """
-        Get the number of rows an arbitrary SQL query would produce.
+        Count the number of rows a SELECT query returns.
         
         Args:
-            sql: SQL query to count rows for
+            query: SQL query to count rows for
             
         Returns:
             Number of rows
@@ -32,12 +32,12 @@ class DatabaseBackend(ABC):
         pass
     
     @abstractmethod
-    def get_columns(self, sql: str) -> list[dict[str, Any]]:
+    def get_query_columns(self, query: str) -> list[dict[str, Any]]:
         """
         Get column metadata for a SQL query.
         
         Args:
-            sql: SQL query to get columns for
+            query: SQL query to get columns for
             
         Returns:
             List of dictionaries with column metadata:
@@ -50,12 +50,12 @@ class DatabaseBackend(ABC):
         pass
     
     @abstractmethod
-    def sum_column(self, sql: str, column: str) -> float | None:
+    def sum_query_column(self, query: str, column: str) -> float | None:
         """
-        Compute the SUM() of a single column.
+        Compute the SUM() of a single column from query results.
         
         Args:
-            sql: SQL query to sum a column from
+            query: SQL query to sum a column from
             column: Column name to sum
             
         Returns:
@@ -64,12 +64,12 @@ class DatabaseBackend(ABC):
         pass
     
     @abstractmethod
-    def measure_query(self, sql: str, max_rows: int) -> dict[str, Any]:
+    def measure_query(self, query: str, max_rows: int) -> dict[str, Any]:
         """
         Measure query execution time and retrieve limited rows.
         
         Args:
-            sql: SQL query to measure
+            query: SQL query to measure
             max_rows: Maximum number of rows to retrieve
             
         Returns:
@@ -81,12 +81,12 @@ class DatabaseBackend(ABC):
         pass
     
     @abstractmethod
-    def preview(self, sql: str, max_rows: int) -> list[dict[str, Any]]:
+    def preview(self, query: str, max_rows: int) -> list[dict[str, Any]]:
         """
         Sample N rows from a query result.
         
         Args:
-            sql: SQL query to preview
+            query: SQL query to preview
             max_rows: Maximum number of rows to return
             
         Returns:
@@ -95,12 +95,12 @@ class DatabaseBackend(ABC):
         pass
     
     @abstractmethod
-    def explain_query(self, sql: str) -> str:
+    def explain_query(self, query: str) -> str:
         """
         Get database-native execution plan.
         
         Args:
-            sql: SQL query to explain
+            query: SQL query to explain
             
         Returns:
             Execution plan as a string (XML for SQL Server, JSON for Postgres)

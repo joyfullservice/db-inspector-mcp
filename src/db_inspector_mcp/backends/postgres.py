@@ -2,10 +2,11 @@
 
 import json
 import time
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
-import psycopg2
-from psycopg2.extras import RealDictCursor
+if TYPE_CHECKING:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
 
 from .base import DatabaseBackend
 
@@ -22,10 +23,12 @@ class PostgresBackend(DatabaseBackend):
             query_timeout_seconds: Query timeout in seconds
         """
         super().__init__(connection_string, query_timeout_seconds)
-        self._connection: psycopg2.extensions.connection | None = None
+        self._connection: Any = None
     
-    def _get_connection(self) -> psycopg2.extensions.connection:
+    def _get_connection(self) -> Any:
         """Get or create a database connection."""
+        import psycopg2
+        
         if self._connection is None:
             self._connection = psycopg2.connect(
                 self.connection_string,
@@ -47,6 +50,8 @@ class PostgresBackend(DatabaseBackend):
         Returns:
             Cursor with results if fetch=True, otherwise None
         """
+        from psycopg2.extras import RealDictCursor
+        
         conn = self._get_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(sql)
@@ -54,20 +59,20 @@ class PostgresBackend(DatabaseBackend):
             return cursor
         return None
     
-    def get_row_count(self, sql: str) -> int:
-        """Get row count by wrapping query in SELECT COUNT(*)."""
-        wrapped_sql = f"SELECT COUNT(*) as cnt FROM ({sql}) AS subquery"
-        cursor = self._execute_query(wrapped_sql)
+    def count_query_results(self, query: str) -> int:
+        """Count row count by wrapping query in SELECT COUNT(*)."""
+        wrapped_query = f"SELECT COUNT(*) as cnt FROM ({query}) AS subquery"
+        cursor = self._execute_query(wrapped_query)
         result = cursor.fetchone()
         count = result["cnt"] if result else 0
         cursor.close()
         return count
     
-    def get_columns(self, sql: str) -> list[dict[str, Any]]:
+    def get_query_columns(self, query: str) -> list[dict[str, Any]]:
         """Get column metadata using LIMIT 0."""
         # Use LIMIT 0 to get metadata without fetching data
-        wrapped_sql = f"SELECT * FROM ({sql}) AS subquery LIMIT 0"
-        cursor = self._execute_query(wrapped_sql)
+        wrapped_query = f"SELECT * FROM ({query}) AS subquery LIMIT 0"
+        cursor = self._execute_query(wrapped_query)
         
         columns = []
         for col in cursor.description:
@@ -85,24 +90,24 @@ class PostgresBackend(DatabaseBackend):
         cursor.close()
         return columns
     
-    def sum_column(self, sql: str, column: str) -> float | None:
-        """Compute SUM of a column."""
+    def sum_query_column(self, query: str, column: str) -> float | None:
+        """Compute SUM of a column from query results."""
         # Use double quotes for column name to handle case sensitivity
-        wrapped_sql = f'SELECT SUM("{column}") as sum_val FROM ({sql}) AS subquery'
-        cursor = self._execute_query(wrapped_sql)
+        wrapped_query = f'SELECT SUM("{column}") as sum_val FROM ({query}) AS subquery'
+        cursor = self._execute_query(wrapped_query)
         result = cursor.fetchone()
         sum_val = result["sum_val"] if result else None
         cursor.close()
         return sum_val
     
-    def measure_query(self, sql: str, max_rows: int) -> dict[str, Any]:
+    def measure_query(self, query: str, max_rows: int) -> dict[str, Any]:
         """Measure query execution time and retrieve limited rows."""
         # Add LIMIT clause
-        if "LIMIT" not in sql.upper():
-            sql = f"{sql} LIMIT {max_rows}"
+        if "LIMIT" not in query.upper():
+            query = f"{query} LIMIT {max_rows}"
         
         start_time = time.time()
-        cursor = self._execute_query(sql)
+        cursor = self._execute_query(query)
         rows = cursor.fetchall()
         execution_time_ms = (time.time() - start_time) * 1000
         
@@ -120,13 +125,13 @@ class PostgresBackend(DatabaseBackend):
             "hit_limit": hit_limit,
         }
     
-    def preview(self, sql: str, max_rows: int) -> list[dict[str, Any]]:
+    def preview(self, query: str, max_rows: int) -> list[dict[str, Any]]:
         """Sample N rows from a query result."""
         # Add LIMIT clause
-        if "LIMIT" not in sql.upper():
-            sql = f"{sql} LIMIT {max_rows}"
+        if "LIMIT" not in query.upper():
+            query = f"{query} LIMIT {max_rows}"
         
-        cursor = self._execute_query(sql)
+        cursor = self._execute_query(query)
         rows = cursor.fetchall()
         
         # Convert rows to dictionaries (RealDictCursor already does this)
@@ -135,10 +140,10 @@ class PostgresBackend(DatabaseBackend):
         cursor.close()
         return result
     
-    def explain_query(self, sql: str) -> str:
+    def explain_query(self, query: str) -> str:
         """Get execution plan using EXPLAIN (FORMAT JSON)."""
-        explain_sql = f"EXPLAIN (FORMAT JSON) {sql}"
-        cursor = self._execute_query(explain_sql)
+        explain_query = f"EXPLAIN (FORMAT JSON) {query}"
+        cursor = self._execute_query(explain_query)
         result = cursor.fetchone()
         cursor.close()
         
