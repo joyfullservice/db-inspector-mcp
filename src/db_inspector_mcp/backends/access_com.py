@@ -5,9 +5,11 @@ from typing import Any
 
 try:
     import win32com.client
+    from win32com.client import gencache
     COM_AVAILABLE = True
 except ImportError:
     COM_AVAILABLE = False
+    gencache = None  # type: ignore
 
 from .access_odbc import AccessODBCBackend
 from .base import DatabaseBackend
@@ -65,6 +67,13 @@ class AccessCOMBackend(DatabaseBackend):
         
         We keep our Access instance alive for subsequent MCP calls.
         
+        Early Binding Strategy:
+        When creating a new Access instance, we use gencache.EnsureDispatch() instead
+        of plain Dispatch(). This generates and caches type library bindings, which:
+        - Makes COM automation more reliable
+        - Enables Application.Run to work correctly (late binding often fails)
+        - Benefits subsequent GetObject calls (bindings are cached system-wide)
+        
         Note: We deliberately don't use OpenCurrentDatabase() when creating a new
         Access instance because CurrentDb() often fails in that scenario. Instead,
         we use DBEngine.OpenDatabase() directly in _get_current_db().
@@ -87,24 +96,28 @@ class AccessCOMBackend(DatabaseBackend):
                         if current_db is not None:
                             # Access has a DIFFERENT database open - do NOT use it!
                             # Create our own Access instance to avoid interfering
-                            self._app = win32com.client.Dispatch("Access.Application")
+                            # Use gencache.EnsureDispatch for early binding - more reliable
+                            # and enables Application.Run if needed
+                            self._app = gencache.EnsureDispatch("Access.Application")
                             self._db_opened_via_getobject = False
                             self._owns_app = True  # We created this
                         else:
                             # Access is running but no database open - we can use it
                             # But actually, better to create our own to avoid confusion
-                            self._app = win32com.client.Dispatch("Access.Application")
+                            self._app = gencache.EnsureDispatch("Access.Application")
                             self._db_opened_via_getobject = False
                             self._owns_app = True
                     except Exception:
                         # Can't check CurrentDb - Access might be in weird state
                         # Create our own instance to be safe
-                        self._app = win32com.client.Dispatch("Access.Application")
+                        self._app = gencache.EnsureDispatch("Access.Application")
                         self._db_opened_via_getobject = False
                         self._owns_app = True
                 except Exception:
                     # No running Access instance, create new one
-                    self._app = win32com.client.Dispatch("Access.Application")
+                    # Use gencache.EnsureDispatch for early binding - this generates/caches
+                    # type library bindings, which makes COM automation more reliable
+                    self._app = gencache.EnsureDispatch("Access.Application")
                     self._db_opened_via_getobject = False
                     self._owns_app = True  # We created this - we're responsible for cleanup
         return self._app
@@ -168,6 +181,52 @@ class AccessCOMBackend(DatabaseBackend):
                         )
         
         return self._db
+    
+    def call_vba_function(self, function_name: str, *args) -> Any:
+        """
+        Call a VBA function in the Access database via Application.Run.
+        
+        This method handles the quirk where early-bound Application.Run returns
+        a tuple instead of just the result. The actual return value is always
+        the first element of the tuple.
+        
+        Args:
+            function_name: Name of the VBA function to call (can include module prefix)
+            *args: Arguments to pass to the VBA function
+            
+        Returns:
+            The return value from the VBA function
+            
+        Raises:
+            RuntimeError: If the function call fails
+            
+        Example:
+            # Call a simple function
+            result = backend.call_vba_function("MyModule.GetVersion")
+            
+            # Call with arguments
+            result = backend.call_vba_function("MyModule.Calculate", 10, 20)
+            
+            # Call an add-in function (use the API path pattern)
+            result = backend.call_vba_function("MyAddin.API", "FunctionName", arg1)
+        """
+        app = self._get_access_app()
+        try:
+            if args:
+                result = app.Run(function_name, *args)
+            else:
+                result = app.Run(function_name)
+            
+            # With early binding (gencache.EnsureDispatch), Application.Run returns
+            # a tuple where the first element is the actual result
+            if isinstance(result, tuple) and len(result) > 0:
+                return result[0]
+            return result
+        except Exception as e:
+            # COM errors often have cryptic codes - provide more context
+            raise RuntimeError(
+                f"Failed to call VBA function '{function_name}': {e}"
+            ) from e
     
     def close(self):
         """
