@@ -267,7 +267,12 @@ class AccessODBCBackend(DatabaseBackend):
         return tables
     
     def list_views(self) -> list[dict[str, Any]]:
-        """List all views (queries) with their definitions."""
+        """
+        List all views (queries) with their definitions.
+        
+        Falls back to ODBC catalog functions if MSysObjects is not accessible.
+        """
+        # First, try MSysObjects (most reliable when accessible)
         sql = """
             SELECT 
                 MSysObjects.Name AS view_name,
@@ -276,6 +281,7 @@ class AccessODBCBackend(DatabaseBackend):
             FROM MSysObjects
             INNER JOIN MSysQueries ON MSysObjects.Id = MSysQueries.ObjectId
             WHERE MSysObjects.Type = 5
+            AND Left(MSysObjects.Name, 1) <> '~'
             ORDER BY MSysObjects.Name
         """
         try:
@@ -292,10 +298,63 @@ class AccessODBCBackend(DatabaseBackend):
             
             cursor.close()
             return views
-        except Exception:
-            # If MSysQueries is not accessible, try alternative approach
-            # Access may restrict access to system tables
-            return []
+        except pyodbc.ProgrammingError as e:
+            # Check if it's a permission error on MSysObjects
+            error_msg = str(e).lower()
+            if "msysobjects" in error_msg or "msysqueries" in error_msg or "no read permission" in error_msg or "-1907" in str(e):
+                # Try alternative method using ODBC catalog functions
+                try:
+                    return self._list_views_via_catalog()
+                except Exception as catalog_error:
+                    # If catalog method also fails, raise a helpful error
+                    raise RuntimeError(
+                        f"Cannot list views/queries: MSysObjects system table is not accessible "
+                        f"(permission denied). This is common with Access databases that have "
+                        f"restricted system table access. Consider using the 'access_com' backend "
+                        f"instead, which uses COM automation and can access query definitions directly. "
+                        f"Original error: {e}. Catalog method also failed: {catalog_error}"
+                    ) from e
+            # Re-raise if it's a different error
+            raise
+        except Exception as e:
+            # For other errors, try catalog method as fallback
+            try:
+                return self._list_views_via_catalog()
+            except Exception:
+                # If catalog method fails, raise original error
+                raise RuntimeError(
+                    f"Failed to list views/queries: {e}. "
+                    f"Consider using the 'access_com' backend for better compatibility."
+                ) from e
+    
+    def _list_views_via_catalog(self) -> list[dict[str, Any]]:
+        """
+        List views/queries using ODBC catalog functions as fallback.
+        
+        This method uses pyodbc's tables() method which queries the ODBC catalog.
+        Note: This method can list query names but cannot retrieve SQL definitions
+        without access to MSysQueries system table.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        # Use ODBC catalog function to get view/query names
+        # table_type='VIEW' filters for queries/views in Access
+        views = []
+        try:
+            for row in cursor.tables(tableType='VIEW'):
+                view_name = row.table_name
+                # Skip system views and temporary queries (starting with ~)
+                if not view_name.startswith('MSys') and not view_name.startswith('~'):
+                    views.append({
+                        "name": view_name,
+                        "schema": row.table_schem or "dbo",  # Use schema if available
+                        "definition": None,  # Cannot get SQL definition without MSysQueries access
+                    })
+        finally:
+            cursor.close()
+        
+        return views
     
     def verify_readonly(self) -> dict[str, Any]:
         """

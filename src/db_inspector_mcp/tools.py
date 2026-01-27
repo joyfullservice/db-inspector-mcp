@@ -723,10 +723,16 @@ def db_get_access_query_definition(name: str, database: str | None = None) -> di
         query = backend.get_query_by_name(name)
         return query
     except ValueError as e:
-        # Re-raise ValueError from registry (includes available backends)
+        # Re-raise ValueError (query not found, wrong backend, etc.)
+        raise
+    except RuntimeError as e:
+        # Re-raise RuntimeError (COM access issues, etc.)
         raise
     except Exception as e:
-        return {"error": str(e), "name": name, "sql": None, "type": None}
+        # For other unexpected errors, provide detailed error info
+        raise RuntimeError(
+            f"Unexpected error retrieving query '{name}': {e}"
+        ) from e
 
 
 @mcp.tool()

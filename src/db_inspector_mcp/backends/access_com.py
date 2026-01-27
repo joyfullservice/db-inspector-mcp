@@ -291,13 +291,38 @@ class AccessCOMBackend(DatabaseBackend):
             
         Returns:
             Dictionary with query name, SQL, and type
+            
+        Raises:
+            ValueError: If query doesn't exist
+            RuntimeError: If there's an error accessing the query
         """
         db = self._get_current_db()
-        query_def = db.QueryDefs(query_name)
+        try:
+            query_def = db.QueryDefs(query_name)
+        except Exception as e:
+            # Query might not exist - provide helpful error
+            error_msg = str(e).lower()
+            if "item not found" in error_msg or "not found" in error_msg or "3265" in str(e):
+                raise ValueError(
+                    f"Query '{query_name}' not found in database. "
+                    f"Use db_list_views() to see available queries."
+                ) from e
+            raise RuntimeError(
+                f"Failed to access query '{query_name}': {e}"
+            ) from e
+        
+        try:
+            sql = query_def.SQL
+            query_type = self._get_query_type(query_def)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to retrieve SQL definition for query '{query_name}': {e}"
+            ) from e
+        
         return {
             "name": query_name,
-            "sql": query_def.SQL,
-            "type": self._get_query_type(query_def),
+            "sql": sql,
+            "type": query_type,
         }
     
     # Delegate all standard DatabaseBackend methods to ODBC backend
