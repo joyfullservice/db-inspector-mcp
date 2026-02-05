@@ -12,6 +12,11 @@ from .base import DatabaseBackend
 class MSSQLBackend(DatabaseBackend):
     """SQL Server database backend using pyodbc."""
     
+    @property
+    def sql_dialect(self) -> str:
+        """Return 'mssql' as the SQL dialect."""
+        return "mssql"
+    
     def __init__(self, connection_string: str, query_timeout_seconds: int = 30):
         """
         Initialize SQL Server backend.

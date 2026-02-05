@@ -11,10 +11,12 @@ from db_inspector_mcp.tools import (
     db_count_query_results,
     db_explain,
     db_get_query_columns,
+    db_list_databases,
     db_list_tables,
     db_list_views,
     db_measure_query,
     db_preview,
+    db_sql_help,
     db_sum_query_column,
 )
 
@@ -123,4 +125,107 @@ def test_tools_reject_write_operations(mock_registry):
     """Test that tools reject write operations."""
     with pytest.raises(ValueError, match="INSERT"):
         db_count_query_results("INSERT INTO users VALUES (1)")
+
+
+def test_db_list_databases_includes_dialect():
+    """Test that db_list_databases includes dialect information."""
+    with patch("db_inspector_mcp.tools.get_registry") as mock_get_registry:
+        # Create mock backends with sql_dialect property
+        mock_access_backend = MagicMock()
+        mock_access_backend.sql_dialect = "access"
+        
+        mock_mssql_backend = MagicMock()
+        mock_mssql_backend.sql_dialect = "mssql"
+        
+        registry = MagicMock()
+        registry.list_backends.return_value = ["legacy", "new"]
+        registry.get_default_name.return_value = "legacy"
+        registry.get.side_effect = lambda name: (
+            mock_access_backend if name == "legacy" else mock_mssql_backend
+        )
+        mock_get_registry.return_value = registry
+        
+        result = db_list_databases()
+        
+        assert "databases" in result
+        assert len(result["databases"]) == 2
+        
+        # Check first database (Access)
+        legacy_db = next(db for db in result["databases"] if db["name"] == "legacy")
+        assert legacy_db["dialect"] == "access"
+        assert legacy_db["is_default"] is True
+        
+        # Check second database (MSSQL)
+        new_db = next(db for db in result["databases"] if db["name"] == "new")
+        assert new_db["dialect"] == "mssql"
+        assert new_db["is_default"] is False
+
+
+def test_db_sql_help_access_joins():
+    """Test db_sql_help returns Access JOIN syntax help."""
+    with patch("db_inspector_mcp.tools.get_registry") as mock_get_registry:
+        mock_backend = MagicMock()
+        mock_backend.sql_dialect = "access"
+        
+        registry = MagicMock()
+        registry.get.return_value = mock_backend
+        mock_get_registry.return_value = registry
+        
+        result = db_sql_help("joins")
+        
+        assert result["dialect"] == "access"
+        assert result["topic"] == "joins"
+        assert "examples" in result
+        assert "parentheses" in result["description"].lower()
+
+
+def test_db_sql_help_access_all():
+    """Test db_sql_help returns Access quick reference."""
+    with patch("db_inspector_mcp.tools.get_registry") as mock_get_registry:
+        mock_backend = MagicMock()
+        mock_backend.sql_dialect = "access"
+        
+        registry = MagicMock()
+        registry.get.return_value = mock_backend
+        mock_get_registry.return_value = registry
+        
+        result = db_sql_help("all")
+        
+        assert result["dialect"] == "access"
+        assert "summary" in result
+        assert "Multiple JOINs" in result["summary"]
+        assert "Conditionals" in result["summary"]
+
+
+def test_db_sql_help_invalid_topic():
+    """Test db_sql_help returns error for invalid topic."""
+    with patch("db_inspector_mcp.tools.get_registry") as mock_get_registry:
+        mock_backend = MagicMock()
+        mock_backend.sql_dialect = "access"
+        
+        registry = MagicMock()
+        registry.get.return_value = mock_backend
+        mock_get_registry.return_value = registry
+        
+        result = db_sql_help("invalid_topic")
+        
+        assert "error" in result
+        assert "available_topics" in result
+
+
+def test_db_sql_help_defaults_to_all():
+    """Test db_sql_help defaults to 'all' when no topic specified."""
+    with patch("db_inspector_mcp.tools.get_registry") as mock_get_registry:
+        mock_backend = MagicMock()
+        mock_backend.sql_dialect = "access"
+        
+        registry = MagicMock()
+        registry.get.return_value = mock_backend
+        mock_get_registry.return_value = registry
+        
+        result = db_sql_help()
+        
+        assert result["dialect"] == "access"
+        assert result["topic"] == "all"
+        assert "summary" in result
 

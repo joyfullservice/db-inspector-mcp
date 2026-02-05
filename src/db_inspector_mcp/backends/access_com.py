@@ -18,6 +18,11 @@ from .base import DatabaseBackend
 class AccessCOMBackend(DatabaseBackend):
     """Microsoft Access database backend using COM automation for introspection."""
     
+    @property
+    def sql_dialect(self) -> str:
+        """Return 'access' as the SQL dialect."""
+        return "access"
+    
     def __init__(self, connection_string: str, query_timeout_seconds: int = 30):
         """
         Initialize Access COM backend.

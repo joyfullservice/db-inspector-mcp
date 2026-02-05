@@ -20,6 +20,27 @@ def test_backend_is_abstract():
         DatabaseBackend("test", 30)
 
 
+def test_backend_sql_dialect_property():
+    """Test that each backend has the correct sql_dialect property."""
+    # MSSQL backend
+    mssql = MSSQLBackend("test_connection_string", 30)
+    assert mssql.sql_dialect == "mssql"
+    
+    # PostgreSQL backend
+    postgres = PostgresBackend("test_connection_string", 30)
+    assert postgres.sql_dialect == "postgres"
+    
+    # Access ODBC backend
+    access_odbc = AccessODBCBackend("test_connection_string", 30)
+    assert access_odbc.sql_dialect == "access"
+    
+    # Access COM backend
+    connection_string = "Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\test.accdb;"
+    with patch('db_inspector_mcp.backends.access_com.win32com.client'):
+        access_com = AccessCOMBackend(connection_string, 30)
+        assert access_com.sql_dialect == "access"
+
+
 def test_mssql_backend_initialization():
     """Test that MSSQL backend can be initialized."""
     backend = MSSQLBackend("test_connection_string", 30)

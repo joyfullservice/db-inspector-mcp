@@ -18,6 +18,17 @@ class DatabaseBackend(ABC):
         self.connection_string = connection_string
         self.query_timeout_seconds = query_timeout_seconds
     
+    @property
+    @abstractmethod
+    def sql_dialect(self) -> str:
+        """
+        Return the SQL dialect identifier for this backend.
+        
+        Returns:
+            Dialect string: 'access', 'mssql', 'postgres', etc.
+        """
+        pass
+    
     @abstractmethod
     def count_query_results(self, query: str) -> int:
         """

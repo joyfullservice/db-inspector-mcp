@@ -120,6 +120,11 @@ def load_config() -> dict[str, Any]:
         "DB_MCP_ALLOW_PREVIEW": os.getenv("DB_MCP_ALLOW_PREVIEW", "false"),
         "DB_MCP_VERIFY_READONLY": os.getenv("DB_MCP_VERIFY_READONLY", "true"),
         "DB_MCP_READONLY_FAIL_ON_WRITE": os.getenv("DB_MCP_READONLY_FAIL_ON_WRITE", "false"),
+        # Logging configuration
+        "DB_MCP_ENABLE_LOGGING": os.getenv("DB_MCP_ENABLE_LOGGING", "false").lower() == "true",
+        "DB_MCP_LOG_DIR": os.getenv("DB_MCP_LOG_DIR", ""),
+        "DB_MCP_LOG_MAX_SIZE_MB": int(os.getenv("DB_MCP_LOG_MAX_SIZE_MB", "10")),
+        "DB_MCP_LOG_BACKUP_COUNT": int(os.getenv("DB_MCP_LOG_BACKUP_COUNT", "5")),
     }
 
 

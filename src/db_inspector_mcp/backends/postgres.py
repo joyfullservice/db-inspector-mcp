@@ -14,6 +14,11 @@ from .base import DatabaseBackend
 class PostgresBackend(DatabaseBackend):
     """PostgreSQL database backend using psycopg2."""
     
+    @property
+    def sql_dialect(self) -> str:
+        """Return 'postgres' as the SQL dialect."""
+        return "postgres"
+    
     def __init__(self, connection_string: str, query_timeout_seconds: int = 30):
         """
         Initialize PostgreSQL backend.

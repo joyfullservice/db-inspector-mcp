@@ -16,31 +16,6 @@ A lightweight, extensible, cross-database MCP server (Model Context Protocol ser
 - **Read-Only by Default**: Designed for safe introspection with explicit permission controls
 - **Security Guardrails**: SQL validation prevents write operations
 
-## Breaking Changes in v2.0
-
-The MCP tool API has been improved for clarity in version 2.0. Function names are now more explicit and self-documenting.
-
-### Function Renames
-
-| Old Function | New Function | Notes |
-|--------------|--------------|-------|
-| `db_row_count(sql, ...)` | `db_count_query_results(query, ...)` | More explicit - counts YOUR query's results |
-| `db_columns(sql, ...)` | `db_get_query_columns(query, ...)` | Standard "get" verb prefix |
-| `db_sum_column(sql, column, ...)` | `db_sum_query_column(query, column, ...)` | More explicit - sums from YOUR query |
-| `db_verify_readonly(...)` | `db_check_readonly_status(...)` | More intuitive verb |
-| `db_get_access_query(name, ...)` | `db_get_access_query_definition(name, ...)` | More explicit about return value |
-
-### Parameter Renames
-
-All tools that accepted `sql` parameter now use `query` for consistency and clarity:
-- More concise and conventional
-- Matches common database terminology
-- Applied consistently across all tools
-
-### No Behavioral Changes
-
-The tools work exactly the same way - only names have changed for clarity. Update your integration code to use the new names.
-
 ## Prerequisites
 
 - **Python**: 3.10 or higher
@@ -1048,6 +1023,12 @@ MIT License - see LICENSE file for details.
 ## Contributing
 
 Contributions are welcome! Please open an issue or submit a pull request.
+
+For developers actively working on improving this tool, see [CONTRIBUTING.md](CONTRIBUTING.md) for:
+- Development setup and testing
+- Usage logging for improvement analysis
+- How to analyze logs alongside source code to identify improvements
+- Adding new backends and features
 
 ## Planned Enhancements
 

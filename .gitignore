@@ -56,3 +56,6 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
+# Usage logs (collected from client projects when running in dev mode)
+logs/
+

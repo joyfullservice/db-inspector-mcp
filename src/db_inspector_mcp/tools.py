@@ -27,6 +27,7 @@ from .backends.access_com import AccessCOMBackend
 from .backends.registry import get_registry
 from .config import check_data_access, get_config
 from .security import validate_readonly_sql
+from .usage_logging import with_logging
 
 
 # Create FastMCP server instance with proper metadata
@@ -36,11 +37,21 @@ mcp = FastMCP(
         "A cross-database MCP server for database introspection and migration validation. "
         "Provides read-only tools for exploring schemas, analyzing queries, and comparing databases.\n\n"
         "**Recommended workflow:**\n"
-        "1. Start with db_list_databases() to discover available databases\n"
-        "2. Use db_list_tables() and db_list_views() to explore schemas\n"
-        "3. Use db_count_query_results(), db_get_query_columns(), and db_sum_query_column() "
+        "1. Start with db_list_databases() to discover available databases AND their SQL dialects\n"
+        "2. Check the 'dialect' field: 'access', 'mssql', or 'postgres' - each has different SQL syntax\n"
+        "3. For Access databases, use db_sql_help(topic) to get dialect-specific syntax examples\n"
+        "4. Use db_list_tables() and db_list_views() to explore schemas\n"
+        "5. Use db_count_query_results(), db_get_query_columns(), and db_sum_query_column() "
         "to analyze queries (these tools wrap YOUR query for efficiency - pass the base query)\n"
-        "4. Use db_compare_queries() to validate migrations across databases\n\n"
+        "6. Use db_compare_queries() to validate migrations across databases\n\n"
+        "**SQL Dialect Awareness:**\n"
+        "Access SQL differs significantly from standard SQL. Key differences:\n"
+        "- Multiple JOINs require parentheses: FROM ((A JOIN B ON ...) JOIN C ON ...)\n"
+        "- Use IIF(cond, true, false) instead of CASE WHEN\n"
+        "- Use * and ? for wildcards in LIKE, not % and _\n"
+        "- Use #2024-01-15# for dates, not quotes\n"
+        "- Use TOP N instead of LIMIT N\n"
+        "Call db_sql_help('all') for complete Access syntax reference.\n\n"
         "**How query analysis tools work:**\n"
         "- db_count_query_results(query) wraps your query in SELECT COUNT(*) FROM (query)\n"
         "- db_sum_query_column(query, column) wraps your query to sum the specified column\n"
@@ -51,6 +62,7 @@ mcp = FastMCP(
 
 
 @mcp.tool()
+@with_logging("db_count_query_results")
 def db_count_query_results(query: str, database: str | None = None) -> dict[str, Any]:
     """
     Count the number of rows a SELECT query returns.
@@ -103,6 +115,7 @@ def db_count_query_results(query: str, database: str | None = None) -> dict[str,
 
 
 @mcp.tool()
+@with_logging("db_get_query_columns")
 def db_get_query_columns(query: str, database: str | None = None) -> dict[str, Any]:
     """
     Analyze the column schema of a SELECT query's results.
@@ -162,6 +175,7 @@ def db_get_query_columns(query: str, database: str | None = None) -> dict[str, A
 
 
 @mcp.tool()
+@with_logging("db_sum_query_column")
 def db_sum_query_column(query: str, column: str, database: str | None = None) -> dict[str, Any]:
     """
     Sum a specific column from a SELECT query's results.
@@ -219,6 +233,7 @@ def db_sum_query_column(query: str, column: str, database: str | None = None) ->
 
 
 @mcp.tool()
+@with_logging("db_measure_query")
 def db_measure_query(query: str, max_rows: int = 1000, database: str | None = None) -> dict[str, Any]:
     """
     Measure query execution time and retrieve limited rows for performance testing.
@@ -275,6 +290,7 @@ def db_measure_query(query: str, max_rows: int = 1000, database: str | None = No
 
 
 @mcp.tool()
+@with_logging("db_preview")
 def db_preview(query: str, max_rows: int = 100, database: str | None = None) -> dict[str, Any]:
     """
     Sample N rows from a query result to preview actual data.
@@ -329,6 +345,7 @@ def db_preview(query: str, max_rows: int = 100, database: str | None = None) -> 
 
 
 @mcp.tool()
+@with_logging("db_explain")
 def db_explain(query: str, database: str | None = None) -> dict[str, Any]:
     """
     Return database-native execution plan (EXPLAIN/EXPLAIN PLAN output).
@@ -382,6 +399,7 @@ def db_explain(query: str, database: str | None = None) -> dict[str, Any]:
 
 
 @mcp.tool()
+@with_logging("db_compare_queries")
 def db_compare_queries(
     sql1: str,
     sql2: str,
@@ -525,6 +543,7 @@ def db_compare_queries(
 
 
 @mcp.tool()
+@with_logging("db_list_tables")
 def db_list_tables(database: str | None = None) -> dict[str, Any]:
     """
     List all tables in the database with metadata.
@@ -572,6 +591,7 @@ def db_list_tables(database: str | None = None) -> dict[str, Any]:
 
 
 @mcp.tool()
+@with_logging("db_list_views")
 def db_list_views(database: str | None = None) -> dict[str, Any]:
     """
     List all views in the database with their SQL definitions.
@@ -622,6 +642,7 @@ def db_list_views(database: str | None = None) -> dict[str, Any]:
 
 
 @mcp.tool()
+@with_logging("db_check_readonly_status")
 def db_check_readonly_status(database: str | None = None) -> dict[str, Any]:
     """
     Verify that the database connection is read-only for safety confirmation.
@@ -670,6 +691,7 @@ def db_check_readonly_status(database: str | None = None) -> dict[str, Any]:
 
 
 @mcp.tool()
+@with_logging("db_get_access_query_definition")
 def db_get_access_query_definition(name: str, database: str | None = None) -> dict[str, Any]:
     """
     Get Access query SQL definition by name (requires access_com backend).
@@ -736,28 +758,39 @@ def db_get_access_query_definition(name: str, database: str | None = None) -> di
 
 
 @mcp.tool()
+@with_logging("db_list_databases")
 def db_list_databases() -> dict[str, Any]:
     """
     List all available database backends that have been configured.
     
-    **IMPORTANT: Always call this tool first** to discover available database names before using
-    other tools. Database names are user-defined and configured via environment variables.
+    **IMPORTANT: Always call this tool first** to discover available database names and their
+    SQL dialects before using other tools. Database names are user-defined and configured via
+    environment variables.
     
     This tool returns which databases are available in the current configuration,
-    allowing you to discover and work with multiple databases simultaneously.
+    their SQL dialect (access, mssql, postgres), and allows you to work with multiple
+    databases simultaneously.
+    
+    **SQL Dialects:**
+    - "access": Microsoft Access SQL (uses IIF, *, ?, #dates#, TOP N, parenthesized JOINs)
+    - "mssql": SQL Server T-SQL (uses CASE WHEN, TOP N, standard JOINs)
+    - "postgres": PostgreSQL (uses CASE WHEN, LIMIT N, standard JOINs)
+    
+    For Access databases, use db_sql_help(topic) to get dialect-specific syntax examples.
     
     Use this tool when:
     - Starting any database operation to see what databases are available
     - Working with multi-database configurations (migrations, testing, etc.)
     - You need to know which database is the default
+    - You need to determine the SQL dialect for proper query syntax
     
     Examples:
         # List all configured databases
         db_list_databases()
         # Returns: {
         #   "databases": [
-        #     {"name": "legacy", "is_default": true},
-        #     {"name": "new", "is_default": false}
+        #     {"name": "legacy", "dialect": "access", "is_default": true},
+        #     {"name": "new", "dialect": "mssql", "is_default": false}
         #   ],
         #   "default": "legacy"
         # }
@@ -766,26 +799,297 @@ def db_list_databases() -> dict[str, Any]:
         dbs = db_list_databases()
         for db in dbs["databases"]:
             tables = db_list_tables(database=db["name"])
-            print(f"{db['name']} has {len(tables['tables'])} tables")
+            print(f"{db['name']} ({db['dialect']}) has {len(tables['tables'])} tables")
     
     Returns:
-        Dictionary with "databases" key containing list of database names and default indicator.
-        Each database entry has "name" and "is_default" fields.
+        Dictionary with "databases" key containing list of database metadata.
+        Each database entry has "name", "dialect", and "is_default" fields.
         Also includes "default" key with the default database name.
     """
     registry = get_registry()
     backend_names = registry.list_backends()
     default_name = registry.get_default_name()
     
-    databases = [
-        {
+    databases = []
+    for name in backend_names:
+        backend = registry.get(name)
+        databases.append({
             "name": name,
+            "dialect": backend.sql_dialect,
             "is_default": name == default_name
-        }
-        for name in backend_names
-    ]
+        })
     
     return {
         "databases": databases,
         "default": default_name
+    }
+
+
+# SQL dialect help content organized by dialect and topic
+_SQL_HELP = {
+    "access": {
+        "joins": {
+            "title": "Multiple JOINs in Access SQL",
+            "description": "Access requires parentheses around multiple JOINs, unlike standard SQL.",
+            "examples": [
+                {
+                    "description": "2 tables (no parentheses needed)",
+                    "sql": "SELECT * FROM A INNER JOIN B ON A.id = B.a_id"
+                },
+                {
+                    "description": "3 tables (wrap first JOIN in parentheses)",
+                    "sql": "SELECT * FROM (A INNER JOIN B ON A.id = B.a_id) INNER JOIN C ON B.id = C.b_id"
+                },
+                {
+                    "description": "4 tables (nested parentheses)",
+                    "sql": "SELECT * FROM ((A INNER JOIN B ON A.id = B.a_id) INNER JOIN C ON B.id = C.b_id) INNER JOIN D ON C.id = D.c_id"
+                }
+            ],
+            "pattern": "FROM ((A JOIN B ON ...) JOIN C ON ...) JOIN D ON ..."
+        },
+        "conditionals": {
+            "title": "Conditional Logic in Access SQL",
+            "description": "Access uses IIF() instead of CASE WHEN.",
+            "examples": [
+                {
+                    "description": "Simple conditional",
+                    "sql": "SELECT IIF(status = 'active', 1, 0) AS is_active FROM users"
+                },
+                {
+                    "description": "Nested conditionals (like CASE WHEN...WHEN...ELSE)",
+                    "sql": "SELECT IIF(score >= 90, 'A', IIF(score >= 80, 'B', IIF(score >= 70, 'C', 'F'))) AS grade FROM students"
+                },
+                {
+                    "description": "Conditional counting with aggregates",
+                    "sql": "SELECT category, Sum(IIF(status='active', 1, 0)) AS active_count FROM items GROUP BY category"
+                }
+            ],
+            "pattern": "IIF(condition, true_value, false_value)"
+        },
+        "dates": {
+            "title": "Date Literals in Access SQL",
+            "description": "Access uses # delimiters for date literals, not quotes.",
+            "examples": [
+                {
+                    "description": "Date comparison",
+                    "sql": "SELECT * FROM orders WHERE order_date = #2024-01-15#"
+                },
+                {
+                    "description": "Date range",
+                    "sql": "SELECT * FROM orders WHERE order_date >= #2024-01-01# AND order_date < #2025-01-01#"
+                },
+                {
+                    "description": "Date with time",
+                    "sql": "SELECT * FROM events WHERE event_time > #2024-06-15 14:30:00#"
+                }
+            ],
+            "pattern": "#YYYY-MM-DD# or #YYYY-MM-DD HH:MM:SS#"
+        },
+        "wildcards": {
+            "title": "Wildcard Characters in Access SQL",
+            "description": "Access uses * and ? instead of % and _ for LIKE patterns.",
+            "examples": [
+                {
+                    "description": "Match any characters (use * not %)",
+                    "sql": "SELECT * FROM users WHERE name LIKE '*Smith*'"
+                },
+                {
+                    "description": "Match single character (use ? not _)",
+                    "sql": "SELECT * FROM products WHERE code LIKE 'A?1'"
+                },
+                {
+                    "description": "Combined wildcards",
+                    "sql": "SELECT * FROM files WHERE filename LIKE 'report_????_*'"
+                }
+            ],
+            "pattern": "* = any characters, ? = single character"
+        },
+        "limits": {
+            "title": "Limiting Rows in Access SQL",
+            "description": "Access uses TOP N instead of LIMIT N.",
+            "examples": [
+                {
+                    "description": "Get first 10 rows",
+                    "sql": "SELECT TOP 10 * FROM users ORDER BY created_at DESC"
+                },
+                {
+                    "description": "TOP with percentage",
+                    "sql": "SELECT TOP 5 PERCENT * FROM orders ORDER BY total DESC"
+                }
+            ],
+            "pattern": "SELECT TOP N ... (not LIMIT N)"
+        },
+        "booleans": {
+            "title": "Boolean Values in Access SQL",
+            "description": "Access uses True/False keywords for boolean values.",
+            "examples": [
+                {
+                    "description": "Boolean comparison",
+                    "sql": "SELECT * FROM users WHERE is_active = True"
+                },
+                {
+                    "description": "Boolean in IIF",
+                    "sql": "SELECT IIF(status = 'verified', True, False) AS is_verified FROM accounts"
+                }
+            ],
+            "pattern": "True / False (not 1/0 or true/false)"
+        },
+        "operators": {
+            "title": "Logical Operators in Access SQL",
+            "description": "Access uses And/Or keywords and <> for not equal.",
+            "examples": [
+                {
+                    "description": "Logical operators",
+                    "sql": "SELECT * FROM products WHERE (category = 'A' Or category = 'B') And price > 100"
+                },
+                {
+                    "description": "Not equal operator",
+                    "sql": "SELECT * FROM orders WHERE status <> 'cancelled'"
+                }
+            ],
+            "pattern": "And, Or, Not, <> (not &&, ||, !=)"
+        },
+        "aggregates": {
+            "title": "Conditional Aggregation in Access SQL",
+            "description": "Use Sum(IIF(...)) for conditional counting/summing.",
+            "examples": [
+                {
+                    "description": "Conditional count",
+                    "sql": "SELECT department, Sum(IIF(status='active', 1, 0)) AS active_count, Sum(IIF(status='inactive', 1, 0)) AS inactive_count FROM employees GROUP BY department"
+                },
+                {
+                    "description": "Conditional sum",
+                    "sql": "SELECT Sum(IIF(category='sales', amount, 0)) AS sales_total, Sum(IIF(category='refund', amount, 0)) AS refund_total FROM transactions"
+                },
+                {
+                    "description": "HAVING with conditional aggregate",
+                    "sql": "SELECT customer_id FROM orders GROUP BY customer_id HAVING Sum(IIF(status='completed', 1, 0)) > 5"
+                }
+            ],
+            "pattern": "Sum(IIF(condition, 1, 0)) for COUNT, Sum(IIF(condition, value, 0)) for SUM"
+        },
+        "all": {
+            "title": "Access SQL Quick Reference",
+            "description": "Key differences from standard SQL.",
+            "summary": {
+                "Multiple JOINs": "Wrap in parentheses: FROM ((A JOIN B ON ...) JOIN C ON ...)",
+                "Conditionals": "Use IIF(cond, true, false) not CASE WHEN",
+                "Booleans": "Use True/False keywords",
+                "Wildcards": "Use * and ? in LIKE, not % and _",
+                "Dates": "Use #2024-01-15# format",
+                "Row limit": "Use SELECT TOP N not LIMIT N",
+                "Logical ops": "Use And/Or not &&/||",
+                "Not equal": "Use <> not !="
+            }
+        }
+    },
+    "mssql": {
+        "all": {
+            "title": "SQL Server T-SQL Quick Reference",
+            "description": "SQL Server uses standard T-SQL syntax.",
+            "summary": {
+                "Conditionals": "CASE WHEN condition THEN value ELSE other END",
+                "Row limit": "SELECT TOP N or OFFSET/FETCH",
+                "Wildcards": "% for any chars, _ for single char",
+                "Dates": "'YYYY-MM-DD' format with quotes",
+                "Booleans": "1/0 or BIT type"
+            }
+        }
+    },
+    "postgres": {
+        "all": {
+            "title": "PostgreSQL Quick Reference",
+            "description": "PostgreSQL uses standard SQL with extensions.",
+            "summary": {
+                "Conditionals": "CASE WHEN condition THEN value ELSE other END",
+                "Row limit": "LIMIT N OFFSET M",
+                "Wildcards": "% for any chars, _ for single char",
+                "Dates": "'YYYY-MM-DD' format with quotes",
+                "Booleans": "TRUE/FALSE or boolean type"
+            }
+        }
+    }
+}
+
+
+@mcp.tool()
+@with_logging("db_sql_help")
+def db_sql_help(topic: str | None = None, database: str | None = None) -> dict[str, Any]:
+    """
+    Get SQL syntax help for the database's dialect.
+    
+    Returns dialect-specific SQL syntax examples and patterns. Especially useful for
+    Access SQL which differs significantly from standard SQL.
+    
+    **Available topics for Access:**
+    - "joins": Multiple JOINs require parentheses
+    - "conditionals": IIF() instead of CASE WHEN
+    - "dates": #YYYY-MM-DD# date literals
+    - "wildcards": * and ? instead of % and _
+    - "limits": TOP N instead of LIMIT
+    - "booleans": True/False keywords
+    - "operators": And/Or/<> operators
+    - "aggregates": Sum(IIF(...)) for conditional aggregation
+    - "all": Quick reference summary of all differences
+    
+    Use this tool when:
+    - Building complex queries for Access databases
+    - Encountering syntax errors with Access SQL
+    - Converting queries between SQL dialects
+    - You need the correct pattern for Access-specific syntax
+    
+    Examples:
+        # Get help on Access JOIN syntax
+        db_sql_help("joins")
+        # Returns examples of parenthesized JOINs
+        
+        # Get all Access SQL differences
+        db_sql_help("all", database="legacy")
+        # Returns quick reference of all Access-specific syntax
+        
+        # Get conditional logic help
+        db_sql_help("conditionals")
+        # Returns IIF() examples
+    
+    Args:
+        topic: Help topic (joins, conditionals, dates, wildcards, limits, booleans, operators, aggregates, all).
+               If None, returns "all" summary.
+        database: Database name to get dialect-specific help for (uses default if not specified)
+        
+    Returns:
+        Dictionary with syntax help including title, description, examples, and patterns.
+    """
+    registry = get_registry()
+    backend = registry.get(database)
+    dialect = backend.sql_dialect
+    
+    # Default to "all" if no topic specified
+    if topic is None:
+        topic = "all"
+    
+    topic = topic.lower().strip()
+    
+    # Get dialect-specific help
+    dialect_help = _SQL_HELP.get(dialect, {})
+    
+    if not dialect_help:
+        return {
+            "dialect": dialect,
+            "message": f"No specific syntax help available for '{dialect}' dialect. Standard SQL syntax applies."
+        }
+    
+    topic_help = dialect_help.get(topic)
+    
+    if not topic_help:
+        available_topics = list(dialect_help.keys())
+        return {
+            "dialect": dialect,
+            "error": f"Topic '{topic}' not found.",
+            "available_topics": available_topics
+        }
+    
+    return {
+        "dialect": dialect,
+        "topic": topic,
+        **topic_help
     }
