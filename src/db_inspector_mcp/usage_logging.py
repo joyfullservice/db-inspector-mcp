@@ -341,6 +341,14 @@ def _extract_error_pattern(error: str) -> str:
     if "connection" in error_lower:
         return "connection_error"
     
+    # Encoding / serialization errors
+    if "utf-8" in error_lower or "utf8" in error_lower:
+        return "encoding_utf8"
+    if "unicode" in error_lower or "encode" in error_lower or "decode" in error_lower:
+        return "encoding_unicode"
+    if "serializ" in error_lower or "not json serializable" in error_lower:
+        return "serialization_error"
+    
     # Generic categorization
     if "error" in error_lower:
         return "generic_error"
@@ -373,6 +381,7 @@ def with_logging(tool_name: str):
             start_time = time.time()
             error_msg = None
             result = None
+            serialization_warning = None
             
             # Extract database and dialect if available
             database = kwargs.get("database")
@@ -390,6 +399,31 @@ def with_logging(tool_name: str):
             
             try:
                 result = func(*args, **kwargs)
+                
+                # Validate that the result is JSON-serializable before returning.
+                # FastMCP will serialize this to JSON for the MCP transport; if it
+                # contains types like bytes/bytearray the client will see a cryptic
+                # "invalid utf-8 sequence" error.  We catch that here so it gets
+                # logged AND so we can return a helpful error to the caller.
+                if result is not None:
+                    try:
+                        json.dumps(result, default=str)
+                    except (TypeError, ValueError, UnicodeEncodeError) as ser_err:
+                        serialization_warning = (
+                            f"Result passed tool execution but failed JSON serialization: "
+                            f"{type(ser_err).__name__}: {ser_err}"
+                        )
+                        # Replace the result with an error dict so the client gets
+                        # actionable information instead of a raw transport error.
+                        result = {
+                            "error": (
+                                f"Query succeeded but the result contains values that "
+                                f"cannot be serialized to JSON ({type(ser_err).__name__}: {ser_err}). "
+                                f"This usually means a column returns binary data (e.g., timestamp/rowversion). "
+                                f"Try selecting specific columns instead of SELECT *."
+                            )
+                        }
+                
                 return result
             except Exception as e:
                 error_msg = str(e)
@@ -407,11 +441,14 @@ def with_logging(tool_name: str):
                     if i < len(param_names):
                         parameters[param_names[i]] = arg
                 
+                # Use serialization warning as the error if no other error occurred
+                logged_error = error_msg or serialization_warning
+                
                 log_tool_call(
                     tool_name=tool_name,
                     parameters=parameters,
                     result=result,
-                    error=error_msg,
+                    error=logged_error,
                     execution_time_ms=round(execution_time_ms, 2),
                     database=database,
                     dialect=dialect,

@@ -1,7 +1,11 @@
 """Abstract base class for database backends."""
 
+import json
 from abc import ABC, abstractmethod
+from datetime import date, datetime, time
+from decimal import Decimal
 from typing import Any
+from uuid import UUID
 
 
 class DatabaseBackend(ABC):
@@ -17,6 +21,89 @@ class DatabaseBackend(ABC):
         """
         self.connection_string = connection_string
         self.query_timeout_seconds = query_timeout_seconds
+    
+    # -------------------------------------------------------------------------
+    # Row sanitization helpers
+    # -------------------------------------------------------------------------
+    @staticmethod
+    def _sanitize_value(value: Any) -> Any:
+        """
+        Convert a single database value to a JSON-serializable type.
+        
+        Handles types that pyodbc/database drivers return but that are not
+        natively JSON-serializable, including:
+        - bytes/bytearray (e.g., SQL Server timestamp/rowversion, binary columns)
+        - Decimal → float
+        - datetime/date/time → ISO-format string
+        - UUID → string
+        - Strings with invalid surrogate characters → cleaned strings
+        
+        Args:
+            value: A raw value from a database cursor row
+            
+        Returns:
+            A JSON-safe Python primitive (str, int, float, bool, None, list, or dict)
+        """
+        if value is None:
+            return None
+        
+        # bytes / bytearray → hex string (e.g., SQL Server timestamp/rowversion)
+        if isinstance(value, (bytes, bytearray)):
+            return f"0x{value.hex()}"
+        
+        # Decimal → float (preserves numeric meaning)
+        if isinstance(value, Decimal):
+            return float(value)
+        
+        # datetime / date / time → ISO-format string
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if isinstance(value, date):
+            return value.isoformat()
+        if isinstance(value, time):
+            return value.isoformat()
+        
+        # UUID → string
+        if isinstance(value, UUID):
+            return str(value)
+        
+        # Strings: ensure they are valid for JSON encoding (no lone surrogates)
+        if isinstance(value, str):
+            try:
+                # Test that the string can be encoded as UTF-8
+                value.encode("utf-8")
+                return value
+            except UnicodeEncodeError:
+                # Replace lone surrogates or other un-encodable chars
+                return value.encode("utf-8", errors="replace").decode("utf-8")
+        
+        # int, float, bool pass through directly
+        if isinstance(value, (int, float, bool)):
+            return value
+        
+        # Fallback: convert to string
+        return str(value)
+    
+    @classmethod
+    def _sanitize_rows(cls, column_names: list[str], rows: list) -> list[dict[str, Any]]:
+        """
+        Convert a list of cursor rows into JSON-safe dictionaries.
+        
+        This replaces the common pattern:
+            [dict(zip(column_names, row)) for row in rows]
+        with a version that sanitizes every value.
+        
+        Args:
+            column_names: List of column names from cursor.description
+            rows: List of rows from cursor.fetchall()
+            
+        Returns:
+            List of dictionaries with sanitized values
+        """
+        return [
+            {col: cls._sanitize_value(val) for col, val in zip(column_names, row)}
+            for row in rows
+        ]
     
     @property
     @abstractmethod

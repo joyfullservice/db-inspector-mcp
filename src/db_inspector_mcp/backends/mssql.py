@@ -108,9 +108,9 @@ class MSSQLBackend(DatabaseBackend):
         rows = cursor.fetchall()
         execution_time_ms = (time.time() - start_time) * 1000
         
-        # Convert rows to dictionaries
+        # Convert rows to sanitized dictionaries (handles bytes, Decimal, etc.)
         column_names = [col[0] for col in cursor.description] if cursor.description else []
-        result_rows = [dict(zip(column_names, row)) for row in rows]
+        result_rows = self._sanitize_rows(column_names, rows)
         
         row_count = len(result_rows)
         hit_limit = row_count >= max_rows
@@ -136,9 +136,9 @@ class MSSQLBackend(DatabaseBackend):
         cursor = self._execute_query(query)
         rows = cursor.fetchall()
         
-        # Convert rows to dictionaries
+        # Convert rows to sanitized dictionaries (handles bytes, Decimal, etc.)
         column_names = [col[0] for col in cursor.description] if cursor.description else []
-        result = [dict(zip(column_names, row)) for row in rows]
+        result = self._sanitize_rows(column_names, rows)
         
         cursor.close()
         return result
