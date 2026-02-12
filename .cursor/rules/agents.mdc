@@ -1,0 +1,11 @@
+---
+description: Project conventions and architectural guidance for AI agents
+alwaysApply: true
+---
+
+# Agent Guidelines
+
+Read [AGENTS.md](../../AGENTS.md) for project conventions before making changes. It includes:
+- A directive to review [DECISIONS.md](../../DECISIONS.md) before architectural changes
+- Guidelines for documenting new architectural decisions
+- Links to contributing and project documentation

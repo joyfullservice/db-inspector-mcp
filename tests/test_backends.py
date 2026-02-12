@@ -3,8 +3,9 @@
 import os
 import sys
 import tempfile
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, call
 
+import pyodbc
 import pytest
 
 from db_inspector_mcp.backends.access_com import AccessCOMBackend, COM_AVAILABLE
@@ -57,9 +58,166 @@ def test_postgres_backend_initialization():
 
 def test_access_odbc_backend_initialization():
     """Test that Access ODBC backend can be initialized."""
-    backend = AccessODBCBackend("test_connection_string", 30)
-    assert backend.connection_string == "test_connection_string"
+    conn_str = "Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\test.accdb;"
+    backend = AccessODBCBackend(conn_str, 30)
+    assert backend.connection_string == conn_str
     assert backend.query_timeout_seconds == 30
+
+
+def test_access_odbc_ttl_defaults():
+    """Test that ODBC backend initialises TTL connection cache fields."""
+    backend = AccessODBCBackend("test_connection_string", 30)
+    assert backend._conn is None
+    assert backend._close_timer is None
+    assert backend._conn_ttl == 5.0  # default
+
+
+def test_access_odbc_custom_ttl():
+    """Test that a custom TTL can be set via __init__."""
+    backend = AccessODBCBackend("test_connection_string", 30, connection_ttl_seconds=10.0)
+    assert backend._conn_ttl == 10.0
+
+
+def test_access_odbc_ttl_zero_connect_per_request():
+    """With TTL=0 the backend falls back to connect-per-request."""
+    backend = AccessODBCBackend("test_connection_string", 30, connection_ttl_seconds=0)
+
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_conn.cursor.return_value = mock_cursor
+    mock_cursor.fetchone.return_value = (42,)
+
+    with patch('db_inspector_mcp.backends.access_odbc.pyodbc') as mock_pyodbc:
+        mock_pyodbc.connect.return_value = mock_conn
+
+        result = backend.count_query_results("SELECT * FROM test")
+
+        # Connection opened
+        mock_pyodbc.connect.assert_called_once_with(
+            backend.connection_string, timeout=30
+        )
+        # With TTL=0 the connection is closed immediately
+        mock_conn.close.assert_called_once()
+        assert result == 42
+        # No cached connection left
+        assert backend._conn is None
+
+
+def test_access_odbc_connection_reused_within_ttl():
+    """Two calls within the TTL window should reuse the same connection."""
+    backend = AccessODBCBackend("test_connection_string", 30, connection_ttl_seconds=60)
+
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_conn.cursor.return_value = mock_cursor
+    mock_cursor.fetchone.return_value = (42,)
+
+    with patch('db_inspector_mcp.backends.access_odbc.pyodbc') as mock_pyodbc:
+        mock_pyodbc.connect.return_value = mock_conn
+
+        # First call — creates a fresh connection
+        backend.count_query_results("SELECT * FROM test")
+        assert mock_pyodbc.connect.call_count == 1
+
+        # Second call — should reuse the cached connection
+        backend.count_query_results("SELECT * FROM test")
+        assert mock_pyodbc.connect.call_count == 1  # still 1
+
+        # Connection should NOT be closed yet (TTL is 60 s)
+        mock_conn.close.assert_not_called()
+
+    # Cleanup: cancel the pending timer so it doesn't fire during other tests
+    if backend._close_timer is not None:
+        backend._close_timer.cancel()
+
+
+def test_access_odbc_connection_closed_after_ttl_expires():
+    """Connection should be closed once the TTL timer fires."""
+    import time as _time
+
+    backend = AccessODBCBackend("test_connection_string", 30, connection_ttl_seconds=0.15)
+
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_conn.cursor.return_value = mock_cursor
+    mock_cursor.fetchone.return_value = (42,)
+
+    with patch('db_inspector_mcp.backends.access_odbc.pyodbc') as mock_pyodbc:
+        mock_pyodbc.connect.return_value = mock_conn
+
+        backend.count_query_results("SELECT * FROM test")
+        # Connection is still open right after the call
+        mock_conn.close.assert_not_called()
+
+        # Wait for the TTL timer to fire
+        _time.sleep(0.4)
+
+        # Timer should have closed the connection
+        mock_conn.close.assert_called_once()
+        assert backend._conn is None
+
+
+def test_access_odbc_stale_connection_discarded_on_pyodbc_error():
+    """If a pyodbc.Error is raised, the cached connection is discarded."""
+    backend = AccessODBCBackend("test_connection_string", 30, connection_ttl_seconds=60)
+
+    good_conn = MagicMock()
+    good_cursor = MagicMock()
+    good_conn.cursor.return_value = good_cursor
+    good_cursor.fetchone.return_value = (42,)
+
+    bad_conn = MagicMock()
+    bad_cursor = MagicMock()
+    bad_conn.cursor.return_value = bad_cursor
+    bad_cursor.execute.side_effect = pyodbc.Error("HY000", "stale connection")
+
+    with patch('db_inspector_mcp.backends.access_odbc.pyodbc') as mock_pyodbc:
+        mock_pyodbc.Error = pyodbc.Error
+        mock_pyodbc.connect.return_value = good_conn
+
+        # First call succeeds — connection is cached
+        result = backend.count_query_results("SELECT * FROM test")
+        assert result == 42
+        assert mock_pyodbc.connect.call_count == 1
+
+        # Simulate a stale connection: next cursor raises pyodbc.Error
+        good_conn.cursor.return_value = bad_cursor
+
+        with pytest.raises(pyodbc.Error):
+            backend.count_query_results("SELECT * FROM test")
+
+        # The stale connection should have been discarded
+        assert backend._conn is None
+        good_conn.close.assert_called_once()
+
+    # Cleanup
+    if backend._close_timer is not None:
+        backend._close_timer.cancel()
+
+
+def test_access_odbc_connection_closed_on_non_pyodbc_error():
+    """Non-pyodbc errors should NOT discard the cached connection."""
+    backend = AccessODBCBackend("test_connection_string", 30, connection_ttl_seconds=60)
+
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_conn.cursor.return_value = mock_cursor
+    mock_cursor.execute.side_effect = ValueError("bad query")
+
+    with patch('db_inspector_mcp.backends.access_odbc.pyodbc') as mock_pyodbc:
+        mock_pyodbc.Error = pyodbc.Error
+        mock_pyodbc.connect.return_value = mock_conn
+
+        with pytest.raises(ValueError, match="bad query"):
+            backend.count_query_results("SELECT * FROM bad_table")
+
+        # Connection should still be cached (not discarded for non-pyodbc errors)
+        assert backend._conn is mock_conn
+        mock_conn.close.assert_not_called()
+
+    # Cleanup
+    if backend._close_timer is not None:
+        backend._close_timer.cancel()
 
 
 def test_access_com_backend_initialization():
@@ -70,6 +228,28 @@ def test_access_com_backend_initialization():
         assert backend.connection_string == connection_string
         assert backend.query_timeout_seconds == 30
         assert backend._odbc_backend is not None
+
+
+def test_access_com_no_ownership_tracking():
+    """Test that COM backend does not have ownership tracking fields."""
+    connection_string = "Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\test.accdb;"
+    with patch('db_inspector_mcp.backends.access_com.win32com.client'):
+        backend = AccessCOMBackend(connection_string, 30)
+        # These ownership fields should no longer exist
+        assert not hasattr(backend, '_owns_app')
+        assert not hasattr(backend, '_owns_db')
+        assert not hasattr(backend, '_db_opened_via_getobject')
+        # Cached database should not exist (per-request now)
+        assert not hasattr(backend, '_db')
+
+
+def test_access_com_no_close_method():
+    """Test that COM backend does not have a close() method that quits Access."""
+    connection_string = "Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\test.accdb;"
+    with patch('db_inspector_mcp.backends.access_com.win32com.client'):
+        backend = AccessCOMBackend(connection_string, 30)
+        # close() should not be defined on the backend
+        assert not hasattr(backend, 'close')
 
 
 def test_access_com_backend_without_pywin32():
@@ -106,6 +286,8 @@ def test_access_com_get_query_by_name():
     
     mock_app = MagicMock()
     mock_app.DBEngine = mock_dbe
+    # CurrentDb() returns None so we fall through to DBEngine.OpenDatabase
+    mock_app.CurrentDb.return_value = None
     
     with patch('db_inspector_mcp.backends.access_com.win32com.client') as mock_win32com:
         # Make GetObject raise an exception so it falls back to Dispatch
@@ -118,6 +300,65 @@ def test_access_com_get_query_by_name():
         assert result["name"] == "TestQuery"
         assert result["sql"] == "SELECT * FROM TestTable"
         assert result["type"] == "Select"
+        
+        # Database should have been closed after the operation
+        mock_db.Close.assert_called_once()
+
+
+def test_access_com_dao_database_closes_on_error():
+    """Test that DAO database is closed even when an error occurs."""
+    connection_string = "Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\test.accdb;"
+    
+    # Mock database that raises an error on QueryDefs access
+    mock_db = MagicMock()
+    mock_db.QueryDefs.side_effect = Exception("COM error")
+    
+    # Mock DBEngine
+    mock_dbe = MagicMock()
+    mock_dbe.OpenDatabase.return_value = mock_db
+    
+    mock_app = MagicMock()
+    mock_app.DBEngine = mock_dbe
+    mock_app.CurrentDb.return_value = None
+    
+    with patch('db_inspector_mcp.backends.access_com.win32com.client') as mock_win32com:
+        mock_win32com.GetObject.side_effect = Exception("No existing database")
+        mock_win32com.Dispatch.return_value = mock_app
+        
+        backend = AccessCOMBackend(connection_string, 30)
+        
+        with pytest.raises(RuntimeError):
+            backend.get_query_by_name("NonExistent")
+        
+        # Database should still be closed even though there was an error
+        mock_db.Close.assert_called_once()
+
+
+def test_access_com_dao_database_uses_currentdb_when_available():
+    """Test that DAO database uses CurrentDb() when Access has our DB open."""
+    connection_string = "Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\test.accdb;"
+    
+    # Mock CurrentDb database
+    mock_current_db = MagicMock()
+    mock_table_def = MagicMock()
+    mock_table_def.Name = "TestTable"
+    mock_current_db.TableDefs = [mock_table_def]
+    
+    mock_app = MagicMock()
+    mock_app.CurrentDb.return_value = mock_current_db
+    
+    with patch('db_inspector_mcp.backends.access_com.win32com.client') as mock_win32com:
+        mock_win32com.GetObject.side_effect = Exception("No existing database")
+        mock_win32com.Dispatch.return_value = mock_app
+        
+        backend = AccessCOMBackend(connection_string, 30)
+        tables = backend.list_tables()
+        
+        assert len(tables) == 1
+        assert tables[0]["name"] == "TestTable"
+        
+        # CurrentDb should NOT be closed (it's the user's database)
+        mock_current_db.Close.assert_not_called()
 
 
 def test_access_com_list_views():
@@ -143,6 +384,7 @@ def test_access_com_list_views():
     
     mock_app = MagicMock()
     mock_app.DBEngine = mock_dbe
+    mock_app.CurrentDb.return_value = None
     
     with patch('db_inspector_mcp.backends.access_com.win32com.client') as mock_win32com:
         # Make GetObject raise an exception so it falls back to Dispatch
@@ -157,6 +399,9 @@ def test_access_com_list_views():
         assert views[0]["definition"] is None  # SQL not extracted
         assert views[1]["name"] == "Query2"
         assert views[1]["definition"] is None
+        
+        # Database should have been closed after the operation
+        mock_db.Close.assert_called_once()
 
 
 # =============================================================================
@@ -193,6 +438,11 @@ def temp_access_db():
     try:
         # Create new Access database
         app = win32com.client.Dispatch("Access.Application")
+        import ctypes
+        try:
+            ctypes.windll.user32.ShowWindow(app.hWndAccessApp(), 5)  # SW_SHOW
+        except Exception:
+            pass
         app.NewCurrentDatabase(db_path)
         db = app.CurrentDb()
         
@@ -286,6 +536,11 @@ def test_access_com_getobject_existing_database(temp_access_db):
     
     # Open the database in Access
     app = win32com.client.Dispatch("Access.Application")
+    import ctypes
+    try:
+        ctypes.windll.user32.ShowWindow(app.hWndAccessApp(), 5)  # SW_SHOW
+    except Exception:
+        pass
     app.OpenCurrentDatabase(temp_access_db)
     
     try:
@@ -309,6 +564,7 @@ def test_access_com_getobject_existing_database(temp_access_db):
         assert query["type"] == "Select"
         
     finally:
+        # User is responsible for closing Access
         try:
             app.CloseCurrentDatabase()
         except Exception:
@@ -332,10 +588,53 @@ def test_access_com_with_closed_database(temp_access_db):
         table_names = [t["name"] for t in tables]
         assert "TestTable" in table_names
     finally:
-        # Cleanup: close the Access instance created by the backend
+        # Backend leaves Access running -- user closes it
+        # For test cleanup, we quit the Access instance we started
         if backend._app is not None:
             try:
                 backend._app.Quit()
             except Exception:
                 pass
 
+
+@pytest.mark.integration
+@pytest.mark.skipif(not COM_AVAILABLE, reason="Access COM not available")
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows only")
+def test_access_com_no_lock_between_operations(temp_access_db):
+    """Test that no .laccdb lock file persists between COM operations."""
+    import time
+    
+    backend = AccessCOMBackend(temp_access_db, 30)
+    lock_file = temp_access_db.replace('.accdb', '.laccdb')
+    
+    try:
+        # Perform an operation
+        tables = backend.list_tables()
+        assert len(tables) > 0
+        
+        # Give a moment for file system to catch up
+        time.sleep(0.5)
+        
+        # Check that no lock file persists after the operation
+        # Note: if Access has the DB open via CurrentDb, a lock is expected.
+        # This test is most meaningful when Access does NOT have the DB open.
+        if not lock_file_exists_from_access_app(backend, temp_access_db):
+            assert not os.path.exists(lock_file), \
+                "Lock file (.laccdb) should not persist between operations"
+    finally:
+        if backend._app is not None:
+            try:
+                backend._app.Quit()
+            except Exception:
+                pass
+
+
+def lock_file_exists_from_access_app(backend, db_path):
+    """Check if Access Application has the database open as CurrentDb."""
+    if backend._app is None:
+        return False
+    try:
+        current_db = backend._app.CurrentDb()
+        return current_db is not None
+    except Exception:
+        return False

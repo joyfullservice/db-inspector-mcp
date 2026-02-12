@@ -11,8 +11,6 @@ A lightweight, extensible, cross-database MCP server (Model Context Protocol ser
 - **Data Sanity Checks**: Compare queries, validate aggregates, and spot-check data
 - **Multi-Database Support**: Connect to multiple databases simultaneously (SQL Server, PostgreSQL, Access)
 - **Cross-Database Comparison**: Compare queries across different database systems for migration validation
-- **Multi-Database Support**: Connect to multiple databases simultaneously (SQL Server, PostgreSQL, Access)
-- **Cross-Database Comparison**: Compare queries across different database systems for migration validation
 - **Read-Only by Default**: Designed for safe introspection with explicit permission controls
 - **Security Guardrails**: SQL validation prevents write operations
 
@@ -864,6 +862,8 @@ db_explain("SELECT * FROM large_table WHERE condition = 'value'")
 ```
 
 ## Development
+
+For architectural decisions and design rationale, see [DECISIONS.md](DECISIONS.md). AI agents should also see [AGENTS.md](AGENTS.md) for project conventions.
 
 ### Complete Setup
 

@@ -35,6 +35,11 @@ def create_test_database():
     print(f"Creating database: {db_path}")
     
     app = win32com.client.Dispatch("Access.Application")
+    import ctypes
+    try:
+        ctypes.windll.user32.ShowWindow(app.hWndAccessApp(), 5)  # SW_SHOW
+    except Exception:
+        pass
     app.NewCurrentDatabase(db_path)
     db = app.CurrentDb()
     
@@ -78,6 +83,11 @@ def scenario_1_basic_cleanup(db_path):
     print("=" * 60)
     
     app = win32com.client.Dispatch("Access.Application")
+    import ctypes
+    try:
+        ctypes.windll.user32.ShowWindow(app.hWndAccessApp(), 5)  # SW_SHOW
+    except Exception:
+        pass
     app.OpenCurrentDatabase(db_path)
     
     # Use DBEngine to open database (like our backend does)
@@ -120,6 +130,11 @@ def scenario_2_explicit_release(db_path):
     print("=" * 60)
     
     app = win32com.client.Dispatch("Access.Application")
+    import ctypes
+    try:
+        ctypes.windll.user32.ShowWindow(app.hWndAccessApp(), 5)  # SW_SHOW
+    except Exception:
+        pass
     app.OpenCurrentDatabase(db_path)
     
     dbe = app.DBEngine
@@ -163,6 +178,11 @@ def scenario_3_no_quit(db_path):
     print("=" * 60)
     
     app = win32com.client.Dispatch("Access.Application")
+    import ctypes
+    try:
+        ctypes.windll.user32.ShowWindow(app.hWndAccessApp(), 5)  # SW_SHOW
+    except Exception:
+        pass
     app.OpenCurrentDatabase(db_path)
     
     dbe = app.DBEngine
@@ -200,6 +220,11 @@ def scenario_4_dispatch_dynamic(db_path):
     
     # DispatchEx creates the COM object in its own process
     app = win32com.client.DispatchEx("Access.Application")
+    import ctypes
+    try:
+        ctypes.windll.user32.ShowWindow(app.hWndAccessApp(), 5)  # SW_SHOW
+    except Exception:
+        pass
     app.OpenCurrentDatabase(db_path)
     
     dbe = app.DBEngine
@@ -231,6 +256,11 @@ def scenario_5_try_except_wrapper(db_path):
     print("=" * 60)
     
     app = win32com.client.Dispatch("Access.Application")
+    import ctypes
+    try:
+        ctypes.windll.user32.ShowWindow(app.hWndAccessApp(), 5)  # SW_SHOW
+    except Exception:
+        pass
     app.OpenCurrentDatabase(db_path)
     
     dbe = app.DBEngine
@@ -276,6 +306,11 @@ def scenario_6_coinitialize(db_path):
     
     try:
         app = win32com.client.Dispatch("Access.Application")
+        import ctypes
+        try:
+            ctypes.windll.user32.ShowWindow(app.hWndAccessApp(), 5)  # SW_SHOW
+        except Exception:
+            pass
         app.OpenCurrentDatabase(db_path)
         
         dbe = app.DBEngine

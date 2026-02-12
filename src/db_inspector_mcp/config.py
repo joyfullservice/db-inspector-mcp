@@ -128,6 +128,21 @@ def load_config() -> dict[str, Any]:
     }
 
 
+def _get_access_conn_ttl() -> float | None:
+    """Read the Access ODBC connection TTL from the environment.
+
+    Returns:
+        TTL in seconds, or None to use the backend default (5 s).
+    """
+    raw = os.getenv("DB_MCP_ACCESS_CONN_TTL")
+    if raw is not None:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return None
+
+
 def _create_backend(backend_type: str, connection_string: str, query_timeout: int) -> DatabaseBackend:
     """
     Create a backend instance based on type.
@@ -150,9 +165,11 @@ def _create_backend(backend_type: str, connection_string: str, query_timeout: in
     elif backend_type == "postgres":
         return PostgresBackend(connection_string, query_timeout)
     elif backend_type == "access_odbc":
-        return AccessODBCBackend(connection_string, query_timeout)
+        conn_ttl = _get_access_conn_ttl()
+        return AccessODBCBackend(connection_string, query_timeout, conn_ttl)
     elif backend_type == "access_com":
-        return AccessCOMBackend(connection_string, query_timeout)
+        conn_ttl = _get_access_conn_ttl()
+        return AccessCOMBackend(connection_string, query_timeout, conn_ttl)
     else:
         raise ValueError(
             f"Unsupported backend: {backend_type}. "

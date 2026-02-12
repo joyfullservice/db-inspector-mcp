@@ -42,6 +42,11 @@ def temp_access_db_basic():
     
     # Create database
     app = win32com.client.Dispatch("Access.Application")
+    import ctypes
+    try:
+        ctypes.windll.user32.ShowWindow(app.hWndAccessApp(), 5)  # SW_SHOW
+    except Exception:
+        pass
     app.NewCurrentDatabase(db_path)
     db = app.CurrentDb()
     
@@ -103,6 +108,11 @@ def temp_access_db_explicit_cleanup():
     
     # Create database
     app = win32com.client.Dispatch("Access.Application")
+    import ctypes
+    try:
+        ctypes.windll.user32.ShowWindow(app.hWndAccessApp(), 5)  # SW_SHOW
+    except Exception:
+        pass
     app.NewCurrentDatabase(db_path)
     db = app.CurrentDb()
     
@@ -163,9 +173,9 @@ def test_basic_fixture(temp_access_db_basic):
         tables = backend.list_tables()
         assert any(t["name"] == "TestTable" for t in tables)
     finally:
-        # This is the pattern that can cause issues:
-        # Backend quits its Access instance, but pytest still holds references
-        if backend._app is not None and backend._owns_app:
+        # Backend no longer quits Access -- user is responsible for closing it.
+        # For test cleanup, quit the Access instance we started.
+        if backend._app is not None:
             try:
                 backend._app.Quit()
             except Exception:
@@ -185,8 +195,13 @@ def test_explicit_cleanup_fixture(temp_access_db_explicit_cleanup):
         tables = backend.list_tables()
         assert any(t["name"] == "TestTable" for t in tables)
     finally:
-        # Use backend's close method which respects ownership
-        backend.close()
+        # Backend no longer has a close() method -- Access is left running.
+        # For test cleanup, quit the Access instance.
+        if backend._app is not None:
+            try:
+                backend._app.Quit()
+            except Exception:
+                pass
 
 
 @pytest.mark.integration
@@ -215,7 +230,7 @@ def test_multiple_operations(temp_access_db_basic):
     backend = AccessCOMBackend(temp_access_db_basic, 30)
     
     try:
-        # Multiple calls should reuse the same connection
+        # Multiple calls each open/close the DAO database independently
         tables1 = backend.list_tables()
         tables2 = backend.list_tables()
         views = backend.list_views()
@@ -223,4 +238,10 @@ def test_multiple_operations(temp_access_db_basic):
         assert tables1 == tables2
         assert any(t["name"] == "TestTable" for t in tables1)
     finally:
-        backend.close()
+        # Backend no longer has a close() method -- Access is left running.
+        # For test cleanup, quit the Access instance.
+        if backend._app is not None:
+            try:
+                backend._app.Quit()
+            except Exception:
+                pass

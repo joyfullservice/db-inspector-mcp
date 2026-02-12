@@ -1,6 +1,7 @@
 """Microsoft Access backend implementation using COM automation."""
 
 import re
+from contextlib import contextmanager
 from typing import Any
 
 try:
@@ -15,21 +16,60 @@ from .access_odbc import AccessODBCBackend
 from .base import DatabaseBackend
 
 
+def _set_access_visible(app) -> None:
+    """Make the Access Application window visible.
+
+    The obvious ``app.Visible = True`` fails because both EnsureDispatch
+    (early-bound) and Dispatch (late-bound, with gen_py cache) resolve the
+    ``Visible`` property to a DAO DISPID instead of the Application one.
+    This is a type-library collision in the Access COM object itself.
+
+    Workaround: get the Access window handle via ``hWndAccessApp`` and call
+    the Win32 ``ShowWindow`` API directly — no COM property dispatch needed.
+    """
+    import ctypes
+    SW_SHOW = 5
+    try:
+        hwnd = app.hWndAccessApp()
+        ctypes.windll.user32.ShowWindow(hwnd, SW_SHOW)
+    except Exception:
+        pass  # Best effort — Access may already be visible
+
+
 class AccessCOMBackend(DatabaseBackend):
-    """Microsoft Access database backend using COM automation for introspection."""
+    """Microsoft Access database backend using COM automation for introspection.
+    
+    Connection lifecycle strategy:
+    - The Access Application is cached after first use and left running. The user
+      is responsible for closing Access when they are done -- we never quit it.
+      This is intentional: users of this tool are typically already working in
+      Access, so GetObject is fast. Even if we start Access, leaving it running
+      means subsequent calls are quick.
+    - The DAO Database is opened per-request and closed when done, avoiding a
+      persistent lock (.laccdb file) on the database between tool calls.
+    - SQL query execution is delegated to an internal ODBC backend, which also
+      uses connect-per-request.
+    """
     
     @property
     def sql_dialect(self) -> str:
         """Return 'access' as the SQL dialect."""
         return "access"
     
-    def __init__(self, connection_string: str, query_timeout_seconds: int = 30):
+    def __init__(
+        self,
+        connection_string: str,
+        query_timeout_seconds: int = 30,
+        connection_ttl_seconds: float | None = None,
+    ):
         """
         Initialize Access COM backend.
         
         Args:
             connection_string: ODBC connection string or path to .accdb/.accda/.mdb file
             query_timeout_seconds: Query timeout in seconds
+            connection_ttl_seconds: TTL for the internal ODBC connection cache (passed
+                through to the AccessODBCBackend used for SQL execution).
         """
         super().__init__(connection_string, query_timeout_seconds)
         if not COM_AVAILABLE:
@@ -38,14 +78,11 @@ class AccessCOMBackend(DatabaseBackend):
                 "Install it with: pip install pywin32"
             )
         self._app = None
-        self._db = None  # Cached database object
         self._db_path = self._extract_db_path(connection_string)
-        # Track whether we connected to an existing Access instance or created our own
-        self._owns_app = False  # True only if we created Access via Dispatch
-        self._owns_db = False   # True only if we opened db via DBEngine (not CurrentDb)
-        self._db_opened_via_getobject = False
         # Use ODBC backend internally for query execution
-        self._odbc_backend = AccessODBCBackend(connection_string, query_timeout_seconds)
+        self._odbc_backend = AccessODBCBackend(
+            connection_string, query_timeout_seconds, connection_ttl_seconds
+        )
     
     def _extract_db_path(self, connection_string: str) -> str:
         """Extract database path from connection string."""
@@ -66,11 +103,12 @@ class AccessCOMBackend(DatabaseBackend):
         3. If no Access running, create new instance
         
         IMPORTANT: Access can only have ONE database open at a time.
-        - If user has OUR database open → connect to their instance
-        - If user has DIFFERENT database open → create our OWN instance
-        - If no Access running → create our OWN instance
+        - If user has OUR database open -> connect to their instance
+        - If user has DIFFERENT database open -> create our OWN instance
+        - If no Access running -> create new instance
         
-        We keep our Access instance alive for subsequent MCP calls.
+        The Application is cached and left running. The user is responsible for
+        closing Access when they are done with their session.
         
         Early Binding Strategy:
         When creating a new Access instance, we use gencache.EnsureDispatch() instead
@@ -78,10 +116,6 @@ class AccessCOMBackend(DatabaseBackend):
         - Makes COM automation more reliable
         - Enables Application.Run to work correctly (late binding often fails)
         - Benefits subsequent GetObject calls (bindings are cached system-wide)
-        
-        Note: We deliberately don't use OpenCurrentDatabase() when creating a new
-        Access instance because CurrentDb() often fails in that scenario. Instead,
-        we use DBEngine.OpenDatabase() directly in _get_current_db().
         """
         if self._app is None:
             try:
@@ -89,8 +123,6 @@ class AccessCOMBackend(DatabaseBackend):
                 # This will work if the database is already open in any Access instance
                 # GetObject with a file path returns the Application (with database open)
                 self._app = win32com.client.GetObject(self._db_path)
-                self._db_opened_via_getobject = True
-                self._owns_app = False  # User's Access instance - do NOT close it
             except Exception:
                 # Our database is not open. Check if Access is running with another db.
                 try:
@@ -101,91 +133,83 @@ class AccessCOMBackend(DatabaseBackend):
                         if current_db is not None:
                             # Access has a DIFFERENT database open - do NOT use it!
                             # Create our own Access instance to avoid interfering
-                            # Use gencache.EnsureDispatch for early binding - more reliable
-                            # and enables Application.Run if needed
                             self._app = gencache.EnsureDispatch("Access.Application")
-                            self._db_opened_via_getobject = False
-                            self._owns_app = True  # We created this
                         else:
-                            # Access is running but no database open - we can use it
-                            # But actually, better to create our own to avoid confusion
+                            # Access is running but no database open
+                            # Create our own to avoid confusion
                             self._app = gencache.EnsureDispatch("Access.Application")
-                            self._db_opened_via_getobject = False
-                            self._owns_app = True
                     except Exception:
                         # Can't check CurrentDb - Access might be in weird state
                         # Create our own instance to be safe
                         self._app = gencache.EnsureDispatch("Access.Application")
-                        self._db_opened_via_getobject = False
-                        self._owns_app = True
                 except Exception:
                     # No running Access instance, create new one
-                    # Use gencache.EnsureDispatch for early binding - this generates/caches
-                    # type library bindings, which makes COM automation more reliable
                     self._app = gencache.EnsureDispatch("Access.Application")
-                    self._db_opened_via_getobject = False
-                    self._owns_app = True  # We created this - we're responsible for cleanup
+            # Always ensure Access is visible so users can see (and close) it
+            _set_access_visible(self._app)
         return self._app
     
-    def _get_current_db(self):
+    @contextmanager
+    def _dao_database(self):
         """
-        Get database object for DAO operations.
+        Context manager that opens a DAO Database and closes it when done.
         
-        Strategy:
-        1. If database was opened via GetObject (Access already had it open), use CurrentDb()
-        2. Otherwise, use DBEngine.OpenDatabase() which is more reliable
+        If Access already has our database open (via GetObject), uses CurrentDb()
+        which does NOT create an additional lock. Otherwise, opens via
+        DBEngine.OpenDatabase() and closes it afterwards.
         
-        IMPORTANT: This method tracks whether we OWN the database connection:
-        - If we use CurrentDb() (user's database), we do NOT own it
-        - If we open via DBEngine, we OWN it and are responsible for closing
+        This ensures the database lock is released after each operation when
+        we opened the database ourselves.
         
-        CurrentDb() can fail in certain COM automation scenarios, particularly
-        when opening a database that was created by a different Access instance.
-        DBEngine.OpenDatabase() works reliably in all cases.
-        
-        Returns:
+        Yields:
             DAO Database object
         """
-        if self._db is None:
-            app = self._get_access_app()
-            
-            # If Access already had the database open, CurrentDb() should work
-            if self._db_opened_via_getobject:
-                try:
-                    db = app.CurrentDb()
-                    if db is not None:
-                        self._db = db
-                        self._owns_db = False  # User's database - do NOT close it
-                        return self._db
-                except Exception:
-                    pass
-            
-            # Use DBEngine.OpenDatabase() - more reliable
+        app = self._get_access_app()
+        db = None
+        needs_close = False
+        
+        # If Access already has the database open, try CurrentDb() first
+        try:
+            current_db = app.CurrentDb()
+            if current_db is not None:
+                db = current_db
+                needs_close = False  # User's database - don't close it
+        except Exception:
+            pass
+        
+        # If CurrentDb() didn't work, open via DBEngine
+        if db is None:
             try:
                 dbe = app.DBEngine
                 # Open database in shared mode (Exclusive=False, ReadOnly=False)
-                # We use False for ReadOnly to allow full access
-                self._db = dbe.OpenDatabase(self._db_path, False, False)
-                self._owns_db = True  # We opened this - we're responsible for closing
+                db = dbe.OpenDatabase(self._db_path, False, False)
+                needs_close = True
             except Exception:
                 # Try read-only mode
                 try:
                     dbe = app.DBEngine
-                    self._db = dbe.OpenDatabase(self._db_path, False, True)
-                    self._owns_db = True
+                    db = dbe.OpenDatabase(self._db_path, False, True)
+                    needs_close = True
                 except Exception:
                     # Last resort: try direct DAO without Access
                     try:
                         dbe = win32com.client.Dispatch("DAO.DBEngine.120")
-                        self._db = dbe.OpenDatabase(self._db_path, False, True)
-                        self._owns_db = True
+                        db = dbe.OpenDatabase(self._db_path, False, True)
+                        needs_close = True
                     except Exception as e:
                         raise RuntimeError(
                             f"Failed to open database '{self._db_path}' via COM. "
                             f"Ensure the database file exists and is not corrupted. Error: {e}"
                         )
         
-        return self._db
+        try:
+            yield db
+        finally:
+            if needs_close and db is not None:
+                try:
+                    db.Close()
+                except Exception:
+                    pass
     
     def call_vba_function(self, function_name: str, *args) -> Any:
         """
@@ -233,42 +257,6 @@ class AccessCOMBackend(DatabaseBackend):
                 f"Failed to call VBA function '{function_name}': {e}"
             ) from e
     
-    def close(self):
-        """
-        Close the database connection and cleanup COM resources.
-        
-        IMPORTANT: This method respects ownership:
-        - If we connected to an existing Access instance (via GetObject), we do NOT
-          close Access or the database - the user is still using them!
-        - If we created our own Access instance, we clean it up properly.
-        
-        Call this when done using the backend to properly release resources.
-        """
-        # Only close the database if we opened it ourselves
-        if self._db is not None and self._owns_db:
-            try:
-                self._db.Close()
-            except Exception:
-                pass
-        self._db = None
-        
-        # Only quit Access if we created it ourselves
-        if self._app is not None and self._owns_app:
-            try:
-                self._app.CloseCurrentDatabase()
-            except Exception:
-                pass
-            try:
-                self._app.Quit()
-            except Exception:
-                pass
-        self._app = None
-        
-        # Reset ownership flags
-        self._owns_app = False
-        self._owns_db = False
-        self._db_opened_via_getobject = False
-    
     def _get_query_type(self, query_def) -> str:
         """Get query type from QueryDef."""
         try:
@@ -301,34 +289,34 @@ class AccessCOMBackend(DatabaseBackend):
             ValueError: If query doesn't exist
             RuntimeError: If there's an error accessing the query
         """
-        db = self._get_current_db()
-        try:
-            query_def = db.QueryDefs(query_name)
-        except Exception as e:
-            # Query might not exist - provide helpful error
-            error_msg = str(e).lower()
-            if "item not found" in error_msg or "not found" in error_msg or "3265" in str(e):
-                raise ValueError(
-                    f"Query '{query_name}' not found in database. "
-                    f"Use db_list_views() to see available queries."
+        with self._dao_database() as db:
+            try:
+                query_def = db.QueryDefs(query_name)
+            except Exception as e:
+                # Query might not exist - provide helpful error
+                error_msg = str(e).lower()
+                if "item not found" in error_msg or "not found" in error_msg or "3265" in str(e):
+                    raise ValueError(
+                        f"Query '{query_name}' not found in database. "
+                        f"Use db_list_views() to see available queries."
+                    ) from e
+                raise RuntimeError(
+                    f"Failed to access query '{query_name}': {e}"
                 ) from e
-            raise RuntimeError(
-                f"Failed to access query '{query_name}': {e}"
-            ) from e
-        
-        try:
-            sql = query_def.SQL
-            query_type = self._get_query_type(query_def)
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to retrieve SQL definition for query '{query_name}': {e}"
-            ) from e
-        
-        return {
-            "name": query_name,
-            "sql": sql,
-            "type": query_type,
-        }
+            
+            try:
+                sql = query_def.SQL
+                query_type = self._get_query_type(query_def)
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to retrieve SQL definition for query '{query_name}': {e}"
+                ) from e
+            
+            return {
+                "name": query_name,
+                "sql": sql,
+                "type": query_type,
+            }
     
     # Delegate all standard DatabaseBackend methods to ODBC backend
     def count_query_results(self, query: str) -> int:
@@ -357,17 +345,17 @@ class AccessCOMBackend(DatabaseBackend):
     
     def list_tables(self) -> list[dict[str, Any]]:
         """List all tables using COM TableDefs."""
-        db = self._get_current_db()
-        tables = []
-        for table_def in db.TableDefs:
-            # Skip system tables
-            if not table_def.Name.startswith("MSys"):
-                tables.append({
-                    "name": table_def.Name,
-                    "schema": "dbo",  # Access doesn't have schemas
-                    "row_count": None,
-                })
-        return tables
+        with self._dao_database() as db:
+            tables = []
+            for table_def in db.TableDefs:
+                # Skip system tables
+                if not table_def.Name.startswith("MSys"):
+                    tables.append({
+                        "name": table_def.Name,
+                        "schema": "dbo",  # Access doesn't have schemas
+                        "row_count": None,
+                    })
+            return tables
     
     def list_views(self) -> list[dict[str, Any]]:
         """
@@ -375,15 +363,15 @@ class AccessCOMBackend(DatabaseBackend):
         
         Use get_query_by_name() to get SQL for specific queries when needed.
         """
-        db = self._get_current_db()
-        views = []
-        for query_def in db.QueryDefs:
-            views.append({
-                "name": query_def.Name,
-                "schema": "dbo",
-                "definition": None,  # SQL not extracted - use get_query_by_name() when needed
-            })
-        return views
+        with self._dao_database() as db:
+            views = []
+            for query_def in db.QueryDefs:
+                views.append({
+                    "name": query_def.Name,
+                    "schema": "dbo",
+                    "definition": None,  # SQL not extracted - use get_query_by_name() when needed
+                })
+            return views
     
     def verify_readonly(self) -> dict[str, Any]:
         """Verify user has no write permissions."""
