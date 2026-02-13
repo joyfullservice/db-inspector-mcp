@@ -6,7 +6,7 @@ can replace the ODBC backend for SQL operations, eliminating the
 ~350ms ODBC connection overhead per call.
 
 Usage:
-    python benchmarks/bench_dao_vs_odbc.py <path_to_accdb_file> [--password PWD] [--iterations N]
+    python benchmarks/bench_dao_vs_odbc.py <path_to_accdb_file> [--password PWD] [--iterations N] [--table TABLE]
 """
 
 import argparse
@@ -96,6 +96,7 @@ def main():
     parser.add_argument("--password", "-p", help="Database password", default=None)
     parser.add_argument("--iterations", "-n", type=int, default=30,
                         help="Number of iterations per benchmark (default: 30)")
+    parser.add_argument("--table", "-t", help="Table name for DAO benchmarks (default: auto-detect)", default=None)
     args = parser.parse_args()
 
     db_path = args.db_path
@@ -296,8 +297,8 @@ def main():
     # DAO constants
     dbOpenSnapshot = 4
 
-    # Use tblCo for DAO benchmarks (guaranteed regular table)
-    dao_table = "tblCo"
+    # Use the same auto-detected table, or a user-specified override
+    dao_table = args.table or table_name
     dao_select_top1_sql = f"SELECT TOP 1 * FROM [{dao_table}]"
     dao_select_top10_sql = f"SELECT TOP 10 * FROM [{dao_table}]"
     dao_count_sql = f"SELECT COUNT(*) AS cnt FROM [{dao_table}]"

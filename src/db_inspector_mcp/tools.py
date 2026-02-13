@@ -19,6 +19,7 @@ All tools are read-only by default and designed for safe database exploration an
 - Performance measurement and execution plans
 """
 
+import re
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -28,6 +29,90 @@ from .backends.registry import get_registry
 from .config import check_data_access, get_config
 from .security import validate_readonly_sql
 from .usage_logging import with_logging
+
+
+# ---------------------------------------------------------------------------
+# Access SQL error hints
+# ---------------------------------------------------------------------------
+
+_ACCESS_ERROR_HINTS: list[tuple[re.Pattern[str], str | None, str]] = [
+    # "missing operator" + query contains multiple JOINs → parenthesized JOINs
+    (
+        re.compile(r"missing operator", re.IGNORECASE),
+        r"\bJOIN\b",
+        (
+            "Access SQL requires parentheses around multiple JOINs. "
+            "Wrap each additional JOIN: FROM ((A INNER JOIN B ON ...) "
+            "INNER JOIN C ON ...) INNER JOIN D ON ... "
+            "Call db_sql_help('joins') for examples."
+        ),
+    ),
+    # "missing operator" + query contains CASE → suggest IIF()
+    (
+        re.compile(r"missing operator", re.IGNORECASE),
+        r"\bCASE\b",
+        (
+            "Access SQL does not support CASE WHEN. "
+            "Use IIF(condition, true_value, false_value) instead. "
+            "Call db_sql_help('conditionals') for examples."
+        ),
+    ),
+    # Syntax error near LIMIT → suggest TOP
+    (
+        re.compile(r"syntax error.*\bLIMIT\b", re.IGNORECASE),
+        None,
+        (
+            "Access SQL does not support LIMIT. "
+            "Use SELECT TOP N instead. "
+            "Call db_sql_help('limits') for examples."
+        ),
+    ),
+    # Wildcard-related errors (% or _ in error message or query context)
+    (
+        re.compile(r"(invalid|syntax|operator).*LIKE", re.IGNORECASE),
+        None,
+        (
+            "Access SQL uses * and ? as wildcard characters in LIKE, "
+            "not % and _. Call db_sql_help('wildcards') for examples."
+        ),
+    ),
+    # DISTINCT errors → suggest GROUP BY
+    (
+        re.compile(r"missing operator", re.IGNORECASE),
+        r"\bDISTINCT\b",
+        (
+            "SELECT DISTINCT can be unreliable in Access. "
+            "Use GROUP BY as a more reliable alternative. "
+            "Call db_sql_help('distinct') for examples."
+        ),
+    ),
+]
+
+
+def _enrich_access_error(error_message: str, query: str, dialect: str) -> str:
+    """Append an actionable hint to an Access ODBC error if a known pattern matches.
+
+    For non-Access dialects the original message is returned unchanged.
+
+    Args:
+        error_message: The raw exception text.
+        query: The SQL query that was executed.
+        dialect: The backend's sql_dialect string (e.g. 'access', 'mssql').
+
+    Returns:
+        The original error message, possibly with an appended hint.
+    """
+    if dialect != "access":
+        return error_message
+
+    for error_pattern, query_pattern, hint in _ACCESS_ERROR_HINTS:
+        if error_pattern.search(error_message):
+            # If a query pattern is specified, check the query too
+            if query_pattern is not None and not re.search(query_pattern, query, re.IGNORECASE):
+                continue
+            return f"{error_message}\n\n💡 **Access SQL Hint:** {hint}"
+
+    return error_message
 
 
 # Create FastMCP server instance with proper metadata
@@ -111,7 +196,8 @@ def db_count_query_results(query: str, database: str | None = None) -> dict[str,
         # Re-raise ValueError from registry (includes available backends)
         raise
     except Exception as e:
-        return {"error": str(e), "count": None}
+        msg = _enrich_access_error(str(e), query, backend.sql_dialect)
+        return {"error": msg, "count": None}
 
 
 @mcp.tool()
@@ -171,7 +257,8 @@ def db_get_query_columns(query: str, database: str | None = None) -> dict[str, A
         # Re-raise ValueError from registry (includes available backends)
         raise
     except Exception as e:
-        return {"error": str(e), "columns": []}
+        msg = _enrich_access_error(str(e), query, backend.sql_dialect)
+        return {"error": msg, "columns": []}
 
 
 @mcp.tool()
@@ -229,7 +316,8 @@ def db_sum_query_column(query: str, column: str, database: str | None = None) ->
         # Re-raise ValueError from registry (includes available backends)
         raise
     except Exception as e:
-        return {"error": str(e), "sum": None}
+        msg = _enrich_access_error(str(e), query, backend.sql_dialect)
+        return {"error": msg, "sum": None}
 
 
 @mcp.tool()
@@ -286,7 +374,8 @@ def db_measure_query(query: str, max_rows: int = 1000, database: str | None = No
         # Re-raise ValueError from registry (includes available backends)
         raise
     except Exception as e:
-        return {"error": str(e), "execution_time_ms": None, "row_count": 0, "hit_limit": False}
+        msg = _enrich_access_error(str(e), query, backend.sql_dialect)
+        return {"error": msg, "execution_time_ms": None, "row_count": 0, "hit_limit": False}
 
 
 @mcp.tool()
@@ -341,7 +430,8 @@ def db_preview(query: str, max_rows: int = 100, database: str | None = None) -> 
         # Re-raise ValueError from registry (includes available backends)
         raise
     except Exception as e:
-        return {"error": str(e), "rows": []}
+        msg = _enrich_access_error(str(e), query, backend.sql_dialect)
+        return {"error": msg, "rows": []}
 
 
 @mcp.tool()
@@ -395,7 +485,8 @@ def db_explain(query: str, database: str | None = None) -> dict[str, Any]:
         # Re-raise ValueError from registry (includes available backends)
         raise
     except Exception as e:
-        return {"error": str(e), "plan": None}
+        msg = _enrich_access_error(str(e), query, backend.sql_dialect)
+        return {"error": msg, "plan": None}
 
 
 @mcp.tool()
@@ -539,12 +630,17 @@ def db_compare_queries(
         # Re-raise ValueError from registry (includes available backends)
         raise
     except Exception as e:
-        return {"error": str(e)}
+        # Try enriching with hints from both queries/dialects
+        msg = str(e)
+        msg = _enrich_access_error(msg, sql1, backend1.sql_dialect)
+        if msg == str(e):
+            msg = _enrich_access_error(msg, sql2, backend2.sql_dialect)
+        return {"error": msg}
 
 
 @mcp.tool()
 @with_logging("db_list_tables")
-def db_list_tables(database: str | None = None) -> dict[str, Any]:
+def db_list_tables(database: str | None = None, name_filter: str | None = None) -> dict[str, Any]:
     """
     List all tables in the database with metadata.
     
@@ -557,6 +653,9 @@ def db_list_tables(database: str | None = None) -> dict[str, Any]:
     - Understand database structure
     - Find tables for queries
     
+    When object_counts in db_list_databases() shows more than 200 tables,
+    use the name_filter parameter to search rather than listing all objects.
+    
     Examples:
         # List all tables in default database
         db_list_tables()
@@ -565,6 +664,10 @@ def db_list_tables(database: str | None = None) -> dict[str, Any]:
         # List tables in specific database
         db_list_tables(database="legacy")
         
+        # Filter tables by name (case-insensitive substring match)
+        db_list_tables(name_filter="user")
+        # Returns only tables whose name contains "user"
+        
         # Use with db_list_databases() to explore all databases
         databases = db_list_databases()
         for db in databases["databases"]:
@@ -572,6 +675,8 @@ def db_list_tables(database: str | None = None) -> dict[str, Any]:
     
     Args:
         database: Database name (call db_list_databases() first, uses default if not specified)
+        name_filter: Optional case-insensitive substring filter. When provided,
+            only tables whose name contains this string are returned.
     
     Returns:
         Dictionary with "tables" key containing list of table metadata dictionaries.
@@ -581,7 +686,7 @@ def db_list_tables(database: str | None = None) -> dict[str, Any]:
     backend = registry.get(database)
     
     try:
-        tables = backend.list_tables()
+        tables = backend.list_tables(name_filter=name_filter)
         return {"tables": tables}
     except ValueError as e:
         # Re-raise ValueError from registry (includes available backends)
@@ -592,7 +697,7 @@ def db_list_tables(database: str | None = None) -> dict[str, Any]:
 
 @mcp.tool()
 @with_logging("db_list_views")
-def db_list_views(database: str | None = None) -> dict[str, Any]:
+def db_list_views(database: str | None = None, name_filter: str | None = None) -> dict[str, Any]:
     """
     List all views in the database with their SQL definitions.
     
@@ -605,6 +710,9 @@ def db_list_views(database: str | None = None) -> dict[str, Any]:
     - Compare views across databases
     - Debug view-related issues
     
+    When object_counts in db_list_databases() shows more than 200 views or queries,
+    use the name_filter parameter to search rather than listing all objects.
+    
     Examples:
         # List all views in default database
         db_list_views()
@@ -613,12 +721,18 @@ def db_list_views(database: str | None = None) -> dict[str, Any]:
         # List views in specific database
         db_list_views(database="new")
         
+        # Filter views by name (case-insensitive substring match)
+        db_list_views(name_filter="active")
+        # Returns only views whose name contains "active"
+        
         # Compare views across databases
         legacy_views = db_list_views(database="legacy")
         new_views = db_list_views(database="new")
     
     Args:
         database: Database name (call db_list_databases() first, uses default if not specified)
+        name_filter: Optional case-insensitive substring filter. When provided,
+            only views whose name contains this string are returned.
     
     Returns:
         Dictionary with "views" key containing list of view metadata dictionaries.
@@ -632,7 +746,7 @@ def db_list_views(database: str | None = None) -> dict[str, Any]:
     backend = registry.get(database)
     
     try:
-        views = backend.list_views()
+        views = backend.list_views(name_filter=name_filter)
         return {"views": views}
     except ValueError as e:
         # Re-raise ValueError from registry (includes available backends)
@@ -789,8 +903,10 @@ def db_list_databases() -> dict[str, Any]:
         db_list_databases()
         # Returns: {
         #   "databases": [
-        #     {"name": "legacy", "dialect": "access", "is_default": true},
-        #     {"name": "new", "dialect": "mssql", "is_default": false}
+        #     {"name": "legacy", "dialect": "access", "is_default": true,
+        #      "object_counts": {"tables": 333, "queries": 55, "forms": 1, ...}},
+        #     {"name": "new", "dialect": "mssql", "is_default": false,
+        #      "object_counts": {"tables": 45, "views": 12, "stored_procedures": 200, ...}}
         #   ],
         #   "default": "legacy"
         # }
@@ -803,7 +919,12 @@ def db_list_databases() -> dict[str, Any]:
     
     Returns:
         Dictionary with "databases" key containing list of database metadata.
-        Each database entry has "name", "dialect", and "is_default" fields.
+        Each database entry has "name", "dialect", "is_default", and "object_counts" fields.
+        object_counts keys vary by dialect (e.g. Access includes "queries", "forms";
+        MSSQL includes "stored_procedures", "triggers"). Values are integer counts,
+        or null if the count could not be determined. Keys are omitted entirely
+        for object types the backend cannot measure (e.g. Access forms are only
+        counted when the Application is running).
         Also includes "default" key with the default database name.
     """
     registry = get_registry()
@@ -813,10 +934,15 @@ def db_list_databases() -> dict[str, Any]:
     databases = []
     for name in backend_names:
         backend = registry.get(name)
+        try:
+            object_counts = backend.get_object_counts()
+        except Exception:
+            object_counts = {}
         databases.append({
             "name": name,
             "dialect": backend.sql_dialect,
-            "is_default": name == default_name
+            "is_default": name == default_name,
+            "object_counts": object_counts,
         })
     
     return {
@@ -949,6 +1075,29 @@ _SQL_HELP = {
             ],
             "pattern": "And, Or, Not, <> (not &&, ||, !=)"
         },
+        "distinct": {
+            "title": "DISTINCT vs GROUP BY in Access SQL",
+            "description": (
+                "SELECT DISTINCT can be unreliable in Access, especially with "
+                "complex expressions or multiple columns. GROUP BY is a more "
+                "reliable alternative for deduplication."
+            ),
+            "examples": [
+                {
+                    "description": "Unreliable — DISTINCT may fail with 'missing operator'",
+                    "sql": "SELECT DISTINCT p.category FROM products p WHERE p.category IS NOT NULL"
+                },
+                {
+                    "description": "Reliable — use GROUP BY instead",
+                    "sql": "SELECT p.category FROM products p WHERE p.category IS NOT NULL GROUP BY p.category"
+                },
+                {
+                    "description": "Multiple columns",
+                    "sql": "SELECT category, status FROM products GROUP BY category, status"
+                }
+            ],
+            "pattern": "Replace SELECT DISTINCT col1, col2 FROM ... with SELECT col1, col2 FROM ... GROUP BY col1, col2"
+        },
         "aggregates": {
             "title": "Conditional Aggregation in Access SQL",
             "description": "Use Sum(IIF(...)) for conditional counting/summing.",
@@ -979,7 +1128,8 @@ _SQL_HELP = {
                 "Dates": "Use #2024-01-15# format",
                 "Row limit": "Use SELECT TOP N not LIMIT N",
                 "Logical ops": "Use And/Or not &&/||",
-                "Not equal": "Use <> not !="
+                "Not equal": "Use <> not !=",
+                "DISTINCT": "Prefer GROUP BY over SELECT DISTINCT (more reliable)"
             }
         }
     },
@@ -1030,6 +1180,7 @@ def db_sql_help(topic: str | None = None, database: str | None = None) -> dict[s
     - "booleans": True/False keywords
     - "operators": And/Or/<> operators
     - "aggregates": Sum(IIF(...)) for conditional aggregation
+    - "distinct": GROUP BY is more reliable than SELECT DISTINCT
     - "all": Quick reference summary of all differences
     
     Use this tool when:
@@ -1052,7 +1203,7 @@ def db_sql_help(topic: str | None = None, database: str | None = None) -> dict[s
         # Returns IIF() examples
     
     Args:
-        topic: Help topic (joins, conditionals, dates, wildcards, limits, booleans, operators, aggregates, all).
+        topic: Help topic (joins, conditionals, dates, wildcards, limits, booleans, operators, aggregates, distinct, all).
                If None, returns "all" summary.
         database: Database name to get dialect-specific help for (uses default if not specified)
         

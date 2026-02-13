@@ -185,43 +185,79 @@ class MSSQLBackend(DatabaseBackend):
             cursor.close()
             raise Exception(f"Failed to get execution plan: {str(e)}")
     
-    def list_tables(self) -> list[dict[str, Any]]:
+    def get_object_counts(self) -> dict[str, int | None]:
+        """Return object counts via INFORMATION_SCHEMA and sys catalog.
+
+        Only includes keys we can actually determine.  If the query fails
+        entirely, returns an empty dict.
+        """
+        try:
+            sql = """
+                SELECT
+                    (SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE='BASE TABLE') AS tbl,
+                    (SELECT COUNT(*) FROM INFORMATION_SCHEMA.VIEWS) AS vw,
+                    (SELECT COUNT(*) FROM INFORMATION_SCHEMA.ROUTINES WHERE ROUTINE_TYPE='PROCEDURE') AS sp,
+                    (SELECT COUNT(*) FROM INFORMATION_SCHEMA.ROUTINES WHERE ROUTINE_TYPE='FUNCTION') AS fn,
+                    (SELECT COUNT(*) FROM sys.triggers) AS trg
+            """
+            cursor = self._execute_query(sql)
+            row = cursor.fetchone()
+            cursor.close()
+            if row:
+                return {
+                    "tables": row[0],
+                    "views": row[1],
+                    "stored_procedures": row[2],
+                    "functions": row[3],
+                    "triggers": row[4],
+                }
+        except Exception:
+            pass
+        return {}
+
+    def list_tables(self, name_filter: str | None = None) -> list[dict[str, Any]]:
         """List all tables using INFORMATION_SCHEMA."""
-        sql = """
-            SELECT 
-                TABLE_SCHEMA,
-                TABLE_NAME
+        where = "TABLE_TYPE = 'BASE TABLE'"
+        if name_filter:
+            safe = name_filter.replace("'", "''")
+            where += f" AND TABLE_NAME LIKE '%{safe}%'"
+
+        sql = f"""
+            SELECT TABLE_SCHEMA, TABLE_NAME
             FROM INFORMATION_SCHEMA.TABLES
-            WHERE TABLE_TYPE = 'BASE TABLE'
+            WHERE {where}
             ORDER BY TABLE_SCHEMA, TABLE_NAME
         """
         cursor = self._execute_query(sql)
         rows = cursor.fetchall()
-        
+
         tables = []
         for row in rows:
             tables.append({
                 "name": row[1],
                 "schema": row[0],
-                "row_count": None,  # Could add approximate count if needed
+                "row_count": None,
             })
-        
+
         cursor.close()
         return tables
-    
-    def list_views(self) -> list[dict[str, Any]]:
+
+    def list_views(self, name_filter: str | None = None) -> list[dict[str, Any]]:
         """List all views with their definitions."""
-        sql = """
-            SELECT 
-                TABLE_SCHEMA,
-                TABLE_NAME,
-                VIEW_DEFINITION
+        where = "1=1"
+        if name_filter:
+            safe = name_filter.replace("'", "''")
+            where += f" AND TABLE_NAME LIKE '%{safe}%'"
+
+        sql = f"""
+            SELECT TABLE_SCHEMA, TABLE_NAME, VIEW_DEFINITION
             FROM INFORMATION_SCHEMA.VIEWS
+            WHERE {where}
             ORDER BY TABLE_SCHEMA, TABLE_NAME
         """
         cursor = self._execute_query(sql)
         rows = cursor.fetchall()
-        
+
         views = []
         for row in rows:
             views.append({
@@ -229,7 +265,7 @@ class MSSQLBackend(DatabaseBackend):
                 "schema": row[0],
                 "definition": row[2] if len(row) > 2 else None,
             })
-        
+
         cursor.close()
         return views
     

@@ -1005,15 +1005,20 @@ db-inspector-mcp/
 ├── src/
 │   └── db_inspector_mcp/
 │       ├── __init__.py
-│       ├── main.py          # MCP server entry point
-│       ├── tools.py          # MCP tool definitions
-│       ├── config.py         # Configuration management
-│       ├── security.py       # SQL validation and permissions
+│       ├── main.py            # MCP server entry point
+│       ├── tools.py           # MCP tool definitions and SQL help content
+│       ├── config.py          # Configuration management
+│       ├── security.py        # SQL validation and permissions
+│       ├── usage_logging.py   # Usage logging system
 │       └── backends/
-│           ├── base.py       # Abstract base class
+│           ├── __init__.py
+│           ├── base.py        # Abstract base class (includes sql_dialect)
+│           ├── access_com.py  # Access via COM automation
+│           ├── access_odbc.py # Access via ODBC
 │           ├── mssql.py       # SQL Server implementation
-│           └── postgres.py    # PostgreSQL implementation
-└── tests/                    # Test suite
+│           ├── postgres.py    # PostgreSQL implementation
+│           └── registry.py    # Backend registry
+└── tests/                     # Test suite
 ```
 
 ## License

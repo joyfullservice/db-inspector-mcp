@@ -305,21 +305,68 @@ class AccessODBCBackend(DatabaseBackend):
         """
         return "Execution plans are not available for Microsoft Access databases. Access uses a query optimizer, but detailed execution plans are not exposed via ODBC."
     
-    def list_tables(self) -> list[dict[str, Any]]:
+    def get_object_counts(self) -> dict[str, int | None]:
+        """Return object counts. Tries MSysObjects, falls back to ODBC catalog."""
+        try:
+            sql = "SELECT Type, COUNT(*) AS cnt FROM MSysObjects GROUP BY Type"
+            with self._connection() as conn:
+                cursor = conn.cursor()
+                try:
+                    cursor.execute(sql)
+                    type_map = {
+                        1: "tables", 4: "linked_tables", 5: "queries",
+                        6: "linked_tables", -32768: "forms", -32764: "reports",
+                        -32766: "macros", -32761: "modules",
+                    }
+                    counts: dict[str, int | None] = {
+                        "tables": 0, "linked_tables": 0, "queries": 0,
+                        "forms": 0, "reports": 0, "macros": 0, "modules": 0,
+                    }
+                    for row in cursor.fetchall():
+                        key = type_map.get(row[0])
+                        if key is not None:
+                            counts[key] = (counts[key] or 0) + row[1]
+                    return counts
+                finally:
+                    cursor.close()
+        except Exception:
+            # MSysObjects not accessible — fall back to catalog
+            pass
+        try:
+            tables = 0
+            views = 0
+            with self._connection() as conn:
+                cursor = conn.cursor()
+                try:
+                    for _ in cursor.tables(tableType="TABLE"):
+                        tables += 1
+                    for _ in cursor.tables(tableType="VIEW"):
+                        views += 1
+                finally:
+                    cursor.close()
+            # Only return keys we can actually determine via ODBC catalog
+            return {"tables": tables, "queries": views}
+        except Exception:
+            return {}
+
+    def list_tables(self, name_filter: str | None = None) -> list[dict[str, Any]]:
         """
         List all tables using MSysObjects system table.
         
         Falls back to ODBC catalog functions if MSysObjects is not accessible.
         """
-        # First, try MSysObjects (most reliable when accessible)
-        sql = """
-            SELECT 
-                MSysObjects.Name AS table_name,
-                'dbo' AS table_schema
+        where = (
+            "MSysObjects.Type = 1 AND MSysObjects.Flags = 0 "
+            "AND MSysObjects.Name NOT LIKE 'MSys%'"
+        )
+        if name_filter:
+            safe = name_filter.replace("'", "''")
+            where += f" AND MSysObjects.Name LIKE '%{safe}%'"
+
+        sql = f"""
+            SELECT MSysObjects.Name AS table_name
             FROM MSysObjects
-            WHERE MSysObjects.Type = 1
-            AND MSysObjects.Flags = 0
-            AND MSysObjects.Name NOT LIKE 'MSys%'
+            WHERE {where}
             ORDER BY MSysObjects.Name
         """
         try:
@@ -327,90 +374,70 @@ class AccessODBCBackend(DatabaseBackend):
                 cursor = conn.cursor()
                 try:
                     cursor.execute(sql)
-                    rows = cursor.fetchall()
-                    
-                    tables = []
-                    for row in rows:
-                        tables.append({
-                            "name": row[0],
-                            "schema": "dbo",  # Access doesn't have schemas, use default
-                            "row_count": None,  # Could add count if needed
-                        })
-                    return tables
+                    return [
+                        {"name": row[0], "schema": "dbo", "row_count": None}
+                        for row in cursor.fetchall()
+                    ]
                 finally:
                     cursor.close()
         except pyodbc.ProgrammingError as e:
-            # Check if it's a permission error on MSysObjects
             error_msg = str(e).lower()
             if "msysobjects" in error_msg or "no read permission" in error_msg or "-1907" in str(e):
-                # Try alternative method using ODBC catalog functions
                 try:
-                    return self._list_tables_via_catalog()
+                    return self._list_tables_via_catalog(name_filter)
                 except Exception as catalog_error:
-                    # If catalog method also fails, raise a helpful error
                     raise RuntimeError(
-                        f"Cannot list tables: MSysObjects system table is not accessible "
-                        f"(permission denied). This is common with Access databases that have "
-                        f"restricted system table access. Consider using the 'access_com' backend "
-                        f"instead, which uses COM automation and can access table definitions directly. "
-                        f"Original error: {e}. Catalog method also failed: {catalog_error}"
+                        f"Cannot list tables: MSysObjects not accessible. "
+                        f"Consider using the 'access_com' backend. "
+                        f"Original: {e}. Catalog also failed: {catalog_error}"
                     ) from e
-            # Re-raise if it's a different error
             raise
         except Exception as e:
-            # For other errors, try catalog method as fallback
             try:
-                return self._list_tables_via_catalog()
+                return self._list_tables_via_catalog(name_filter)
             except Exception:
-                # If catalog method fails, raise original error
                 raise RuntimeError(
                     f"Failed to list tables: {e}. "
                     f"Consider using the 'access_com' backend for better compatibility."
                 ) from e
-    
-    def _list_tables_via_catalog(self) -> list[dict[str, Any]]:
-        """
-        List tables using ODBC catalog functions as fallback.
-        
-        This method uses pyodbc's tables() method which queries the ODBC catalog.
-        """
+
+    def _list_tables_via_catalog(self, name_filter: str | None = None) -> list[dict[str, Any]]:
+        """List tables using ODBC catalog functions as fallback."""
+        filt = name_filter.lower() if name_filter else None
         with self._connection() as conn:
             cursor = conn.cursor()
-            
-            # Use ODBC catalog function to get table names
-            # table_type='TABLE' filters for user tables (excludes system tables and views)
-            tables = []
+            tables: list[dict[str, Any]] = []
             try:
                 for row in cursor.tables(tableType='TABLE'):
                     table_name = row.table_name
-                    # Skip system tables (MSys*)
-                    if not table_name.startswith('MSys'):
-                        tables.append({
-                            "name": table_name,
-                            "schema": row.table_schem or "dbo",  # Use schema if available
-                            "row_count": None,
-                        })
+                    if table_name.startswith('MSys'):
+                        continue
+                    if filt and filt not in table_name.lower():
+                        continue
+                    tables.append({
+                        "name": table_name,
+                        "schema": row.table_schem or "dbo",
+                        "row_count": None,
+                    })
             finally:
                 cursor.close()
-            
             return tables
-    
-    def list_views(self) -> list[dict[str, Any]]:
+
+    def list_views(self, name_filter: str | None = None) -> list[dict[str, Any]]:
         """
         List all views (queries) with their definitions.
         
         Falls back to ODBC catalog functions if MSysObjects is not accessible.
         """
-        # First, try MSysObjects (most reliable when accessible)
-        sql = """
-            SELECT 
-                MSysObjects.Name AS view_name,
-                'dbo' AS view_schema,
-                MSysQueries.Expression AS view_definition
+        where = "MSysObjects.Type = 5 AND Left(MSysObjects.Name, 1) <> '~'"
+        if name_filter:
+            safe = name_filter.replace("'", "''")
+            where += f" AND MSysObjects.Name LIKE '%{safe}%'"
+
+        sql = f"""
+            SELECT MSysObjects.Name AS view_name
             FROM MSysObjects
-            INNER JOIN MSysQueries ON MSysObjects.Id = MSysQueries.ObjectId
-            WHERE MSysObjects.Type = 5
-            AND Left(MSysObjects.Name, 1) <> '~'
+            WHERE {where}
             ORDER BY MSysObjects.Name
         """
         try:
@@ -418,74 +445,53 @@ class AccessODBCBackend(DatabaseBackend):
                 cursor = conn.cursor()
                 try:
                     cursor.execute(sql)
-                    rows = cursor.fetchall()
-                    
-                    views = []
-                    for row in rows:
-                        views.append({
-                            "name": row[0],
-                            "schema": "dbo",
-                            "definition": row[2] if len(row) > 2 else None,
-                        })
-                    return views
+                    return [
+                        {"name": row[0], "schema": "dbo", "definition": None}
+                        for row in cursor.fetchall()
+                    ]
                 finally:
                     cursor.close()
         except pyodbc.ProgrammingError as e:
-            # Check if it's a permission error on MSysObjects
             error_msg = str(e).lower()
             if "msysobjects" in error_msg or "msysqueries" in error_msg or "no read permission" in error_msg or "-1907" in str(e):
-                # Try alternative method using ODBC catalog functions
                 try:
-                    return self._list_views_via_catalog()
+                    return self._list_views_via_catalog(name_filter)
                 except Exception as catalog_error:
-                    # If catalog method also fails, raise a helpful error
                     raise RuntimeError(
-                        f"Cannot list views/queries: MSysObjects system table is not accessible "
-                        f"(permission denied). This is common with Access databases that have "
-                        f"restricted system table access. Consider using the 'access_com' backend "
-                        f"instead, which uses COM automation and can access query definitions directly. "
-                        f"Original error: {e}. Catalog method also failed: {catalog_error}"
+                        f"Cannot list views/queries: MSysObjects not accessible. "
+                        f"Consider using the 'access_com' backend. "
+                        f"Original: {e}. Catalog also failed: {catalog_error}"
                     ) from e
-            # Re-raise if it's a different error
             raise
         except Exception as e:
-            # For other errors, try catalog method as fallback
             try:
-                return self._list_views_via_catalog()
+                return self._list_views_via_catalog(name_filter)
             except Exception:
-                # If catalog method fails, raise original error
                 raise RuntimeError(
                     f"Failed to list views/queries: {e}. "
                     f"Consider using the 'access_com' backend for better compatibility."
                 ) from e
-    
-    def _list_views_via_catalog(self) -> list[dict[str, Any]]:
-        """
-        List views/queries using ODBC catalog functions as fallback.
-        
-        This method uses pyodbc's tables() method which queries the ODBC catalog.
-        Note: This method can list query names but cannot retrieve SQL definitions
-        without access to MSysQueries system table.
-        """
+
+    def _list_views_via_catalog(self, name_filter: str | None = None) -> list[dict[str, Any]]:
+        """List views/queries using ODBC catalog functions as fallback."""
+        filt = name_filter.lower() if name_filter else None
         with self._connection() as conn:
             cursor = conn.cursor()
-            
-            # Use ODBC catalog function to get view/query names
-            # table_type='VIEW' filters for queries/views in Access
-            views = []
+            views: list[dict[str, Any]] = []
             try:
                 for row in cursor.tables(tableType='VIEW'):
                     view_name = row.table_name
-                    # Skip system views and temporary queries (starting with ~)
-                    if not view_name.startswith('MSys') and not view_name.startswith('~'):
-                        views.append({
-                            "name": view_name,
-                            "schema": row.table_schem or "dbo",  # Use schema if available
-                            "definition": None,  # Cannot get SQL definition without MSysQueries access
-                        })
+                    if view_name.startswith('MSys') or view_name.startswith('~'):
+                        continue
+                    if filt and filt not in view_name.lower():
+                        continue
+                    views.append({
+                        "name": view_name,
+                        "schema": row.table_schem or "dbo",
+                        "definition": None,
+                    })
             finally:
                 cursor.close()
-            
             return views
     
     def verify_readonly(self) -> dict[str, Any]:

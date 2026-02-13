@@ -205,10 +205,32 @@ class DatabaseBackend(ABC):
         """
         pass
     
-    @abstractmethod
-    def list_tables(self) -> list[dict[str, Any]]:
+    def get_object_counts(self) -> dict[str, int | None]:
         """
-        List all tables in the database.
+        Get counts of database objects by type.
+        
+        Returns a dict whose keys are backend-specific object type names
+        (e.g. "tables", "views", "queries", "forms", "stored_procedures")
+        and whose values are integer counts.  Only includes keys the
+        backend can actually determine — unknown object types are omitted
+        rather than set to None, so the absence of a key means "not
+        measured" while a value of 0 means "we checked and found none."
+        
+        The default implementation returns an empty dict.  Backends should
+        override this to provide richer information using the cheapest
+        available path.
+        """
+        return {}
+    
+    @abstractmethod
+    def list_tables(self, name_filter: str | None = None) -> list[dict[str, Any]]:
+        """
+        List tables in the database, optionally filtered by name.
+        
+        Args:
+            name_filter: Optional case-insensitive substring filter.
+                When provided, only tables whose name contains this
+                string are returned.
         
         Returns:
             List of dictionaries with table metadata:
@@ -219,9 +241,14 @@ class DatabaseBackend(ABC):
         pass
     
     @abstractmethod
-    def list_views(self) -> list[dict[str, Any]]:
+    def list_views(self, name_filter: str | None = None) -> list[dict[str, Any]]:
         """
-        List all views in the database with their definitions.
+        List views/queries in the database, optionally filtered by name.
+        
+        Args:
+            name_filter: Optional case-insensitive substring filter.
+                When provided, only views whose name contains this
+                string are returned.
         
         Returns:
             List of dictionaries with view metadata:

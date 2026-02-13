@@ -59,3 +59,8 @@ Thumbs.db
 # Usage logs (collected from client projects when running in dev mode)
 logs/
 
+# Benchmark results (may contain database-specific details)
+benchmarks/BENCH_*.md
+
+# IDE / editor
+/.obsidian

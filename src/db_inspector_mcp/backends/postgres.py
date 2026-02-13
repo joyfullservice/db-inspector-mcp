@@ -168,25 +168,65 @@ class PostgresBackend(DatabaseBackend):
         else:
             return "No execution plan available"
     
-    def list_tables(self) -> list[dict[str, Any]]:
+    def get_object_counts(self) -> dict[str, int | None]:
+        """Return object counts via information_schema and pg_catalog.
+
+        Only includes keys we can actually determine.  If the query fails
+        entirely, returns an empty dict.
+        """
+        try:
+            sql = """
+                SELECT
+                    (SELECT COUNT(*) FROM information_schema.tables
+                     WHERE table_type='BASE TABLE'
+                       AND table_schema NOT IN ('pg_catalog','information_schema')) AS tbl,
+                    (SELECT COUNT(*) FROM information_schema.views
+                     WHERE table_schema NOT IN ('pg_catalog','information_schema')) AS vw,
+                    (SELECT COUNT(*) FROM information_schema.routines
+                     WHERE routine_schema NOT IN ('pg_catalog','information_schema')) AS fn,
+                    (SELECT COUNT(*) FROM information_schema.triggers
+                     WHERE trigger_schema NOT IN ('pg_catalog','information_schema')) AS trg
+            """
+            cursor = self._execute_query(sql)
+            row = cursor.fetchone()
+            cursor.close()
+            if row:
+                return {
+                    "tables": row["tbl"],
+                    "views": row["vw"],
+                    "functions": row["fn"],
+                    "triggers": row["trg"],
+                }
+        except Exception:
+            pass
+        return {}
+
+    def list_tables(self, name_filter: str | None = None) -> list[dict[str, Any]]:
         """List all tables using information_schema."""
-        sql = """
+        where = (
+            "table_type = 'BASE TABLE' "
+            "AND table_schema NOT IN ('pg_catalog', 'information_schema')"
+        )
+        if name_filter:
+            safe = name_filter.replace("'", "''")
+            where += f" AND table_name ILIKE '%{safe}%'"
+
+        sql = f"""
             SELECT 
                 table_schema,
                 table_name,
                 (SELECT reltuples::bigint 
                  FROM pg_class 
-                 WHERE relname = table_name 
-                 AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = table_schema)
+                 WHERE relname = t.table_name 
+                 AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = t.table_schema)
                 ) AS approximate_row_count
-            FROM information_schema.tables
-            WHERE table_type = 'BASE TABLE'
-            AND table_schema NOT IN ('pg_catalog', 'information_schema')
+            FROM information_schema.tables t
+            WHERE {where}
             ORDER BY table_schema, table_name
         """
         cursor = self._execute_query(sql)
         rows = cursor.fetchall()
-        
+
         tables = []
         for row in rows:
             tables.append({
@@ -194,24 +234,29 @@ class PostgresBackend(DatabaseBackend):
                 "schema": row["table_schema"],
                 "row_count": int(row["approximate_row_count"]) if row["approximate_row_count"] else None,
             })
-        
+
         cursor.close()
         return tables
-    
-    def list_views(self) -> list[dict[str, Any]]:
+
+    def list_views(self, name_filter: str | None = None) -> list[dict[str, Any]]:
         """List all views with their definitions."""
-        sql = """
+        where = "table_schema NOT IN ('pg_catalog', 'information_schema')"
+        if name_filter:
+            safe = name_filter.replace("'", "''")
+            where += f" AND table_name ILIKE '%{safe}%'"
+
+        sql = f"""
             SELECT 
                 table_schema,
                 table_name,
                 view_definition
             FROM information_schema.views
-            WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+            WHERE {where}
             ORDER BY table_schema, table_name
         """
         cursor = self._execute_query(sql)
         rows = cursor.fetchall()
-        
+
         views = []
         for row in rows:
             views.append({
@@ -219,7 +264,7 @@ class PostgresBackend(DatabaseBackend):
                 "schema": row["table_schema"],
                 "definition": row["view_definition"],
             })
-        
+
         cursor.close()
         return views
     
