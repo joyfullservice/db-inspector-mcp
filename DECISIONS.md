@@ -8,6 +8,39 @@
 
 ---
 
+## 2026-02-17 — Lazy backend initialization via MCP roots for user-level configs
+
+**Trigger**: When the MCP server is configured at the user level (global Cursor settings) rather than the project level (`.cursor/mcp.json`), Cursor sets the working directory to the user's home folder (`C:\Users\akw`), not the open workspace. The server's `.env` search starts from CWD and walks upward, so it never finds the project's `.env` file. The server crashed at startup with "No database configuration found."
+
+**Options explored**:
+- **Rely on CWD** (status quo) — works for project-level configs where Cursor sets CWD to the workspace root. Confirmed broken for user-level configs via diagnostic logging added during the session.
+- **`DB_MCP_PROJECT_DIR` env var only** — explicit override the user sets in their `mcp.json` `env` section. Works but not dynamic: the user must change it per project, defeating the point of a single user-level config.
+- **MCP `roots/list` protocol call** — after the protocol handshake the server can ask the client for workspace folders. These are `file://` URIs pointing at the open workspace root(s). Fully dynamic but only available after the handshake, not at startup. Requires async code and a `Context` object, which is only available during tool calls.
+- **IDE-specific env vars** (e.g., `CURSOR_WORKSPACE_FOLDER`) — speculative; no evidence Cursor sets such variables for MCP servers. Fragile and IDE-specific.
+- **Lazy initialization via MCP roots on first tool call (chosen)** — don't crash at startup. On the first call to `db_list_databases` (which the MCP instructions already tell agents to call first), use `ctx.session.list_roots()` to discover the workspace, load `.env` from it, and initialize backends. `DB_MCP_PROJECT_DIR` kept as an explicit fallback.
+
+**Decision**: Two-phase initialization. Phase 1 (startup): try to find `.env` from CWD as before. If it fails, log a message and continue — don't `sys.exit(1)`. Phase 2 (first tool call): `db_list_databases` is now `async` with a `Context` parameter. `_ensure_backends_initialized(ctx)` calls `ctx.session.list_roots()`, converts each `file://` URI to a local path, checks for `.env`, and calls the new `initialize_from_workspace()` to load it and register backends. A module-level `_lazy_init_attempted` flag ensures this runs at most once. The `BackendRegistry.get()` error message was improved to tell agents to call `db_list_databases()` first when no backends are registered.
+
+Supporting changes: `with_logging` decorator updated to support async tool functions. `_verify_readonly()` extracted from `main()` so it can be called from the lazy-init path too. `_file_uri_to_path()` handles Windows `file:///C:/path` URIs. Diagnostic logging in `_load_env_files()` prints CWD, resolved project root, and which `.env` files were loaded to stderr.
+
+**What this rules out**: Only `db_list_databases` triggers lazy init. If an agent calls another tool first (e.g., `db_list_tables`), it will get a clear error message directing it to call `db_list_databases()`. This aligns with the existing MCP instructions. If a future MCP SDK version exposes an `on_initialized` server hook, the lazy init could move there, removing the requirement that `db_list_databases` be called first.
+
+**Relevant files**:
+- `src/db_inspector_mcp/main.py` — no longer exits on `ValueError`; extracted `_verify_readonly()`
+- `src/db_inspector_mcp/config.py` — added `initialize_from_workspace()`, `_load_env_from_directory()`, `DB_MCP_PROJECT_DIR` support, diagnostic logging
+- `src/db_inspector_mcp/tools.py` — `db_list_databases` is now async with `Context`; added `_ensure_backends_initialized()`, `_file_uri_to_path()`
+- `src/db_inspector_mcp/usage_logging.py` — `with_logging` supports async functions
+- `src/db_inspector_mcp/backends/registry.py` — improved empty-registry error message
+- `README.md` — new "User-Level MCP Configuration" section
+- `.env.example` — documented `DB_MCP_PROJECT_DIR`
+- `AGENTS.md` — added venv activation instructions for tests
+- `tests/test_config.py` — 6 new tests for `_find_project_root`
+- `tests/test_tools.py` — updated `test_db_list_databases_includes_dialect` for async
+
+**Commits**:
+
+---
+
 ## 2026-02-12 — ROT enumeration for multi-instance Access discovery
 
 **Trigger**: The previous fix for password-protected databases replaced `GetObject(db_path)` (which triggers a password dialog) with `GetObject(None, "Access.Application")`. However, `GetObject(None, ...)` only returns whichever instance the Running Object Table (ROT) hands back first. If the user has 5 Access instances open and our password-protected database is in one of them, there's an ~80% chance we get the wrong instance. We'd then create a 6th instance and try to `OpenCurrentDatabase` again, potentially causing locking/concurrency issues (shared mode instead of exclusive).

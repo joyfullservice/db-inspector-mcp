@@ -21,6 +21,29 @@ Append a new entry to the top of [DECISIONS.md](DECISIONS.md) documenting:
 - **What this rules out**: What becomes harder or impossible
 - **Relevant files**: Which files were changed
 
+## Running Tests
+
+This project uses a virtual environment. **Activate it before running tests:**
+
+```powershell
+# Windows (PowerShell)
+venv\Scripts\Activate.ps1
+pytest
+```
+
+```bash
+# macOS/Linux
+source venv/bin/activate
+pytest
+```
+
+Or run pytest directly via the venv Python without activating:
+
+```powershell
+venv\Scripts\python.exe -m pytest          # Windows
+./venv/bin/python -m pytest                # macOS/Linux
+```
+
 ## Project Conventions
 
 - See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, testing, and code style

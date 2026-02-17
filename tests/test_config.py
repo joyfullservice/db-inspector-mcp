@@ -1,11 +1,72 @@
 """Tests for configuration module."""
 
 import os
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from db_inspector_mcp.config import get_backend, load_config
+from db_inspector_mcp.config import _find_project_root, get_backend, load_config
+
+
+class TestFindProjectRoot:
+    """Tests for _find_project_root with DB_MCP_PROJECT_DIR and CWD-based detection."""
+
+    def test_explicit_project_dir(self, tmp_path):
+        """DB_MCP_PROJECT_DIR is used when set and the directory exists."""
+        project_dir = tmp_path / "my_project"
+        project_dir.mkdir()
+        with patch.dict(os.environ, {"DB_MCP_PROJECT_DIR": str(project_dir)}, clear=False):
+            result = _find_project_root()
+            assert result == project_dir.resolve()
+
+    def test_explicit_project_dir_nonexistent(self, tmp_path, capsys):
+        """A warning is printed and fallback is used when the directory doesn't exist."""
+        bad_path = str(tmp_path / "does_not_exist")
+        with patch.dict(os.environ, {"DB_MCP_PROJECT_DIR": bad_path}, clear=False):
+            result = _find_project_root()
+            assert result != Path(bad_path).resolve()
+            captured = capsys.readouterr()
+            assert "non-existent directory" in captured.err
+
+    def test_no_explicit_project_dir(self):
+        """Without DB_MCP_PROJECT_DIR, normal search behaviour is used."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DB_MCP_PROJECT_DIR", None)
+            result = _find_project_root()
+            assert isinstance(result, Path)
+
+    def test_finds_env_from_cwd(self, tmp_path, monkeypatch):
+        """When CWD contains a .env file, it is detected as the project root."""
+        (tmp_path / ".env").write_text("DB_MCP_DATABASE=sqlserver\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("DB_MCP_PROJECT_DIR", raising=False)
+        result = _find_project_root()
+        assert result == tmp_path.resolve()
+
+    def test_finds_env_in_parent(self, tmp_path, monkeypatch):
+        """When CWD is a subdirectory, the search walks upward to find .env."""
+        (tmp_path / ".env").write_text("DB_MCP_DATABASE=sqlserver\n")
+        subdir = tmp_path / "src" / "subpkg"
+        subdir.mkdir(parents=True)
+        monkeypatch.chdir(subdir)
+        monkeypatch.delenv("DB_MCP_PROJECT_DIR", raising=False)
+        result = _find_project_root()
+        assert result == tmp_path.resolve()
+
+    def test_explicit_overrides_cwd(self, tmp_path, monkeypatch):
+        """DB_MCP_PROJECT_DIR takes precedence over CWD-based search."""
+        cwd_project = tmp_path / "cwd_project"
+        cwd_project.mkdir()
+        (cwd_project / ".env").write_text("DB_MCP_DATABASE=postgres\n")
+
+        explicit_project = tmp_path / "explicit_project"
+        explicit_project.mkdir()
+
+        monkeypatch.chdir(cwd_project)
+        monkeypatch.setenv("DB_MCP_PROJECT_DIR", str(explicit_project))
+        result = _find_project_root()
+        assert result == explicit_project.resolve()
 
 
 def test_load_config_defaults():

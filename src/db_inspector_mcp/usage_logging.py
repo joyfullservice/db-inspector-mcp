@@ -360,9 +360,15 @@ def with_logging(tool_name: str):
     """
     Decorator to add logging to a tool function.
     
+    Supports both sync and async tool functions.
+    
     Usage:
         @with_logging("db_count_query_results")
         def db_count_query_results(query: str, database: str | None = None) -> dict:
+            ...
+
+        @with_logging("db_list_databases")
+        async def db_list_databases(ctx: Context) -> dict:
             ...
     
     Args:
@@ -371,90 +377,107 @@ def with_logging(tool_name: str):
     Returns:
         Decorator function
     """
-    def decorator(func: Callable) -> Callable:
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs) -> Any:
-            # Skip logging if disabled
-            if not _initialize_logging():
-                return func(*args, **kwargs)
-            
-            start_time = time.time()
-            error_msg = None
-            result = None
-            serialization_warning = None
-            
-            # Extract database and dialect if available
-            database = kwargs.get("database")
-            dialect = None
-            
-            try:
-                # Try to get dialect from registry
-                from .backends.registry import get_registry
-                registry = get_registry()
-                if registry.list_backends():
-                    backend = registry.get(database)
-                    dialect = getattr(backend, "sql_dialect", None)
-            except Exception:
-                pass  # Don't fail if we can't get dialect
-            
-            try:
-                result = func(*args, **kwargs)
-                
-                # Validate that the result is JSON-serializable before returning.
-                # FastMCP will serialize this to JSON for the MCP transport; if it
-                # contains types like bytes/bytearray the client will see a cryptic
-                # "invalid utf-8 sequence" error.  We catch that here so it gets
-                # logged AND so we can return a helpful error to the caller.
-                if result is not None:
-                    try:
-                        json.dumps(result, default=str)
-                    except (TypeError, ValueError, UnicodeEncodeError) as ser_err:
-                        serialization_warning = (
-                            f"Result passed tool execution but failed JSON serialization: "
-                            f"{type(ser_err).__name__}: {ser_err}"
-                        )
-                        # Replace the result with an error dict so the client gets
-                        # actionable information instead of a raw transport error.
-                        result = {
-                            "error": (
-                                f"Query succeeded but the result contains values that "
-                                f"cannot be serialized to JSON ({type(ser_err).__name__}: {ser_err}). "
-                                f"This usually means a column returns binary data (e.g., timestamp/rowversion). "
-                                f"Try selecting specific columns instead of SELECT *."
-                            )
-                        }
-                
-                return result
-            except Exception as e:
-                error_msg = str(e)
-                raise
-            finally:
-                execution_time_ms = (time.time() - start_time) * 1000
-                
-                # Build parameters dict from args and kwargs
-                parameters = dict(kwargs)
-                # Add positional args with generic names
-                import inspect
-                sig = inspect.signature(func)
-                param_names = list(sig.parameters.keys())
-                for i, arg in enumerate(args):
-                    if i < len(param_names):
-                        parameters[param_names[i]] = arg
-                
-                # Use serialization warning as the error if no other error occurred
-                logged_error = error_msg or serialization_warning
-                
-                log_tool_call(
-                    tool_name=tool_name,
-                    parameters=parameters,
-                    result=result,
-                    error=logged_error,
-                    execution_time_ms=round(execution_time_ms, 2),
-                    database=database,
-                    dialect=dialect,
+    def _log_call(func, args, kwargs, result, error_msg, serialization_warning, start_time):
+        """Shared logging logic for sync and async wrappers."""
+        execution_time_ms = (time.time() - start_time) * 1000
+        database = kwargs.get("database")
+        dialect = None
+        try:
+            from .backends.registry import get_registry
+            registry = get_registry()
+            if registry.list_backends():
+                backend = registry.get(database)
+                dialect = getattr(backend, "sql_dialect", None)
+        except Exception:
+            pass
+
+        import inspect
+        parameters = dict(kwargs)
+        sig = inspect.signature(func)
+        param_names = list(sig.parameters.keys())
+        for i, arg in enumerate(args):
+            if i < len(param_names):
+                parameters[param_names[i]] = arg
+
+        logged_error = error_msg or serialization_warning
+        log_tool_call(
+            tool_name=tool_name,
+            parameters=parameters,
+            result=result,
+            error=logged_error,
+            execution_time_ms=round(execution_time_ms, 2),
+            database=database,
+            dialect=dialect,
+        )
+
+    def _check_serialization(result):
+        """Validate result is JSON-serializable, return (result, warning)."""
+        if result is None:
+            return result, None
+        try:
+            json.dumps(result, default=str)
+            return result, None
+        except (TypeError, ValueError, UnicodeEncodeError) as ser_err:
+            warning = (
+                f"Result passed tool execution but failed JSON serialization: "
+                f"{type(ser_err).__name__}: {ser_err}"
+            )
+            error_result = {
+                "error": (
+                    f"Query succeeded but the result contains values that "
+                    f"cannot be serialized to JSON ({type(ser_err).__name__}: {ser_err}). "
+                    f"This usually means a column returns binary data (e.g., timestamp/rowversion). "
+                    f"Try selecting specific columns instead of SELECT *."
                 )
-        
-        return wrapper
+            }
+            return error_result, warning
+
+    def decorator(func: Callable) -> Callable:
+        import asyncio
+        import inspect as _inspect
+
+        if _inspect.iscoroutinefunction(func):
+            @functools.wraps(func)
+            async def async_wrapper(*args, **kwargs) -> Any:
+                if not _initialize_logging():
+                    return await func(*args, **kwargs)
+
+                start_time = time.time()
+                error_msg = None
+                result = None
+                serialization_warning = None
+                try:
+                    result = await func(*args, **kwargs)
+                    result, serialization_warning = _check_serialization(result)
+                    return result
+                except Exception as e:
+                    error_msg = str(e)
+                    raise
+                finally:
+                    _log_call(func, args, kwargs, result, error_msg, serialization_warning, start_time)
+
+            return async_wrapper
+        else:
+            @functools.wraps(func)
+            def wrapper(*args, **kwargs) -> Any:
+                if not _initialize_logging():
+                    return func(*args, **kwargs)
+
+                start_time = time.time()
+                error_msg = None
+                result = None
+                serialization_warning = None
+                try:
+                    result = func(*args, **kwargs)
+                    result, serialization_warning = _check_serialization(result)
+                    return result
+                except Exception as e:
+                    error_msg = str(e)
+                    raise
+                finally:
+                    _log_call(func, args, kwargs, result, error_msg, serialization_warning, start_time)
+
+            return wrapper
     return decorator
 
 

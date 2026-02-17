@@ -20,15 +20,92 @@ All tools are read-only by default and designed for safe database exploration an
 """
 
 import re
+import sys
+from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 from .backends.access_com import AccessCOMBackend
 from .backends.registry import get_registry
-from .config import check_data_access, get_config
+from .config import check_data_access, get_config, initialize_from_workspace
 from .security import validate_readonly_sql
 from .usage_logging import with_logging
+
+
+# ---------------------------------------------------------------------------
+# Lazy backend initialisation via MCP workspace roots
+# ---------------------------------------------------------------------------
+# When the server is configured at the *user* level the working directory is
+# typically the user's home folder, not the project root.  In that case
+# ``main.py`` skips backend initialisation and defers to this module which
+# uses the MCP ``roots/list`` call (available after the protocol handshake)
+# to discover the workspace and its ``.env`` file.
+
+_lazy_init_attempted = False
+
+
+async def _ensure_backends_initialized(ctx: Context) -> None:
+    """Lazily initialize backends from MCP workspace roots if not yet done."""
+    global _lazy_init_attempted
+    if _lazy_init_attempted:
+        return
+    _lazy_init_attempted = True
+
+    registry = get_registry()
+    if registry.list_backends():
+        return  # Already initialised at startup
+
+    try:
+        roots_result = await ctx.session.list_roots()
+    except Exception as exc:
+        print(f"Could not request workspace roots from client: {exc}", file=sys.stderr)
+        return
+
+    for root in roots_result.roots:
+        workspace = _file_uri_to_path(str(root.uri))
+        if workspace is None:
+            continue
+        env_path = workspace / ".env"
+        if not env_path.exists():
+            continue
+        try:
+            new_registry = initialize_from_workspace(workspace)
+            backends = new_registry.list_backends()
+            default_name = new_registry.get_default_name()
+            print(
+                f"Initialized {len(backends)} backend(s) from workspace root: "
+                f"{', '.join(backends)}",
+                file=sys.stderr,
+            )
+            if default_name:
+                print(f"Default backend: {default_name}", file=sys.stderr)
+
+            # Run read-only verification
+            from .main import _verify_readonly
+            _verify_readonly(get_config(), new_registry)
+            return
+        except Exception as exc:
+            print(f"Failed to initialize from {workspace}: {exc}", file=sys.stderr)
+
+    print(
+        "No .env file found in any workspace root provided by the client.",
+        file=sys.stderr,
+    )
+
+
+def _file_uri_to_path(uri: str) -> Path | None:
+    """Convert a ``file://`` URI to a local ``Path``, or return *None*."""
+    parsed = urlparse(uri)
+    if parsed.scheme != "file":
+        return None
+    # On Windows, file:///C:/path → /C:/path — strip leading slash
+    raw_path = unquote(parsed.path)
+    if len(raw_path) >= 3 and raw_path[0] == "/" and raw_path[2] == ":":
+        raw_path = raw_path[1:]
+    return Path(raw_path)
+
 
 
 # ---------------------------------------------------------------------------
@@ -873,7 +950,7 @@ def db_get_access_query_definition(name: str, database: str | None = None) -> di
 
 @mcp.tool()
 @with_logging("db_list_databases")
-def db_list_databases() -> dict[str, Any]:
+async def db_list_databases(ctx: Context) -> dict[str, Any]:
     """
     List all available database backends that have been configured.
     
@@ -927,6 +1004,11 @@ def db_list_databases() -> dict[str, Any]:
         counted when the Application is running).
         Also includes "default" key with the default database name.
     """
+    # Lazy-init: if backends were not configured at startup (e.g. user-level
+    # mcp.json where CWD != project root), try to discover the workspace via
+    # MCP roots and load its .env file.
+    await _ensure_backends_initialized(ctx)
+
     registry = get_registry()
     backend_names = registry.list_backends()
     default_name = registry.get_default_name()

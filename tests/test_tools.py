@@ -127,9 +127,11 @@ def test_tools_reject_write_operations(mock_registry):
         db_count_query_results("INSERT INTO users VALUES (1)")
 
 
-def test_db_list_databases_includes_dialect():
+@pytest.mark.anyio
+async def test_db_list_databases_includes_dialect():
     """Test that db_list_databases includes dialect information."""
-    with patch("db_inspector_mcp.tools.get_registry") as mock_get_registry:
+    with patch("db_inspector_mcp.tools.get_registry") as mock_get_registry, \
+         patch("db_inspector_mcp.tools._ensure_backends_initialized"):
         # Create mock backends with sql_dialect property
         mock_access_backend = MagicMock()
         mock_access_backend.sql_dialect = "access"
@@ -145,7 +147,8 @@ def test_db_list_databases_includes_dialect():
         )
         mock_get_registry.return_value = registry
         
-        result = db_list_databases()
+        mock_ctx = MagicMock()
+        result = await db_list_databases(mock_ctx)
         
         assert "databases" in result
         assert len(result["databases"]) == 2

@@ -238,6 +238,7 @@ For more advanced configuration options, see the [Configuration](#configuration)
 | `DB_MCP_CONNECTION_STRING` | Database connection string (single database) | - | Yes* |
 | `DB_MCP_<name>_DATABASE` | Database type for named database (multi-database) | - | Yes* |
 | `DB_MCP_<name>_CONNECTION_STRING` | Connection string for named database (multi-database) | - | Yes* |
+| `DB_MCP_PROJECT_DIR` | Project directory for `.env` file lookup (see [User-Level MCP Configuration](#user-level-mcp-configuration)) | auto-detected | No |
 | `DB_MCP_QUERY_TIMEOUT_SECONDS` | Query timeout in seconds | `30` | No |
 | `DB_MCP_ALLOW_DATA_ACCESS` | Global flag to enable data access tools | `false` | No |
 | `DB_MCP_ALLOW_PREVIEW` | Per-tool override for `db_preview` | `false` | No |
@@ -500,6 +501,47 @@ DB_MCP_LEGACY_CONNECTION_STRING=Driver={Microsoft Access Driver (*.mdb, *.accdb)
 
 DB_MCP_NEW_DATABASE=sqlserver
 DB_MCP_NEW_CONNECTION_STRING=Driver={ODBC Driver 17 for SQL Server};Server=localhost;Database=mydb;UID=user;PWD=password
+```
+
+### User-Level MCP Configuration
+
+You don't need a per-project `.cursor/mcp.json`. You can configure the MCP server once at the **user level** (global Cursor settings) and rely on a `.env` file in each project for database credentials.
+
+The server uses two strategies to find your project's `.env` file:
+
+1. **Startup** — searches upward from the working directory for `.env`, `.cursor/mcp.json`, or `pyproject.toml`.
+2. **First tool call** — if no `.env` was found at startup, the server asks the client (Cursor) for its workspace roots via the MCP protocol and loads `.env` from there.
+
+This means it works automatically even when the working directory is *not* your project root (which is the typical case for user-level MCP configs).
+
+Diagnostic messages are printed to stderr so you can verify what happened in Cursor's MCP output pane:
+
+```
+Working directory: C:\Users\me
+No .env file found at C:\Users\me\.env
+No database configuration found at startup — will attempt workspace detection on first tool call.
+Lazy init: loading .env from workspace root C:\Users\me\projects\my-project
+Loaded .env from C:\Users\me\projects\my-project\.env
+Initialized 2 backend(s) from workspace root: legacy, new
+```
+
+#### Fallback: `DB_MCP_PROJECT_DIR`
+
+If the automatic workspace detection doesn't work in your environment, set `DB_MCP_PROJECT_DIR` explicitly:
+
+```json
+{
+  "mcpServers": {
+    "db-inspector-mcp": {
+      "command": "db-inspector-mcp",
+      "env": {
+        "DB_MCP_PROJECT_DIR": "C:\\Users\\me\\projects\\my-project",
+        "DB_MCP_QUERY_TIMEOUT_SECONDS": "30",
+        "DB_MCP_ALLOW_DATA_ACCESS": "false"
+      }
+    }
+  }
+}
 ```
 
 ### Claude Code Integration

@@ -19,52 +19,65 @@ def _find_project_root() -> Path:
     """
     Find the project root by searching for .env file or common project markers.
     
-    Searches upward from multiple starting points:
-    1. Current working directory
-    2. Location of this script (if available)
+    Resolution order:
+    1. ``DB_MCP_PROJECT_DIR`` env-var (explicit override)
+    2. Upward search from the current working directory
+    3. Upward search from the installed package location
+    4. Falls back to the current working directory
     
-    For each starting point, searches upward for:
-    1. .env file (primary indicator)
-    2. .cursor/mcp.json (MCP configuration)
-    3. pyproject.toml (Python project marker)
+    When Cursor (or another IDE) launches the MCP server, it normally sets
+    the working directory to the open workspace root — so the automatic
+    search finds the project's ``.env`` file even when the server is
+    configured at the *user* level.  ``DB_MCP_PROJECT_DIR`` is available as
+    a fallback for environments where the working directory is not set to
+    the project root.
+    
+    For each starting point the function walks up the directory tree looking
+    for:
+    * ``.env`` — primary indicator
+    * ``.cursor/mcp.json`` — MCP configuration
+    * ``pyproject.toml`` — Python project marker
     
     Returns:
         Path to project root, or current working directory if not found
     """
     import sys
     
-    # Try multiple starting points
+    # 1. Explicit override via DB_MCP_PROJECT_DIR
+    explicit_dir = os.getenv("DB_MCP_PROJECT_DIR")
+    if explicit_dir:
+        explicit_path = Path(explicit_dir).resolve()
+        if explicit_path.is_dir():
+            return explicit_path
+        else:
+            print(
+                f"Warning: DB_MCP_PROJECT_DIR points to a non-existent directory: {explicit_dir}",
+                file=sys.stderr,
+            )
+    
+    # 2–3. Automatic search from CWD and package location
     search_roots = [Path.cwd().resolve()]
     
-    # Also try to find project root relative to this package's location
     try:
-        # Get the directory containing this config.py file
         package_dir = Path(__file__).parent.parent.parent.resolve()
-        # Walk up to find project root (should be parent of src/)
         if (package_dir.parent / "pyproject.toml").exists():
             search_roots.append(package_dir.parent)
         search_roots.append(package_dir.parent)
     except Exception:
         pass
     
-    # Search from each starting point
     for root in search_roots:
         current = root
-        # Walk up the directory tree
         while current != current.parent:
-            # Check for .env file (primary indicator)
             if (current / ".env").exists():
                 return current
-            # Check for MCP config (secondary indicator)
             if (current / ".cursor" / "mcp.json").exists():
                 return current
-            # Check for Python project marker (tertiary indicator)
             if (current / "pyproject.toml").exists():
                 return current
-            
             current = current.parent
     
-    # Fall back to current working directory
+    # 4. Fall back to current working directory
     return Path.cwd().resolve()
 
 
@@ -78,25 +91,100 @@ def _load_env_files() -> None:
     2. .env.local (local overrides, if exists)
     
     Environment variables already set (e.g., from MCP server env section) take precedence.
+    
+    Prints diagnostic messages to stderr so users can verify which files were
+    loaded (visible in Cursor's MCP server output pane).
     """
     import sys
     
-    # Find project root (searches upward from current working directory)
     project_root = _find_project_root()
+    cwd = Path.cwd().resolve()
+
+    print(f"Working directory: {cwd}", file=sys.stderr)
+    if os.getenv("DB_MCP_PROJECT_DIR"):
+        print(f"DB_MCP_PROJECT_DIR: {os.getenv('DB_MCP_PROJECT_DIR')}", file=sys.stderr)
+    print(f"Resolved project root: {project_root}", file=sys.stderr)
     
     # Load .env file if it exists
     env_path = project_root / ".env"
     if env_path.exists():
-        # Convert Path to string for load_dotenv compatibility
         result = load_dotenv(str(env_path), override=False)
-        if not result:
-            print(f"Warning: .env file exists at {env_path} but no variables were loaded", file=sys.stderr)
+        if result:
+            print(f"Loaded .env from {env_path}", file=sys.stderr)
+        else:
+            print(
+                f"Warning: .env file exists at {env_path} but no new variables were loaded "
+                f"(they may already be set via mcp.json env section)",
+                file=sys.stderr,
+            )
+    else:
+        print(
+            f"No .env file found at {env_path} — "
+            f"if this is unexpected, set DB_MCP_PROJECT_DIR to your project path",
+            file=sys.stderr,
+        )
     
     # Load .env.local if it exists (takes precedence over .env)
     env_local_path = project_root / ".env.local"
     if env_local_path.exists():
-        # Convert Path to string for load_dotenv compatibility
         load_dotenv(str(env_local_path), override=True)
+        print(f"Loaded .env.local from {env_local_path}", file=sys.stderr)
+
+
+def _load_env_from_directory(directory: Path) -> bool:
+    """Load .env and .env.local from an explicit directory.
+
+    Returns True if at least one file was loaded.
+    """
+    import sys
+
+    loaded = False
+    env_path = directory / ".env"
+    if env_path.exists():
+        result = load_dotenv(str(env_path), override=False)
+        if result:
+            print(f"Loaded .env from {env_path}", file=sys.stderr)
+            loaded = True
+        else:
+            print(
+                f"Warning: .env file exists at {env_path} but no new variables were loaded "
+                f"(they may already be set via mcp.json env section)",
+                file=sys.stderr,
+            )
+
+    env_local_path = directory / ".env.local"
+    if env_local_path.exists():
+        load_dotenv(str(env_local_path), override=True)
+        print(f"Loaded .env.local from {env_local_path}", file=sys.stderr)
+        loaded = True
+
+    return loaded
+
+
+def initialize_from_workspace(workspace_path: Path) -> "BackendRegistry":
+    """Initialize backends from a workspace directory discovered via MCP roots.
+
+    This is the *lazy-init* path used when the server starts without a
+    ``.env`` file (e.g. user-level MCP configuration where the working
+    directory is not the project root).
+
+    Args:
+        workspace_path: Absolute path to the workspace root provided by the
+            MCP client (Cursor / VS Code).
+
+    Returns:
+        The populated ``BackendRegistry``.
+
+    Raises:
+        ValueError: If no database configuration is found in the workspace.
+    """
+    import sys
+
+    workspace_path = workspace_path.resolve()
+    print(f"Lazy init: loading .env from workspace root {workspace_path}", file=sys.stderr)
+
+    _load_env_from_directory(workspace_path)
+    return initialize_backends()
 
 
 def load_config() -> dict[str, Any]:

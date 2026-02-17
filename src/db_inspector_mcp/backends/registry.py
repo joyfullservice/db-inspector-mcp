@@ -44,6 +44,14 @@ class BackendRegistry:
         Raises:
             ValueError: If backend name is not found or no default is set
         """
+        if not self._backends:
+            raise ValueError(
+                "No database backends are initialised. "
+                "Please call db_list_databases() first to trigger workspace detection, "
+                "or ensure a .env file with DB_MCP_DATABASE / DB_MCP_CONNECTION_STRING "
+                "exists in your project root."
+            )
+
         if name is None:
             if self._default_name is None:
                 raise ValueError("No default backend set and no name provided")
