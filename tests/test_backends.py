@@ -564,15 +564,9 @@ def test_access_com_getobject_existing_database(temp_access_db):
         assert query["type"] == "Select"
         
     finally:
-        # User is responsible for closing Access
-        try:
-            app.CloseCurrentDatabase()
-        except Exception:
-            pass  # Database may already be closed
-        try:
-            app.Quit()
-        except Exception:
-            pass  # App may already be quit
+        # Only quit Access if it still has our temp test database open.
+        # Never close a user's Access session.
+        _safe_quit_test_access(app, temp_access_db)
 
 
 @pytest.mark.integration
@@ -588,13 +582,9 @@ def test_access_com_with_closed_database(temp_access_db):
         table_names = [t["name"] for t in tables]
         assert "TestTable" in table_names
     finally:
-        # Backend leaves Access running -- user closes it
-        # For test cleanup, we quit the Access instance we started
-        if backend._app is not None:
-            try:
-                backend._app.Quit()
-            except Exception:
-                pass
+        # Only quit Access if it has our temp test database open.
+        # Never close a user's Access session.
+        _safe_quit_test_access(backend._app, temp_access_db)
 
 
 @pytest.mark.integration
@@ -622,11 +612,9 @@ def test_access_com_no_lock_between_operations(temp_access_db):
             assert not os.path.exists(lock_file), \
                 "Lock file (.laccdb) should not persist between operations"
     finally:
-        if backend._app is not None:
-            try:
-                backend._app.Quit()
-            except Exception:
-                pass
+        # Only quit Access if it has our temp test database open.
+        # Never close a user's Access session.
+        _safe_quit_test_access(backend._app, temp_access_db)
 
 
 def lock_file_exists_from_access_app(backend, db_path):
@@ -638,3 +626,31 @@ def lock_file_exists_from_access_app(backend, db_path):
         return current_db is not None
     except Exception:
         return False
+
+
+def _safe_quit_test_access(app, expected_db_path: str) -> None:
+    """Quit an Access instance ONLY if it has the expected test database open.
+
+    Automated tests must never close a user's Access session.  This helper
+    verifies that the Access instance's CurrentDb matches the temporary
+    test database before calling Quit().  If the database doesn't match
+    (e.g. the backend attached to a user's existing session via GetObject),
+    the COM reference is simply released without quitting.
+    """
+    if app is None:
+        return
+    try:
+        current_db = app.CurrentDb()
+        if current_db is not None:
+            db_name = current_db.Name
+            paths_match = (
+                os.path.normcase(os.path.abspath(db_name))
+                == os.path.normcase(os.path.abspath(expected_db_path))
+            )
+            if not paths_match:
+                # Not our temp DB — do NOT quit the user's Access session
+                return
+        # Either our temp DB or no DB open — safe to quit
+        app.Quit()
+    except Exception:
+        pass

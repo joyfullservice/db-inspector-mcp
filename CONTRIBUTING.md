@@ -211,6 +211,30 @@ db-inspector-mcp/
 3. Update `db_sql_help` docstring to list new topic
 4. Add test for new topic
 
+## Access COM Test Safety
+
+**Never close a user's Access session from automated tests.**
+
+The production code follows an ownership principle: we never call `CloseCurrentDatabase()` or `Quit()` on the Access Application — that is the user's responsibility. Tests must follow the same principle, because:
+
+- The backend may attach to a user's already-open Access via `GetObject` instead of creating a new instance
+- Calling `Quit()` on `backend._app` could close the user's work-in-progress
+- Even `CloseCurrentDatabase()` would disrupt a user who opened the database in a special way (e.g., bypassing startup code with Shift)
+
+**Use `_safe_quit_test_access()` for all integration test cleanup.** This helper verifies that the Access instance has the test's temporary database open before calling `Quit()`. If the instance has a different database (i.e., it's the user's session), the COM reference is released without quitting:
+
+```python
+finally:
+    # Only quit Access if it has our temp test database open.
+    # Never close a user's Access session.
+    _safe_quit_test_access(backend._app, temp_access_db)
+```
+
+**Do NOT:**
+- Call `app.Quit()` or `backend._app.Quit()` directly in test teardown
+- Call `app.CloseCurrentDatabase()` without verifying it's the test database
+- Assume that `backend._app` is an instance the test created
+
 ## Code Style
 
 - Type hints on all function signatures

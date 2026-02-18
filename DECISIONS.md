@@ -8,6 +8,34 @@
 
 ---
 
+## 2026-02-17 — Safe test teardown: never close a user's Access session
+
+**Trigger**: Integration tests for the Access COM backend called `backend._app.Quit()` in their `finally` blocks for cleanup. If a test ran while the user had Access open with a database, and the backend attached to the user's instance via `GetObject` (instead of creating a new one), the teardown would quit the user's Access session — closing their work in progress.
+
+The production code already follows the ownership principle: `_release_app()` only sets `self._app = None` and never calls `CloseCurrentDatabase()` or `Quit()`. The tests did not follow this principle.
+
+**Dangerous pattern** (three integration tests):
+```python
+finally:
+    if backend._app is not None:
+        backend._app.Quit()  # Could quit the user's Access!
+```
+
+**Options explored**:
+- **Always call `Quit()` on `backend._app`** (status quo) — dangerous. The backend may have attached to a user's existing instance via `GetObject(db_path)` rather than creating a new one. `Quit()` would close the user's session.
+- **Never call `Quit()`, only release the reference** — safe but leaves orphaned Access instances from tests running indefinitely. Since `UserControl = True`, they wouldn't exit on their own.
+- **Verify the instance has the test's temp DB before quitting (chosen)** — `_safe_quit_test_access(app, expected_db_path)` checks `app.CurrentDb().Name` against the test's temporary database path. If they match, it's an instance the test created for the temp DB — safe to quit. If they don't match, the instance belongs to the user — only the COM reference is released.
+
+**Decision**: Added `_safe_quit_test_access()` helper to `tests/test_backends.py`. All three integration tests (`test_access_com_getobject_existing_database`, `test_access_com_with_closed_database`, `test_access_com_no_lock_between_operations`) now use this helper instead of direct `Quit()` calls. Added an "Access COM Test Safety" section to `CONTRIBUTING.md` documenting the principle and the helper.
+
+**What this rules out**: Nothing. The helper is strictly safer than the previous pattern. If a test needs to create and control its own Access instance (not via the backend), it should use the same `_safe_quit_test_access()` helper rather than calling `Quit()` directly.
+
+**Relevant files**:
+- `tests/test_backends.py` — added `_safe_quit_test_access()`, updated all integration test teardowns
+- `CONTRIBUTING.md` — added "Access COM Test Safety" section
+
+---
+
 ## 2026-02-17 — Lazy backend initialization via MCP roots for user-level configs
 
 **Trigger**: When the MCP server is configured at the user level (global Cursor settings) rather than the project level (`.cursor/mcp.json`), Cursor sets the working directory to the user's home folder (`C:\Users\akw`), not the open workspace. The server's `.env` search starts from CWD and walks upward, so it never finds the project's `.env` file. The server crashed at startup with "No database configuration found."
