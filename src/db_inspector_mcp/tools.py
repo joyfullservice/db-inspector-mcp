@@ -199,13 +199,18 @@ mcp = FastMCP(
         "A cross-database MCP server for database introspection and migration validation. "
         "Provides read-only tools for exploring schemas, analyzing queries, and comparing databases.\n\n"
         "**Recommended workflow:**\n"
-        "1. Start with db_list_databases() to discover available databases AND their SQL dialects\n"
-        "2. Check the 'dialect' field: 'access', 'mssql', or 'postgres' - each has different SQL syntax\n"
-        "3. For Access databases, use db_sql_help(topic) to get dialect-specific syntax examples\n"
-        "4. Use db_list_tables() and db_list_views() to explore schemas\n"
+        "1. **Always call db_list_databases() first** — it discovers available databases, their SQL "
+        "dialects, and object counts. It also initializes backend connections when needed.\n"
+        "2. Check the 'dialect' field ('access', 'mssql', 'postgres') — each has different SQL syntax.\n"
+        "3. Check 'object_counts' in the response. For large databases (>200 tables/views), "
+        "use the name_filter parameter on db_list_tables()/db_list_views() to search "
+        "instead of listing everything.\n"
+        "4. Use db_list_tables() and db_list_views() to explore schemas.\n"
         "5. Use db_count_query_results(), db_get_query_columns(), and db_sum_query_column() "
-        "to analyze queries (these tools wrap YOUR query for efficiency - pass the base query)\n"
-        "6. Use db_compare_queries() to validate migrations across databases\n\n"
+        "to analyze queries (these tools wrap YOUR query — pass the base query).\n"
+        "6. Use db_compare_queries() to validate migrations across databases.\n"
+        "7. For Access databases: use db_get_access_query_definition(name) to retrieve "
+        "the SQL of saved Access queries by name.\n\n"
         "**SQL Dialect Awareness:**\n"
         "Access SQL differs significantly from standard SQL. Key differences:\n"
         "- Multiple JOINs require parentheses: FROM ((A JOIN B ON ...) JOIN C ON ...)\n"
@@ -213,7 +218,18 @@ mcp = FastMCP(
         "- Use * and ? for wildcards in LIKE, not % and _\n"
         "- Use #2024-01-15# for dates, not quotes\n"
         "- Use TOP N instead of LIMIT N\n"
+        "- Prefer GROUP BY over SELECT DISTINCT (DISTINCT is unreliable in Access)\n"
+        "- CTEs (WITH ... AS) are NOT supported in Access\n"
+        "- EXPLAIN / execution plans are NOT supported in Access\n"
         "Call db_sql_help('all') for complete Access syntax reference.\n\n"
+        "**Error handling:**\n"
+        "When an Access query fails, the error message includes an actionable hint "
+        "identifying the likely cause and referencing the relevant db_sql_help() topic. "
+        "Read the full error before retrying.\n\n"
+        "**Data preview:**\n"
+        "db_preview() requires data access permission (DB_MCP_ALLOW_DATA_ACCESS=true). "
+        "If it returns a permission error, use db_count_query_results() or "
+        "db_get_query_columns() instead.\n\n"
         "**How query analysis tools work:**\n"
         "- db_count_query_results(query) wraps your query in SELECT COUNT(*) FROM (query)\n"
         "- db_sum_query_column(query, column) wraps your query to sum the specified column\n"
@@ -248,10 +264,10 @@ def db_count_query_results(query: str, database: str | None = None) -> dict[str,
         db_count_query_results("SELECT * FROM orders WHERE status = 'completed' AND total > 100")
         # Returns: {"count": 567}
         
-        # Works with complex queries (CTEs, subqueries, etc.)
+        # Works with complex queries (subqueries, etc.)
         db_count_query_results('''
-            WITH recent AS (SELECT * FROM events WHERE date > '2024-01-01')
-            SELECT * FROM recent WHERE type = 'purchase'
+            SELECT * FROM events
+            WHERE date > '2024-01-01' AND type = 'purchase'
         ''')
         # Returns: {"count": 89}
     
@@ -550,6 +566,10 @@ def db_explain(query: str, database: str | None = None) -> dict[str, Any]:
     Returns:
         Dictionary with "plan" key containing execution plan as string (format varies by database).
         For SQL Server: XML execution plan. For PostgreSQL: EXPLAIN output.
+        
+    Note:
+        Access databases do not support execution plans. Use db_measure_query() instead
+        to get empirical timing data for Access queries.
     """
     validate_readonly_sql(query)
     registry = get_registry()

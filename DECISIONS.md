@@ -8,6 +8,33 @@
 
 ---
 
+## 2026-02-18 — Expand MCP server instructions based on transcript review
+
+**Trigger**: Reviewed all recent agent transcripts to identify gaps in the MCP server instructions that agents receive. The existing instructions covered the basic workflow and Access SQL differences, but several features added during development (object counts, name filters, Access query definitions, error hints, EXPLAIN limitations, data preview permissions) were not reflected in the instructions agents see.
+
+**Options explored**:
+- **Keep instructions minimal** — rely on individual tool docstrings for details. Rejected: agents don't read all docstrings upfront, so they miss important context like the `name_filter` pattern for large databases or the Access EXPLAIN limitation.
+- **Expand server-level instructions with key guidance (chosen)** — add the missing items to the `instructions` string in `FastMCP()`. This is what agents see before making any tool calls, so it front-loads the most impactful guidance.
+
+**Decision**: Expanded the server instructions to cover seven gaps:
+1. `object_counts` + `name_filter` pattern for large databases (>200 objects)
+2. `db_get_access_query_definition` in the workflow for Access migration
+3. DISTINCT vs GROUP BY unreliability in Access
+4. CTEs not supported in Access
+5. EXPLAIN not supported in Access (use `db_measure_query` instead)
+6. Error messages include actionable hints for Access SQL failures — read before retrying
+7. `db_preview` requires `DB_MCP_ALLOW_DATA_ACCESS=true` — fall back to count/columns tools
+
+Also removed the CTE example from `db_count_query_results` docstring (CTEs don't work in Access, the primary use case), and added an Access-specific note to the `db_explain` docstring.
+
+**What this rules out**: Nothing. Instructions can be further refined as real external agent usage patterns emerge. The current transcripts were primarily development sessions, so these changes are based on code analysis rather than observed agent failures.
+
+**Relevant files**: `src/db_inspector_mcp/tools.py`
+
+**Commits**:
+
+---
+
 ## 2026-02-17 — Safe test teardown: never close a user's Access session
 
 **Trigger**: Integration tests for the Access COM backend called `backend._app.Quit()` in their `finally` blocks for cleanup. If a test ran while the user had Access open with a database, and the backend attached to the user's instance via `GetObject` (instead of creating a new one), the teardown would quit the user's Access session — closing their work in progress.
