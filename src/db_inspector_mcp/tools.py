@@ -195,6 +195,7 @@ def _enrich_access_error(error_message: str, query: str, dialect: str) -> str:
 # Create FastMCP server instance with proper metadata
 mcp = FastMCP(
     name="db-inspector-mcp",
+    log_level="WARNING",
     instructions=(
         "A cross-database MCP server for database introspection and migration validation. "
         "Provides read-only tools for exploring schemas, analyzing queries, and comparing databases.\n\n"

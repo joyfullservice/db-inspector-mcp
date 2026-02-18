@@ -8,6 +8,26 @@
 
 ---
 
+## 2026-02-18 — Suppress noisy MCP SDK logging and deduplicate startup diagnostics
+
+**Trigger**: The Cursor MCP tool log window showed many `[error]`-tagged lines during a normal, healthy startup. Two root causes: (1) the MCP Python SDK's `FastMCP` defaults to `log_level="INFO"`, which configures Python's `logging.basicConfig()` with a `RichHandler` writing to stderr — and Cursor labels all stderr output as `[error]`; (2) `_load_env_files()` in `config.py` was called twice during startup (once from `get_config()`, again from `initialize_backends()` → `load_config()`), printing the "Working directory / Resolved project root / No .env file" messages twice.
+
+**Options explored**:
+- **Redirect logging to a file** — would eliminate all stderr noise but lose visibility in Cursor's log pane entirely. Rejected: startup diagnostics in the log pane are useful for debugging configuration issues.
+- **Set MCP SDK log level to WARNING (chosen for issue 1)** — `FastMCP(log_level="WARNING")` suppresses the per-request INFO messages ("Processing request of type ListToolsRequest" etc.) while keeping warnings and errors visible. The INFO messages carry no diagnostic value for users.
+- **Add `_env_loaded` guard to `_load_env_files()` (chosen for issue 2)** — a module-level boolean flag ensures the function's side effects (loading dotenv files and printing diagnostics) only execute once per process, regardless of how many callers invoke `load_config()`.
+- **Restructure callers to avoid double-calling `load_config()`** — would work but is more invasive and fragile; the guard is simpler and self-contained.
+
+**Decision**: Applied both targeted fixes. The `log_level="WARNING"` parameter on `FastMCP()` stops the SDK's per-request INFO messages from reaching stderr. The `_env_loaded` guard in `_load_env_files()` prevents duplicate startup diagnostic output. The remaining stderr output (working directory, project root, .env status) still appears once in the log pane, which is the intended behavior for configuration diagnostics.
+
+**What this rules out**: If a user wants to see per-request MCP protocol logging for debugging, they would need to change the `log_level` parameter or set `FASTMCP_LOG_LEVEL=INFO` (the SDK reads settings from environment variables with `FASTMCP_` prefix). The `_env_loaded` guard means that if something dynamically changes environment variables and re-calls `load_config()`, the dotenv files won't be reloaded — but this is intentional since env files should only be loaded once at startup.
+
+**Relevant files**: `src/db_inspector_mcp/tools.py`, `src/db_inspector_mcp/config.py`
+
+**Commits**:
+
+---
+
 ## 2026-02-18 — Expand MCP server instructions based on transcript review
 
 **Trigger**: Reviewed all recent agent transcripts to identify gaps in the MCP server instructions that agents receive. The existing instructions covered the basic workflow and Access SQL differences, but several features added during development (object counts, name filters, Access query definitions, error hints, EXPLAIN limitations, data preview permissions) were not reflected in the instructions agents see.

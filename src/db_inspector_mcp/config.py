@@ -81,6 +81,9 @@ def _find_project_root() -> Path:
     return Path.cwd().resolve()
 
 
+_env_loaded = False
+
+
 def _load_env_files() -> None:
     """
     Load .env files from the project root.
@@ -95,6 +98,11 @@ def _load_env_files() -> None:
     Prints diagnostic messages to stderr so users can verify which files were
     loaded (visible in Cursor's MCP server output pane).
     """
+    global _env_loaded
+    if _env_loaded:
+        return
+    _env_loaded = True
+
     import sys
     
     project_root = _find_project_root()
