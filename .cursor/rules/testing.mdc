@@ -1,0 +1,27 @@
+---
+description: How to run tests and shell commands in this project
+alwaysApply: true
+---
+
+# Running Tests
+
+This project uses a `venv/` virtual environment. Always use the venv Python to run tests:
+
+```powershell
+# Correct — run pytest via venv Python (no activation needed)
+C:\Repos\db-inspector-mcp\venv\Scripts\python.exe -m pytest tests/ -v
+
+# Run a specific test file
+C:\Repos\db-inspector-mcp\venv\Scripts\python.exe -m pytest tests/test_config.py -v
+```
+
+Do NOT run bare `python -m pytest` or `pytest` — the system Python does not have project dependencies installed.
+
+Do NOT run `pip install` to fix missing dependencies — the venv already has everything installed.
+
+# Shell Environment
+
+This project runs on Windows with PowerShell. Avoid bash-only commands:
+- Use `Select-Object -First N` instead of `head -N`
+- Use `Select-Object -Last N` instead of `tail -N`
+- Use `Select-String` instead of `grep` (or use `rg` which is available)

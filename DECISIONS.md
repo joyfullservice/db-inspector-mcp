@@ -8,6 +8,50 @@
 
 ---
 
+## 2026-02-20 — Inline cursor rule for test execution and shell commands
+
+**Trigger**: Across multiple development sessions, AI agents repeatedly failed to run the test suite correctly. Three recurring failure patterns were observed in chat transcripts: (1) running bare `python -m pytest` or `pytest` without the venv, getting "No module named pytest"; (2) using bash-only commands like `head` or `tail` on Windows PowerShell; (3) attempting `pip install` system-wide to fix missing dependencies instead of using the existing venv. The project's `AGENTS.md` already contained venv instructions, but the existing `.cursor/rules/agents.mdc` only said "read AGENTS.md" — agents either didn't follow the indirection or skipped the testing section.
+
+**Options explored**:
+- **Rely on `AGENTS.md` (status quo)** — instructions exist but are behind a "go read this file" indirection in the cursor rule. Agents frequently skip or skim the file. Observed to fail repeatedly across sessions.
+- **Add more detail to `agents.mdc`** — would work for Cursor but the rule was designed as a lightweight pointer to `AGENTS.md` (which also serves Claude Code and human readers). Bloating it with testing commands would duplicate content.
+- **Dedicated `testing.mdc` cursor rule with `alwaysApply: true` (chosen)** — puts the exact commands and warnings directly in the rule, so they're injected into every agent session without indirection. Covers the venv Python path, the "do NOT run pip install" warning, and PowerShell command equivalents.
+
+**Decision**: Created `.cursor/rules/testing.mdc` with `alwaysApply: true`. Contains the full venv pytest command, explicit "do NOT" warnings for common mistakes, and a PowerShell command reference replacing bash-only tools. Kept `agents.mdc` unchanged — it continues to point to `AGENTS.md` for architectural guidance, which is a lower-frequency concern that tolerates the indirection.
+
+**What this rules out**: Nothing. The rule can be extended with additional commands as new failure patterns emerge. If the project moves to a different OS or shell, the PowerShell-specific guidance would need updating.
+
+**Relevant files**: `.cursor/rules/testing.mdc`
+
+**Commits**:
+
+---
+
+## 2026-02-20 — Relative path support for Access database files in .env
+
+**Trigger**: Access database paths in `.env` connection strings required absolute paths (e.g., `DBQ=C:\Projects\myapp\database.accdb`). Since the database file is often in the same directory as the `.env` file, users wanted to write `DBQ=.\database.accdb` or just `database.accdb` for portability across machines.
+
+**Options explored**:
+- **Resolve in the backends** — have `AccessODBCBackend` and `AccessCOMBackend` resolve relative paths internally. Rejected: requires passing the base directory into the backends, changing their interface, and the backends shouldn't need to know about `.env` file locations.
+- **New env var `DB_MCP_DATABASE_DIR`** — explicit base directory for relative path resolution. Rejected: unnecessary configuration — the `.env` file's directory is the natural and obvious base.
+- **Resolve in `config.py` at backend initialization time (chosen)** — a `_resolve_connection_string_paths()` helper resolves relative `DBQ=` paths (and bare file paths) against the project root before connection strings reach the backends. Backends receive fully resolved absolute paths and are unchanged.
+
+**Decision**: Added `_resolve_connection_string_paths()` in `config.py`. It extracts the path from `DBQ=...` (regex, case-insensitive) or treats the whole string as a bare path (when no `DBQ=` or `Driver=` is present). If the path is relative (`not Path.is_absolute()`), it's resolved against the stored project root. A diagnostic message is logged to stderr on resolution, and a warning is emitted if the resolved file doesn't exist on disk. The project root is now stored in a module-level `_project_root` variable, set during `.env` loading (in `_load_env_files()`, `_load_env_from_directory()`, and `initialize_from_workspace()`), with a `_get_project_root()` getter that falls back to `_find_project_root()`.
+
+The resolver is called in two places: `get_backend()` and `initialize_backends()`, both just before `_create_backend()`. Only Access backends (`access_odbc`, `access_com`) are affected; other backend types pass through unchanged.
+
+**What this rules out**: Relative paths are resolved against the project root (where `.env` was loaded from), not the CWD. If `_find_project_root()` matches on `pyproject.toml` or `.cursor/mcp.json` but the `.env` is in a different directory, the base directory might not be what the user expects — but this scenario is unlikely in practice since these markers co-locate. When env vars are set via `mcp.json` env section (no `.env` file), the project root is still discovered via CWD or `DB_MCP_PROJECT_DIR`.
+
+**Relevant files**:
+- `src/db_inspector_mcp/config.py` — `_project_root`, `_get_project_root()`, `_resolve_connection_string_paths()`, wired into `get_backend()` and `initialize_backends()`
+- `tests/test_config.py` — 12 new tests for path resolution
+- `.env.example` — added relative path examples and explanation
+- `README.md` — added "Relative paths" note in Access Connection Strings section
+
+**Commits**:
+
+---
+
 ## 2026-02-18 — Suppress noisy MCP SDK logging and deduplicate startup diagnostics
 
 **Trigger**: The Cursor MCP tool log window showed many `[error]`-tagged lines during a normal, healthy startup. Two root causes: (1) the MCP Python SDK's `FastMCP` defaults to `log_level="INFO"`, which configures Python's `logging.basicConfig()` with a `RichHandler` writing to stderr — and Cursor labels all stderr output as `[error]`; (2) `_load_env_files()` in `config.py` was called twice during startup (once from `get_config()`, again from `initialize_backends()` → `load_config()`), printing the "Working directory / Resolved project root / No .env file" messages twice.

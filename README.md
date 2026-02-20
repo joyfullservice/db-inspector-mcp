@@ -284,6 +284,14 @@ DB_MCP_CONNECTION_STRING="Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=
 
 **Note:** Both backends support `.accdb`, `.accda` (Access Database Executable), and `.mdb` file formats. The driver name in the connection string remains the same regardless of file extension.
 
+**Relative paths:** The `DBQ=` path can be relative — it will be resolved against the directory containing the `.env` file. This makes configurations portable across machines:
+```bash
+# Relative to .env location (resolved at startup)
+DB_MCP_CONNECTION_STRING="Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=.\database.accdb;"
+# Or just provide the filename directly
+DB_MCP_CONNECTION_STRING=database.accdb
+```
+
 **Important - 32-bit Access compatibility**: If you need to connect to 32-bit versions of Microsoft Access, you must install a 32-bit version of Python so that the ODBC drivers are compatible. Note that some databases like PostgreSQL may not have 32-bit ODBC drivers available.
 
 Use `access_odbc` for standard SQL operations. Use `access_com` when you need to retrieve Access queries by name (see `db_get_access_query` tool).

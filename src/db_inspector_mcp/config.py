@@ -1,6 +1,7 @@
 """Configuration management for db-inspector-mcp."""
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +83,14 @@ def _find_project_root() -> Path:
 
 
 _env_loaded = False
+_project_root: Path | None = None
+
+
+def _get_project_root() -> Path:
+    """Return the stored project root, falling back to discovery."""
+    if _project_root is not None:
+        return _project_root
+    return _find_project_root()
 
 
 def _load_env_files() -> None:
@@ -98,7 +107,7 @@ def _load_env_files() -> None:
     Prints diagnostic messages to stderr so users can verify which files were
     loaded (visible in Cursor's MCP server output pane).
     """
-    global _env_loaded
+    global _env_loaded, _project_root
     if _env_loaded:
         return
     _env_loaded = True
@@ -106,6 +115,7 @@ def _load_env_files() -> None:
     import sys
     
     project_root = _find_project_root()
+    _project_root = project_root
     cwd = Path.cwd().resolve()
 
     print(f"Working directory: {cwd}", file=sys.stderr)
@@ -144,8 +154,10 @@ def _load_env_from_directory(directory: Path) -> bool:
 
     Returns True if at least one file was loaded.
     """
+    global _project_root
     import sys
 
+    _project_root = directory.resolve()
     loaded = False
     env_path = directory / ".env"
     if env_path.exists():
@@ -186,9 +198,11 @@ def initialize_from_workspace(workspace_path: Path) -> "BackendRegistry":
     Raises:
         ValueError: If no database configuration is found in the workspace.
     """
+    global _project_root
     import sys
 
     workspace_path = workspace_path.resolve()
+    _project_root = workspace_path
     print(f"Lazy init: loading .env from workspace root {workspace_path}", file=sys.stderr)
 
     _load_env_from_directory(workspace_path)
@@ -237,6 +251,63 @@ def _get_access_conn_ttl() -> float | None:
         except ValueError:
             pass
     return None
+
+
+_ACCESS_BACKENDS = {"access_odbc", "access_com"}
+
+
+def _resolve_connection_string_paths(
+    connection_string: str, backend_type: str, base_dir: Path,
+) -> str:
+    """Resolve relative database file paths in a connection string.
+
+    For Access backends, the ``DBQ=`` value (or a bare file path) is resolved
+    against *base_dir* when it is not already absolute.  Other backend types
+    are returned unchanged.
+    """
+    import sys
+
+    if backend_type.lower() not in _ACCESS_BACKENDS:
+        return connection_string
+
+    dbq_match = re.search(r"DBQ\s*=\s*([^;]+)", connection_string, re.IGNORECASE)
+
+    if dbq_match:
+        db_path_str = dbq_match.group(1).strip()
+        db_path = Path(db_path_str)
+        if not db_path.is_absolute():
+            resolved = (base_dir / db_path).resolve()
+            connection_string = (
+                connection_string[: dbq_match.start(1)]
+                + str(resolved)
+                + connection_string[dbq_match.end(1) :]
+            )
+            print(
+                f"Resolved relative DBQ path: {db_path_str} -> {resolved}",
+                file=sys.stderr,
+            )
+            if not resolved.exists():
+                print(
+                    f"Warning: resolved database path does not exist: {resolved}",
+                    file=sys.stderr,
+                )
+    elif not re.search(r"Driver\s*=", connection_string, re.IGNORECASE):
+        # Bare file path (no DBQ=, no Driver=)
+        db_path = Path(connection_string.strip())
+        if not db_path.is_absolute():
+            resolved = (base_dir / db_path).resolve()
+            print(
+                f"Resolved relative database path: {connection_string.strip()} -> {resolved}",
+                file=sys.stderr,
+            )
+            if not resolved.exists():
+                print(
+                    f"Warning: resolved database path does not exist: {resolved}",
+                    file=sys.stderr,
+                )
+            connection_string = str(resolved)
+
+    return connection_string
 
 
 def _create_backend(backend_type: str, connection_string: str, query_timeout: int) -> DatabaseBackend:
@@ -305,6 +376,9 @@ def get_backend() -> DatabaseBackend:
             "Provide a valid database connection string."
         )
     
+    connection_string = _resolve_connection_string_paths(
+        connection_string, backend_name, _get_project_root(),
+    )
     return _create_backend(backend_name, connection_string, query_timeout)
 
 
@@ -377,11 +451,15 @@ def initialize_backends() -> BackendRegistry:
         )
     
     # Register all backends
+    base_dir = _get_project_root()
     default_set = False
     for db_name, db_config in db_configs.items():
+        conn_str = _resolve_connection_string_paths(
+            db_config["connection_string"], db_config["backend"], base_dir,
+        )
         backend = _create_backend(
             db_config["backend"],
-            db_config["connection_string"],
+            conn_str,
             query_timeout
         )
         # Set first backend as default, or "default" if it exists

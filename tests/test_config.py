@@ -6,7 +6,12 @@ from unittest.mock import patch
 
 import pytest
 
-from db_inspector_mcp.config import _find_project_root, get_backend, load_config
+from db_inspector_mcp.config import (
+    _find_project_root,
+    _resolve_connection_string_paths,
+    get_backend,
+    load_config,
+)
 
 
 class TestFindProjectRoot:
@@ -178,4 +183,102 @@ def test_get_backend_access_com():
         with patch('db_inspector_mcp.backends.access_com.win32com.client'):
             backend = _create_backend("access_com", "test_connection_string", 30)
             assert backend.__class__.__name__ == "AccessCOMBackend"
+
+
+class TestResolveConnectionStringPaths:
+    """Tests for _resolve_connection_string_paths relative-path resolution."""
+
+    def test_absolute_dbq_unchanged(self, tmp_path):
+        """An absolute DBQ= path is returned as-is."""
+        conn = r"Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\data\my.accdb;"
+        result = _resolve_connection_string_paths(conn, "access_odbc", tmp_path)
+        assert result == conn
+
+    def test_relative_dbq_resolved(self, tmp_path):
+        """A relative DBQ= path is resolved against base_dir."""
+        (tmp_path / "my.accdb").touch()
+        conn = "Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=my.accdb;"
+        result = _resolve_connection_string_paths(conn, "access_odbc", tmp_path)
+        expected_path = str((tmp_path / "my.accdb").resolve())
+        assert f"DBQ={expected_path};" in result
+        assert "Driver=" in result
+
+    def test_relative_dbq_dot_slash(self, tmp_path):
+        """DBQ=.\\subdir\\db.accdb is resolved correctly."""
+        subdir = tmp_path / "subdir"
+        subdir.mkdir()
+        (subdir / "db.accdb").touch()
+        conn = r"Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=.\subdir\db.accdb;"
+        result = _resolve_connection_string_paths(conn, "access_odbc", tmp_path)
+        expected_path = str((tmp_path / "subdir" / "db.accdb").resolve())
+        assert f"DBQ={expected_path};" in result
+
+    def test_relative_dbq_parent_dir(self, tmp_path):
+        """DBQ=..\\db.accdb is resolved correctly."""
+        (tmp_path / "db.accdb").touch()
+        child = tmp_path / "project"
+        child.mkdir()
+        conn = r"Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=..\db.accdb;"
+        result = _resolve_connection_string_paths(conn, "access_odbc", child)
+        expected_path = str((tmp_path / "db.accdb").resolve())
+        assert f"DBQ={expected_path};" in result
+
+    def test_relative_dbq_forward_slashes(self, tmp_path):
+        """Forward slashes in DBQ= are handled on all platforms."""
+        subdir = tmp_path / "data"
+        subdir.mkdir()
+        (subdir / "my.accdb").touch()
+        conn = "Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=data/my.accdb;"
+        result = _resolve_connection_string_paths(conn, "access_odbc", tmp_path)
+        expected_path = str((tmp_path / "data" / "my.accdb").resolve())
+        assert f"DBQ={expected_path};" in result
+
+    def test_bare_relative_path_resolved(self, tmp_path):
+        """A bare relative file path (no DBQ=, no Driver=) is resolved."""
+        (tmp_path / "test.accdb").touch()
+        result = _resolve_connection_string_paths("test.accdb", "access_odbc", tmp_path)
+        assert result == str((tmp_path / "test.accdb").resolve())
+
+    def test_bare_absolute_path_unchanged(self, tmp_path):
+        """A bare absolute file path is returned as-is."""
+        conn = r"C:\full\path\to\database.accdb"
+        result = _resolve_connection_string_paths(conn, "access_odbc", tmp_path)
+        assert result == conn
+
+    def test_non_access_backend_unchanged(self, tmp_path):
+        """Non-Access backends pass through without modification."""
+        conn = "Server=localhost;Database=mydb;"
+        assert _resolve_connection_string_paths(conn, "sqlserver", tmp_path) == conn
+        assert _resolve_connection_string_paths(conn, "postgres", tmp_path) == conn
+
+    def test_access_com_resolved(self, tmp_path):
+        """Resolution works for access_com backend too."""
+        (tmp_path / "my.accdb").touch()
+        conn = "Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=my.accdb;"
+        result = _resolve_connection_string_paths(conn, "access_com", tmp_path)
+        expected_path = str((tmp_path / "my.accdb").resolve())
+        assert f"DBQ={expected_path};" in result
+
+    def test_missing_file_warning(self, tmp_path, capsys):
+        """A warning is emitted when the resolved path does not exist."""
+        conn = "Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=nonexistent.accdb;"
+        _resolve_connection_string_paths(conn, "access_odbc", tmp_path)
+        captured = capsys.readouterr()
+        assert "does not exist" in captured.err
+
+    def test_existing_file_no_warning(self, tmp_path, capsys):
+        """No warning is emitted when the resolved path exists."""
+        (tmp_path / "exists.accdb").touch()
+        conn = "Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=exists.accdb;"
+        _resolve_connection_string_paths(conn, "access_odbc", tmp_path)
+        captured = capsys.readouterr()
+        assert "does not exist" not in captured.err
+
+    def test_dbq_case_insensitive(self, tmp_path):
+        """DBQ matching is case-insensitive (dbq=, Dbq=, etc.)."""
+        (tmp_path / "my.accdb").touch()
+        conn = "Driver={Microsoft Access Driver (*.mdb, *.accdb)};dbq=my.accdb;"
+        result = _resolve_connection_string_paths(conn, "access_odbc", tmp_path)
+        expected_path = str((tmp_path / "my.accdb").resolve())
+        assert expected_path in result
 
