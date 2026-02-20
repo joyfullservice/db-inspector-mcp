@@ -27,7 +27,6 @@ from urllib.parse import unquote, urlparse
 
 from mcp.server.fastmcp import Context, FastMCP
 
-from .backends.access_com import AccessCOMBackend
 from .backends.registry import get_registry
 from .config import check_data_access, get_config, initialize_from_workspace
 from .security import validate_readonly_sql
@@ -973,6 +972,8 @@ def db_get_access_query_definition(name: str, database: str | None = None) -> di
         - "sql": Native SQL definition
         - "type": Query type (Select, Union, etc.)
     """
+    from .backends.access_com import AccessCOMBackend
+
     registry = get_registry()
     backend = registry.get(database)
     

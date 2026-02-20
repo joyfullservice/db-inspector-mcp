@@ -8,6 +8,34 @@
 
 ---
 
+## 2026-02-20 — Lazy backend imports for lightweight global MCP startup
+
+**Trigger**: When db-inspector-mcp is configured globally (user-level `~/.cursor/mcp.json`), it loads for every project — including projects that have no `.env` file and will never use database tools. At startup, all four backend modules were imported eagerly at module level, pulling in heavy C-extension database drivers (`pyodbc`, `pywin32`/COM, `psycopg2`) before the server even checked whether a `.env` file existed. This added unnecessary memory and startup time for projects that don't use the tool.
+
+**Options explored**:
+- **Status quo (eager imports)** — `config.py` imported all four backend classes at the top level. `tools.py` imported `AccessCOMBackend` at the top level for an `isinstance` check. `backends/__init__.py` re-exported all backend classes. Every startup loaded `pyodbc` (C ext), `pythoncom`/`pywintypes`/`win32com.client` (C ext), regardless of need.
+- **Conditional imports behind a "has .env" check** — check for `.env` before importing anything. Rejected: the `.env` discovery logic itself lives in `config.py`, creating a chicken-and-egg problem. Also fragile if config comes from env vars instead of `.env`.
+- **Lazy imports at point of use (chosen)** — move backend class imports into the specific `if/elif` branches of `_create_backend()` where they are actually constructed. Each driver is only loaded when its backend type is requested. For `tools.py`, move the `AccessCOMBackend` import into the single function that uses it (`db_get_access_query_definition`).
+- **Optional dependencies in `pyproject.toml`** — make `pyodbc`, `psycopg2-binary`, and `pywin32` optional extras instead of hard dependencies. Would reduce install footprint but is a larger change affecting docs, install commands, and the `init` CLI. Deferred as a follow-up since lazy imports solve the runtime cost without changing the install experience.
+
+**Decision**: Three targeted changes to defer all heavy imports:
+1. `config.py` — removed four top-level backend imports (`AccessCOMBackend`, `AccessODBCBackend`, `MSSQLBackend`, `PostgresBackend`). Each is now imported inside its corresponding branch of `_create_backend()`. The lightweight `DatabaseBackend` base class and `BackendRegistry` imports remain (stdlib-only dependencies).
+2. `tools.py` — removed top-level `from .backends.access_com import AccessCOMBackend`. Moved into the body of `db_get_access_query_definition()`, the only function that uses it for an `isinstance` check.
+3. `backends/__init__.py` — removed re-exports of all four concrete backend classes. Now only exports `DatabaseBackend`, `BackendRegistry`, and `get_registry`. No current code imports from this path, but it was a latent risk if any future code did `from .backends import AccessCOMBackend`.
+
+After these changes, startup for projects without a `.env` file loads only: stdlib, `python-dotenv`, `mcp`, and the lightweight base/registry modules. No C extensions. The `postgres` backend was already partially lazy (uses `TYPE_CHECKING` guard), so it required no changes.
+
+**What this rules out**: Nothing. The lazy imports are transparent — backends load on first use exactly as before. The optional-dependencies approach (`pyproject.toml` extras) remains available as a follow-up to reduce install footprint. The trigger to pursue that would be: users reporting slow `pip install` times or disk usage concerns from database drivers they don't need.
+
+**Relevant files**:
+- `src/db_inspector_mcp/config.py` — removed 4 top-level imports, added 4 inline imports in `_create_backend()`
+- `src/db_inspector_mcp/tools.py` — moved `AccessCOMBackend` import into function body
+- `src/db_inspector_mcp/backends/__init__.py` — removed 4 concrete backend re-exports
+
+**Commits**:
+
+---
+
 ## 2026-02-20 — CLI `init` command and MCP prompt for project setup
 
 **Trigger**: Developers integrating db-inspector-mcp into a new project had to manually copy `.env.example` to `.env` and create/edit `.cursor/mcp.json`. This multi-step process was error-prone and undiscoverable. The goal was a one-command setup experience.

@@ -7,11 +7,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from .backends.access_com import AccessCOMBackend
-from .backends.access_odbc import AccessODBCBackend
 from .backends.base import DatabaseBackend
-from .backends.mssql import MSSQLBackend
-from .backends.postgres import PostgresBackend
 from .backends.registry import BackendRegistry, get_registry
 from .security import check_data_access_permission, get_permission_error_message
 
@@ -328,13 +324,17 @@ def _create_backend(backend_type: str, connection_string: str, query_timeout: in
     backend_type = backend_type.lower()
     
     if backend_type == "sqlserver":
+        from .backends.mssql import MSSQLBackend
         return MSSQLBackend(connection_string, query_timeout)
     elif backend_type == "postgres":
+        from .backends.postgres import PostgresBackend
         return PostgresBackend(connection_string, query_timeout)
     elif backend_type == "access_odbc":
+        from .backends.access_odbc import AccessODBCBackend
         conn_ttl = _get_access_conn_ttl()
         return AccessODBCBackend(connection_string, query_timeout, conn_ttl)
     elif backend_type == "access_com":
+        from .backends.access_com import AccessCOMBackend
         conn_ttl = _get_access_conn_ttl()
         return AccessCOMBackend(connection_string, query_timeout, conn_ttl)
     else:
