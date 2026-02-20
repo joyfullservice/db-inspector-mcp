@@ -12,6 +12,7 @@ from db_inspector_mcp.init import (
     _get_global_mcp_json_path,
     _register_global_mcp,
     _write_env_file,
+    is_globally_registered,
     load_env_example,
     run_init,
 )
@@ -166,6 +167,52 @@ class TestRegisterGlobalMcp:
         data = json.loads(mcp_json.read_text())
         entry = data["mcpServers"]["db-inspector-mcp"]
         assert "env" not in entry
+
+
+class TestIsGloballyRegistered:
+    """Tests for is_globally_registered."""
+
+    def test_true_when_registered(self, tmp_path, monkeypatch):
+        """Returns True when db-inspector-mcp is in global mcp.json."""
+        mcp_json = tmp_path / ".cursor" / "mcp.json"
+        mcp_json.parent.mkdir(parents=True)
+        mcp_json.write_text(json.dumps({
+            "mcpServers": {"db-inspector-mcp": {"command": "db-inspector-mcp"}}
+        }))
+        monkeypatch.setattr(
+            "db_inspector_mcp.init._get_global_mcp_json_path", lambda: mcp_json,
+        )
+        assert is_globally_registered() is True
+
+    def test_false_when_not_registered(self, tmp_path, monkeypatch):
+        """Returns False when db-inspector-mcp is not in global mcp.json."""
+        mcp_json = tmp_path / ".cursor" / "mcp.json"
+        mcp_json.parent.mkdir(parents=True)
+        mcp_json.write_text(json.dumps({
+            "mcpServers": {"other-server": {"command": "other-cmd"}}
+        }))
+        monkeypatch.setattr(
+            "db_inspector_mcp.init._get_global_mcp_json_path", lambda: mcp_json,
+        )
+        assert is_globally_registered() is False
+
+    def test_false_when_file_missing(self, tmp_path, monkeypatch):
+        """Returns False when global mcp.json does not exist."""
+        mcp_json = tmp_path / ".cursor" / "mcp.json"
+        monkeypatch.setattr(
+            "db_inspector_mcp.init._get_global_mcp_json_path", lambda: mcp_json,
+        )
+        assert is_globally_registered() is False
+
+    def test_false_when_corrupt_json(self, tmp_path, monkeypatch):
+        """Returns False when global mcp.json contains invalid JSON."""
+        mcp_json = tmp_path / ".cursor" / "mcp.json"
+        mcp_json.parent.mkdir(parents=True)
+        mcp_json.write_text("not valid json {{{")
+        monkeypatch.setattr(
+            "db_inspector_mcp.init._get_global_mcp_json_path", lambda: mcp_json,
+        )
+        assert is_globally_registered() is False
 
 
 class TestRunInit:

@@ -8,6 +8,28 @@
 
 ---
 
+## 2026-02-20 — Skip project-level mcp.json in setup prompt when globally registered
+
+**Trigger**: The `setup_db_inspector` MCP prompt always included a step instructing the AI to create a project-level `.cursor/mcp.json`, even when the server was already registered in the global `~/.cursor/mcp.json`. For users who ran `db-inspector-mcp init` or manually added the server to their global config, this step was redundant — it would create a project-level file that shadows the global entry with identical content.
+
+**Options explored**:
+- **Always include the mcp.json step (status quo)** — simple but creates unnecessary project-level config files. Users following the prompt would end up with both a global and project-level entry for the same server.
+- **Never include the mcp.json step** — assumes global registration is always present. Breaks for users who only use project-level configs without a global entry.
+- **Conditionally include based on global registration check (chosen)** — read `~/.cursor/mcp.json` at prompt invocation time to check if `db-inspector-mcp` is already registered. If yes, skip the step. If no, include it. The check is cheap (one file read) and handles missing/corrupt files gracefully.
+
+**Decision**: Added `is_globally_registered()` to `init.py` — a public helper that reads `~/.cursor/mcp.json` and returns `True` if `db-inspector-mcp` exists in `mcpServers`. Returns `False` for missing files, corrupt JSON, or OS errors. The `setup_db_inspector` prompt in `tools.py` calls this function and conditionally omits the "create `.cursor/mcp.json`" step, adjusting step numbering accordingly.
+
+**What this rules out**: Nothing. The prompt still includes the mcp.json step when the server is not globally registered. If a user has a global entry but wants a project-level override with different settings (e.g., `env` overrides), they would need to create it manually — but this is an advanced scenario not covered by the setup prompt regardless.
+
+**Relevant files**:
+- `src/db_inspector_mcp/init.py` — added `is_globally_registered()`
+- `src/db_inspector_mcp/tools.py` — updated `setup_db_inspector` prompt to conditionally skip mcp.json step
+- `tests/test_init.py` — 4 new tests for `is_globally_registered()` (registered, not registered, file missing, corrupt JSON)
+
+**Commits**:
+
+---
+
 ## 2026-02-20 — Lazy backend imports for lightweight global MCP startup
 
 **Trigger**: When db-inspector-mcp is configured globally (user-level `~/.cursor/mcp.json`), it loads for every project — including projects that have no `.env` file and will never use database tools. At startup, all four backend modules were imported eagerly at module level, pulling in heavy C-extension database drivers (`pyodbc`, `pywin32`/COM, `psycopg2`) before the server even checked whether a `.env` file existed. This added unnecessary memory and startup time for projects that don't use the tool.

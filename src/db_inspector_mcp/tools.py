@@ -249,19 +249,32 @@ mcp = FastMCP(
 )
 def setup_db_inspector() -> str:
     """Return the .env.example template with setup instructions."""
-    from .init import MCP_JSON_TEMPLATE, load_env_example
+    from .init import MCP_JSON_TEMPLATE, is_globally_registered, load_env_example
 
     env_template = load_env_example()
-    return (
-        "Set up db-inspector-mcp for this project:\n\n"
+
+    steps = [
         "1. Create a `.env` file in the project root with the following template "
         "(uncomment and edit the DB_MCP_* values for your database):\n\n"
-        f"```\n{env_template}```\n\n"
-        "2. If `.cursor/mcp.json` does not exist in the project, create it with:\n\n"
-        f"```json\n{MCP_JSON_TEMPLATE}\n```\n\n"
-        "3. Tell the user to edit `.env` with their database connection details "
-        "and restart Cursor."
+        f"```\n{env_template}```\n\n",
+    ]
+
+    if is_globally_registered():
+        next_step = 2
+    else:
+        next_step = 3
+        steps.append(
+            "2. If `.cursor/mcp.json` does not exist in the project, create it "
+            "with:\n\n"
+            f"```json\n{MCP_JSON_TEMPLATE}\n```\n\n"
+        )
+
+    steps.append(
+        f"{next_step}. Tell the user to edit `.env` with their database "
+        "connection details and restart Cursor."
     )
+
+    return "Set up db-inspector-mcp for this project:\n\n" + "".join(steps)
 
 
 # ---------------------------------------------------------------------------

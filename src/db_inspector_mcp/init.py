@@ -70,6 +70,18 @@ def _get_global_mcp_json_path() -> Path:
     return home / ".cursor" / "mcp.json"
 
 
+def is_globally_registered() -> bool:
+    """Check whether db-inspector-mcp is already in the global mcp.json."""
+    mcp_json_path = _get_global_mcp_json_path()
+    if not mcp_json_path.exists():
+        return False
+    try:
+        data = json.loads(mcp_json_path.read_text(encoding="utf-8"))
+        return "db-inspector-mcp" in data.get("mcpServers", {})
+    except (json.JSONDecodeError, ValueError, OSError):
+        return False
+
+
 def _register_global_mcp(*, quiet: bool = False) -> Path:
     """Add db-inspector-mcp to the global ``~/.cursor/mcp.json``.
 
