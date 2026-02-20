@@ -8,6 +8,33 @@
 
 ---
 
+## 2026-02-20 — CLI `init` command and MCP prompt for project setup
+
+**Trigger**: Developers integrating db-inspector-mcp into a new project had to manually copy `.env.example` to `.env` and create/edit `.cursor/mcp.json`. This multi-step process was error-prone and undiscoverable. The goal was a one-command setup experience.
+
+**Options explored**:
+- **MCP Prompt only (slash command)** — MCP prompts surface as user-invokable workflows in clients. Attractive for in-IDE use, but Cursor's support for surfacing MCP prompts as slash commands is still maturing and may not be discoverable. Not reliable as the primary path.
+- **MCP Tool (`db_get_env_template`)** — would return template content for the AI to write. Less discoverable than a prompt and redundant if the prompt already embeds the content. Deferred.
+- **CLI init command only** — proven pattern (`git init`, `npm init`). Works everywhere, no IDE dependency. Reliable but doesn't help users who are already in a Cursor chat session.
+- **CLI init + MCP prompt (chosen)** — CLI `init` is the documented primary path; MCP prompt is a bonus for in-IDE discovery. Low marginal effort to implement both since they share the same template loader.
+- **Post-install hook to auto-register in global mcp.json** — ideal UX, but modern pip (PEP 517) does not support post-install hooks. `setup.py cmdclass` is deprecated and unreliable with `pip install -e .`. Rejected.
+- **Separate entry point (`db-inspector-mcp-init`)** — simpler than refactoring `main()`, but two binaries is confusing for users. Rejected in favor of argparse subcommand dispatch.
+- **Duplicate template file in `src/`** — would simplify `importlib.resources` packaging, but creates a maintenance burden keeping two files in sync. Rejected; runtime path resolution from `__file__` is used for editable installs, with `importlib.resources` fallback for wheel installs.
+
+**Decision**: Added `db-inspector-mcp init` as an argparse-dispatched subcommand in `main.py`. The command: (1) copies `.env` from the bundled `.env.example` template, failing if `.env` exists unless `--force`; (2) registers the server in `~/.cursor/mcp.json` (idempotent). Also added `@mcp.prompt()` named `setup_db_inspector` that returns the template content with setup instructions for the AI.
+
+Critical design choice: the global `~/.cursor/mcp.json` entry contains **only the command** (`{"command": "db-inspector-mcp"}`), with no `env` overrides. This is because `mcp.json` env values become process-level environment variables that take precedence over `.env` files (which are loaded with `override=False` via python-dotenv). Putting settings like `DB_MCP_ALLOW_DATA_ACCESS` in the global config would prevent per-project `.env` customization.
+
+Template loading uses a two-strategy approach: first tries `Path(__file__).parent.parent.parent / ".env.example"` (works for editable installs where source is directly linked), then falls back to `importlib.resources.files("db_inspector_mcp").joinpath(".env.example")` (for wheel installs with package-data). No duplicate file is maintained.
+
+**What this rules out**: The `init` command currently targets Cursor only (writes to `~/.cursor/mcp.json`). Supporting other MCP clients (Claude Desktop, VS Code Copilot) would require additional registration logic or a `--client` flag. The `importlib.resources` fallback for wheel installs depends on `[tool.setuptools.package-data]` correctly bundling `.env.example` — this needs verification when publishing to PyPI (the `package-data` path `"../../.env.example"` relative to the package dir is fragile for non-editable installs).
+
+**Relevant files**: `src/db_inspector_mcp/init.py` (new), `src/db_inspector_mcp/main.py`, `src/db_inspector_mcp/tools.py`, `pyproject.toml`, `tests/test_init.py` (new), `README.md`
+
+**Commits**:
+
+---
+
 ## 2026-02-20 — Inline cursor rule for test execution and shell commands
 
 **Trigger**: Across multiple development sessions, AI agents repeatedly failed to run the test suite correctly. Three recurring failure patterns were observed in chat transcripts: (1) running bare `python -m pytest` or `pytest` without the venv, getting "No module named pytest"; (2) using bash-only commands like `head` or `tail` on Windows PowerShell; (3) attempting `pip install` system-wide to fix missing dependencies instead of using the existing venv. The project's `AGENTS.md` already contained venv instructions, but the existing `.cursor/rules/agents.mdc` only said "read AGENTS.md" — agents either didn't follow the indirection or skipped the testing section.

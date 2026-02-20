@@ -68,14 +68,22 @@ After updating PATH, restart your terminal (or Cursor) for changes to take effec
 
 ### Environment Configuration
 
-Copy the example environment file and configure it:
+The fastest way to set up your project is with the built-in `init` command:
 
 ```bash
-# Copy the example environment file
-cp .env.example .env
+db-inspector-mcp init
+```
 
-# Edit .env with your database connection details
-# See Configuration section below for details
+This does two things:
+1. Copies the `.env.example` template to `.env` in your current directory
+2. Registers the MCP server in your global `~/.cursor/mcp.json` (so Cursor discovers it automatically in all projects)
+
+Then edit `.env` with your database connection details (see [Configuration](#configuration) below).
+
+**Manual alternative:** If you prefer, you can copy the file yourself:
+
+```bash
+cp .env.example .env
 ```
 
 ## Quick Start
@@ -96,22 +104,23 @@ Verify the command is available:
 db-inspector-mcp --help
 ```
 
-### Step 2: Configure Cursor
+### Step 2: Initialize Your Project
 
-The MCP configuration file (`.cursor/mcp.json`) is already created in this repository. It contains the basic settings needed to connect the MCP server to Cursor.
+Run the init command in your project directory:
 
-**Note:** If you're using this in a different project, create `.cursor/mcp.json` in your project root:
+```bash
+db-inspector-mcp init
+```
+
+This creates a `.env` file from the configuration template and registers the MCP server in your global `~/.cursor/mcp.json` so Cursor discovers it automatically.
+
+**Note:** If you prefer manual setup, create `.cursor/mcp.json` in your project root:
 
 ```json
 {
   "mcpServers": {
     "db-inspector-mcp": {
-      "command": "db-inspector-mcp",
-      "env": {
-        "DB_MCP_QUERY_TIMEOUT_SECONDS": "30",
-        "DB_MCP_ALLOW_DATA_ACCESS": "false",
-        "DB_MCP_VERIFY_READONLY": "true"
-      }
+      "command": "db-inspector-mcp"
     }
   }
 }
@@ -119,7 +128,7 @@ The MCP configuration file (`.cursor/mcp.json`) is already created in this repos
 
 ### Step 3: Set Up Your Database Connection
 
-Create a `.env` file in your project root with your database connection details:
+Edit the `.env` file in your project root with your database connection details:
 
 **For SQL Server:**
 ```bash
@@ -940,11 +949,10 @@ For architectural decisions and design rationale, see [DECISIONS.md](DECISIONS.m
 
 4. **Set up environment variables:**
    ```bash
-   # Copy the example file
-   cp .env.example .env
+   # Initialize project (creates .env from template, registers in ~/.cursor/mcp.json)
+   db-inspector-mcp init
    
    # Edit .env with your database connection details
-   # Required: DB_BACKEND and DB_CONNECTION_STRING
    ```
 
 5. **Verify installation:**
@@ -1060,6 +1068,7 @@ db-inspector-mcp/
 │       ├── config.py          # Configuration management
 │       ├── security.py        # SQL validation and permissions
 │       ├── usage_logging.py   # Usage logging system
+│       ├── init.py            # Project init command and template loader
 │       └── backends/
 │           ├── __init__.py
 │           ├── base.py        # Abstract base class (includes sql_dialect)
@@ -1070,6 +1079,36 @@ db-inspector-mcp/
 │           └── registry.py    # Backend registry
 └── tests/                     # Test suite
 ```
+
+## CLI Commands
+
+### `db-inspector-mcp`
+
+When run with no arguments, starts the MCP server (stdio transport). This is how Cursor launches it.
+
+### `db-inspector-mcp init`
+
+Initialize db-inspector-mcp in a project directory. This command:
+
+1. Creates a `.env` file from the configuration template (fails if `.env` already exists)
+2. Registers the server in `~/.cursor/mcp.json` so Cursor discovers it in all projects
+
+```bash
+# Initialize in current directory
+db-inspector-mcp init
+
+# Overwrite existing .env
+db-inspector-mcp init --force
+
+# Initialize in a specific directory
+db-inspector-mcp init --dir /path/to/project
+```
+
+**Note:** The global `~/.cursor/mcp.json` entry contains only the server command (no `env` overrides). All tunable settings (`DB_MCP_ALLOW_DATA_ACCESS`, `DB_MCP_QUERY_TIMEOUT_SECONDS`, etc.) are configured per-project in `.env` so they can vary between projects.
+
+### `db-inspector-mcp --help`
+
+Show available commands.
 
 ## License
 

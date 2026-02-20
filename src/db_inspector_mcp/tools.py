@@ -240,6 +240,35 @@ mcp = FastMCP(
 )
 
 
+# ---------------------------------------------------------------------------
+# MCP Prompts
+# ---------------------------------------------------------------------------
+
+@mcp.prompt(
+    name="setup_db_inspector",
+    description="Generate .env config template and setup instructions for integrating db-inspector-mcp into a project",
+)
+def setup_db_inspector() -> str:
+    """Return the .env.example template with setup instructions."""
+    from .init import MCP_JSON_TEMPLATE, load_env_example
+
+    env_template = load_env_example()
+    return (
+        "Set up db-inspector-mcp for this project:\n\n"
+        "1. Create a `.env` file in the project root with the following template "
+        "(uncomment and edit the DB_MCP_* values for your database):\n\n"
+        f"```\n{env_template}```\n\n"
+        "2. If `.cursor/mcp.json` does not exist in the project, create it with:\n\n"
+        f"```json\n{MCP_JSON_TEMPLATE}\n```\n\n"
+        "3. Tell the user to edit `.env` with their database connection details "
+        "and restart Cursor."
+    )
+
+
+# ---------------------------------------------------------------------------
+# MCP Tools
+# ---------------------------------------------------------------------------
+
 @mcp.tool()
 @with_logging("db_count_query_results")
 def db_count_query_results(query: str, database: str | None = None) -> dict[str, Any]:

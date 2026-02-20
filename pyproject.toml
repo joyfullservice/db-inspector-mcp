@@ -41,6 +41,9 @@ db-inspector-mcp = "db_inspector_mcp.main:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+db_inspector_mcp = [".env.example"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = "test_*.py"

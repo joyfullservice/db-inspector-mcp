@@ -6,6 +6,33 @@ from .backends.registry import get_registry
 from .config import get_config, initialize_backends
 
 
+def _handle_subcommand() -> bool:
+    """Dispatch CLI subcommands (e.g. ``init``) before starting the MCP server.
+
+    Returns True if a subcommand was handled (caller should exit), False
+    otherwise (proceed with MCP server startup).
+    """
+    if len(sys.argv) < 2:
+        return False
+
+    command = sys.argv[1].lower()
+    if command == "init":
+        from .init import run_init
+        run_init(sys.argv[2:])
+        return True
+    if command in ("--help", "-h"):
+        print("usage: db-inspector-mcp [init | --help]")
+        print()
+        print("commands:")
+        print("  init    Initialize db-inspector-mcp in a project (creates .env,")
+        print("          registers in ~/.cursor/mcp.json)")
+        print()
+        print("When run without arguments, starts the MCP server (stdio transport).")
+        return True
+
+    return False
+
+
 def _verify_readonly(config: dict, registry) -> None:
     """Verify read-only status for all registered backends."""
     verify_readonly = config.get("DB_MCP_VERIFY_READONLY", "true").lower() == "true"
@@ -33,6 +60,9 @@ def _verify_readonly(config: dict, registry) -> None:
 
 def main() -> None:
     """Main entry point for the MCP server."""
+    if _handle_subcommand():
+        return
+
     # Load configuration (automatically loads .env files from project root)
     # Environment variables from MCP server env section take precedence
     config = get_config()
