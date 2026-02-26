@@ -8,6 +8,33 @@
 
 ---
 
+## 2026-02-26 — Fix stack overflow in Access COM unit tests (mock setup)
+
+**Trigger**: Four unit tests in `tests/test_backends.py` (`test_access_com_get_query_by_name`, `test_access_com_dao_database_closes_on_error`, `test_access_com_dao_database_uses_currentdb_when_available`, `test_access_com_list_views`) caused a fatal Windows stack overflow, crashing the entire pytest process. This was the first thing any contributor would hit when running the test suite.
+
+**Options explored**:
+- **Patch `_get_access_app` directly to return mock_app** — would bypass the COM acquisition code entirely, making tests simpler but less thorough. Rejected: the tests implicitly exercise the acquisition path, and bypassing it hides future bugs in that code.
+- **Fix the mock setup to properly intercept all COM entry points (chosen)** — patch `gencache` alongside `win32com.client`, and configure `mock_app.hWndAccessApp.return_value` to prevent mock recursion. Keeps the existing test structure and exercises more production code.
+
+**Decision**: Three fixes applied across all four tests:
+
+1. **Patched `gencache` separately from `win32com.client`**. The production code calls `gencache.EnsureDispatch()`, not `win32com.client.Dispatch()`. Since `gencache` is imported at module level via `from win32com.client import gencache`, patching `win32com.client` does not intercept it — `gencache` is already bound as a direct reference. Each test now patches `db_inspector_mcp.backends.access_com.gencache` and sets `mock_gencache.EnsureDispatch.return_value = mock_app`.
+
+2. **Set `mock_app.hWndAccessApp.return_value = 0`**. The `_set_access_visible()` helper calls `app.hWndAccessApp()`. On an unconfigured `MagicMock`, this triggers infinite recursion in Python's `_mock_add_spec` internals, causing a fatal stack overflow. Setting an explicit return value short-circuits the mock chain.
+
+3. **Added timer cleanup** after each test (`backend._close_timer.cancel()`) to prevent daemon timer threads from leaking between tests.
+
+Additionally, two tests were silently broken by the earlier MSysObjects refactoring (2026-02-12 decision) and were fixed:
+- `test_access_com_dao_database_uses_currentdb_when_available`: `mock_current_db.Name` was never set to match `self._db_path`, so `_paths_match()` always returned False and the test never actually exercised the CurrentDb path. Fixed by setting `Name = "C:\\test.accdb"` and adding `OpenRecordset.side_effect = Exception(...)` to trigger the TableDefs fallback.
+- `test_access_com_list_views`: `list_views()` now uses MSysObjects SQL first, but the mock had no `OpenRecordset` failure configured, so the recordset's `EOF` (a truthy MagicMock) caused an empty result. Fixed by adding `OpenRecordset.side_effect = Exception(...)` to trigger the QueryDefs fallback.
+
+**What this rules out**: Nothing. The fixes are purely in test infrastructure. If `gencache` is ever replaced with a different dispatch mechanism in production code, the test patches would need updating to match.
+
+**Relevant files**:
+- `tests/test_backends.py` — fixed mock setup in 4 tests, added timer cleanup
+
+---
+
 ## 2026-02-20 — Skip project-level mcp.json in setup prompt when globally registered
 
 **Trigger**: The `setup_db_inspector` MCP prompt always included a step instructing the AI to create a project-level `.cursor/mcp.json`, even when the server was already registered in the global `~/.cursor/mcp.json`. For users who ran `db-inspector-mcp init` or manually added the server to their global config, this step was redundant — it would create a project-level file that shadows the global entry with identical content.

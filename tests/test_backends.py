@@ -264,7 +264,6 @@ def test_access_com_get_query_by_name():
     """Test that Access COM backend can get query by name."""
     connection_string = "Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\test.accdb;"
     
-    # Create a simple object to mock QueryDef (not MagicMock to avoid attribute issues)
     class MockQueryDef:
         def __init__(self):
             self.Name = "TestQuery"
@@ -273,26 +272,23 @@ def test_access_com_get_query_by_name():
     
     mock_query_def = MockQueryDef()
     
-    # Create a proper mock for QueryDefs collection
     mock_query_defs = MagicMock(side_effect=lambda name: mock_query_def if name == "TestQuery" else None)
     
-    # Mock database returned by DBEngine.OpenDatabase()
     mock_db = MagicMock()
     mock_db.QueryDefs = mock_query_defs
     
-    # Mock DBEngine
     mock_dbe = MagicMock()
     mock_dbe.OpenDatabase.return_value = mock_db
     
     mock_app = MagicMock()
     mock_app.DBEngine = mock_dbe
-    # CurrentDb() returns None so we fall through to DBEngine.OpenDatabase
     mock_app.CurrentDb.return_value = None
+    mock_app.hWndAccessApp.return_value = 0
     
-    with patch('db_inspector_mcp.backends.access_com.win32com.client') as mock_win32com:
-        # Make GetObject raise an exception so it falls back to Dispatch
+    with patch('db_inspector_mcp.backends.access_com.win32com.client') as mock_win32com, \
+         patch('db_inspector_mcp.backends.access_com.gencache') as mock_gencache:
         mock_win32com.GetObject.side_effect = Exception("No existing database")
-        mock_win32com.Dispatch.return_value = mock_app
+        mock_gencache.EnsureDispatch.return_value = mock_app
         
         backend = AccessCOMBackend(connection_string, 30)
         result = backend.get_query_by_name("TestQuery")
@@ -301,55 +297,62 @@ def test_access_com_get_query_by_name():
         assert result["sql"] == "SELECT * FROM TestTable"
         assert result["type"] == "Select"
         
-        # Database should have been closed after the operation
         mock_db.Close.assert_called_once()
+    
+    if backend._close_timer is not None:
+        backend._close_timer.cancel()
 
 
 def test_access_com_dao_database_closes_on_error():
     """Test that DAO database is closed even when an error occurs."""
     connection_string = "Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\test.accdb;"
     
-    # Mock database that raises an error on QueryDefs access
     mock_db = MagicMock()
     mock_db.QueryDefs.side_effect = Exception("COM error")
     
-    # Mock DBEngine
     mock_dbe = MagicMock()
     mock_dbe.OpenDatabase.return_value = mock_db
     
     mock_app = MagicMock()
     mock_app.DBEngine = mock_dbe
     mock_app.CurrentDb.return_value = None
+    mock_app.hWndAccessApp.return_value = 0
     
-    with patch('db_inspector_mcp.backends.access_com.win32com.client') as mock_win32com:
+    with patch('db_inspector_mcp.backends.access_com.win32com.client') as mock_win32com, \
+         patch('db_inspector_mcp.backends.access_com.gencache') as mock_gencache:
         mock_win32com.GetObject.side_effect = Exception("No existing database")
-        mock_win32com.Dispatch.return_value = mock_app
+        mock_gencache.EnsureDispatch.return_value = mock_app
         
         backend = AccessCOMBackend(connection_string, 30)
         
         with pytest.raises(RuntimeError):
             backend.get_query_by_name("NonExistent")
         
-        # Database should still be closed even though there was an error
         mock_db.Close.assert_called_once()
+    
+    if backend._close_timer is not None:
+        backend._close_timer.cancel()
 
 
 def test_access_com_dao_database_uses_currentdb_when_available():
     """Test that DAO database uses CurrentDb() when Access has our DB open."""
     connection_string = "Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\test.accdb;"
     
-    # Mock CurrentDb database
     mock_current_db = MagicMock()
+    mock_current_db.Name = "C:\\test.accdb"
+    mock_current_db.OpenRecordset.side_effect = Exception("MSysObjects denied")
     mock_table_def = MagicMock()
     mock_table_def.Name = "TestTable"
     mock_current_db.TableDefs = [mock_table_def]
     
     mock_app = MagicMock()
     mock_app.CurrentDb.return_value = mock_current_db
+    mock_app.hWndAccessApp.return_value = 0
     
-    with patch('db_inspector_mcp.backends.access_com.win32com.client') as mock_win32com:
+    with patch('db_inspector_mcp.backends.access_com.win32com.client') as mock_win32com, \
+         patch('db_inspector_mcp.backends.access_com.gencache') as mock_gencache:
         mock_win32com.GetObject.side_effect = Exception("No existing database")
-        mock_win32com.Dispatch.return_value = mock_app
+        mock_gencache.EnsureDispatch.return_value = mock_app
         
         backend = AccessCOMBackend(connection_string, 30)
         tables = backend.list_tables()
@@ -357,15 +360,16 @@ def test_access_com_dao_database_uses_currentdb_when_available():
         assert len(tables) == 1
         assert tables[0]["name"] == "TestTable"
         
-        # CurrentDb should NOT be closed (it's the user's database)
         mock_current_db.Close.assert_not_called()
+    
+    if backend._close_timer is not None:
+        backend._close_timer.cancel()
 
 
 def test_access_com_list_views():
     """Test that Access COM backend lists views without SQL."""
     connection_string = "Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\test.accdb;"
     
-    # Mock COM objects
     mock_query_def1 = MagicMock()
     mock_query_def1.Name = "Query1"
     mock_query_def2 = MagicMock()
@@ -374,34 +378,36 @@ def test_access_com_list_views():
     mock_query_defs = MagicMock()
     mock_query_defs.__iter__ = MagicMock(return_value=iter([mock_query_def1, mock_query_def2]))
     
-    # Mock database returned by DBEngine.OpenDatabase()
     mock_db = MagicMock()
     mock_db.QueryDefs = mock_query_defs
+    mock_db.OpenRecordset.side_effect = Exception("MSysObjects denied")
     
-    # Mock DBEngine
     mock_dbe = MagicMock()
     mock_dbe.OpenDatabase.return_value = mock_db
     
     mock_app = MagicMock()
     mock_app.DBEngine = mock_dbe
     mock_app.CurrentDb.return_value = None
+    mock_app.hWndAccessApp.return_value = 0
     
-    with patch('db_inspector_mcp.backends.access_com.win32com.client') as mock_win32com:
-        # Make GetObject raise an exception so it falls back to Dispatch
+    with patch('db_inspector_mcp.backends.access_com.win32com.client') as mock_win32com, \
+         patch('db_inspector_mcp.backends.access_com.gencache') as mock_gencache:
         mock_win32com.GetObject.side_effect = Exception("No existing database")
-        mock_win32com.Dispatch.return_value = mock_app
+        mock_gencache.EnsureDispatch.return_value = mock_app
         
         backend = AccessCOMBackend(connection_string, 30)
         views = backend.list_views()
         
         assert len(views) == 2
         assert views[0]["name"] == "Query1"
-        assert views[0]["definition"] is None  # SQL not extracted
+        assert views[0]["definition"] is None
         assert views[1]["name"] == "Query2"
         assert views[1]["definition"] is None
         
-        # Database should have been closed after the operation
         mock_db.Close.assert_called_once()
+    
+    if backend._close_timer is not None:
+        backend._close_timer.cancel()
 
 
 # =============================================================================
