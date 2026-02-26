@@ -1,12 +1,32 @@
 """Tests for database backends."""
 
+import faulthandler
 import os
 import sys
 import tempfile
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch, call
 
 import pyodbc
 import pytest
+
+
+@contextmanager
+def _suppress_com_seh():
+    """Suppress Windows SEH tracebacks during COM teardown.
+
+    When an out-of-process COM server (e.g. Access) has been Quit(), any
+    subsequent Release() on stale COM proxies triggers RPC_E_DISCONNECTED
+    (0x80010108) as a Windows Structured Exception.  pywin32 handles this
+    correctly, but Python's faulthandler prints a scary "Windows fatal
+    exception" traceback before the handler runs.  Disabling faulthandler
+    around COM cleanup suppresses these harmless messages.
+    """
+    faulthandler.disable()
+    try:
+        yield
+    finally:
+        faulthandler.enable()
 
 from db_inspector_mcp.backends.access_com import AccessCOMBackend, COM_AVAILABLE
 from db_inspector_mcp.backends.access_odbc import AccessODBCBackend
@@ -412,185 +432,156 @@ def test_access_com_list_views():
 
 # =============================================================================
 # Integration tests for Access COM backend
-# These tests require Access to be installed and will be skipped if not available
+# These tests require Access to be installed and will be skipped if not available.
+#
+# Fixtures use module scope so Access is launched once and quit once for the
+# entire module.  Individual tests create fresh AccessCOMBackend instances
+# that attach to the running Access via GetObject.
 # =============================================================================
 
-@pytest.fixture
-def temp_access_db():
-    """
-    Create a temporary Access database for testing.
-    
-    This fixture:
-    - Creates a temporary .accdb file
-    - Opens it in Access and creates a test table and query
-    - Yields the database path
-    - Cleans up by closing Access and deleting the file
-    """
+@pytest.fixture(scope="module")
+def access_app():
+    """Module-scoped Access Application — launched once, quit after all tests."""
     if not COM_AVAILABLE:
         pytest.skip("pywin32 not available")
-    
     if sys.platform != "win32":
         pytest.skip("Access COM tests only run on Windows")
-    
+
+    import ctypes
     import win32com.client
+
+    app = win32com.client.Dispatch("Access.Application")
+    try:
+        ctypes.windll.user32.ShowWindow(app.hWndAccessApp(), 5)  # SW_SHOW
+    except Exception:
+        pass
+
+    yield app
+
+    with _suppress_com_seh():
+        try:
+            app.Quit()
+        except Exception:
+            pass
+
+
+@pytest.fixture(scope="module")
+def temp_access_db(access_app):
+    """Module-scoped test database — created once, deleted after all tests.
+
+    The database is left open as CurrentDb in `access_app` so that
+    backends can attach via GetObject without launching a new instance.
+    """
+    import gc
+    import time
     import uuid
-    
-    # Create temporary database file with unique name
+
+    app = access_app
     temp_dir = tempfile.gettempdir()
     unique_id = uuid.uuid4().hex[:8]
     db_path = os.path.join(temp_dir, f"test_db_{os.getpid()}_{unique_id}.accdb")
-    
-    app = None
+
     try:
-        # Create new Access database
-        app = win32com.client.Dispatch("Access.Application")
-        import ctypes
-        try:
-            ctypes.windll.user32.ShowWindow(app.hWndAccessApp(), 5)  # SW_SHOW
-        except Exception:
-            pass
         app.NewCurrentDatabase(db_path)
         db = app.CurrentDb()
-        
-        # Create table using DAO TableDefs (more reliable than SQL DDL)
+
         # DAO constants
-        dbAutoIncrField = 16  # Field attribute for AutoIncrement
-        dbLong = 4            # Long integer type
-        dbText = 10           # Text type
-        dbDouble = 7          # Double type
-        
+        dbAutoIncrField = 16
+        dbLong = 4
+        dbText = 10
+        dbDouble = 7
+
         tbl = db.CreateTableDef("TestTable")
-        
-        # Create ID field (AutoIncrement)
+
         fld_id = tbl.CreateField("ID", dbLong)
         fld_id.Attributes = dbAutoIncrField
         tbl.Fields.Append(fld_id)
-        
-        # Create Name field (Text)
+
         fld_name = tbl.CreateField("Name", dbText, 50)
         tbl.Fields.Append(fld_name)
-        
-        # Create Amount field (Double) - avoid "Value" as it's a reserved word
+
         fld_amount = tbl.CreateField("Amount", dbDouble)
         tbl.Fields.Append(fld_amount)
-        
-        # Append table to database
+
         db.TableDefs.Append(tbl)
-        
-        # Insert some test data using DoCmd
+
         app.DoCmd.SetWarnings(False)
         app.DoCmd.RunSQL("INSERT INTO TestTable (Name, Amount) VALUES ('Test1', 100)")
         app.DoCmd.RunSQL("INSERT INTO TestTable (Name, Amount) VALUES ('Test2', 200)")
         app.DoCmd.SetWarnings(True)
-        
-        # Create a test query
-        query_sql = "SELECT * FROM TestTable WHERE Amount > 150"
-        db.CreateQueryDef("TestQuery", query_sql)
-        
-        # Close the database and quit the setup Access instance
-        # The test will create its own Access instance
-        app.CloseCurrentDatabase()
-        app.Quit()
-        app = None
-        
-        # Wait for Access to fully release the file
-        import time
-        import gc
-        gc.collect()  # Force garbage collection to release COM objects
-        time.sleep(2)
-        
-        yield db_path
-        
+
+        db.CreateQueryDef("TestQuery", "SELECT * FROM TestTable WHERE Amount > 150")
+
+        del fld_id, fld_name, fld_amount, tbl, db
+
     except Exception as e:
         pytest.skip(f"Could not create test database: {e}")
-        
-    finally:
-        # Cleanup: close Access if still open (only if setup failed mid-way)
-        if app is not None:
-            try:
-                app.Quit()
-            except Exception:
-                pass
-        
-        # Wait for file release
-        import time
-        import gc
-        gc.collect()
-        time.sleep(1)
-        
-        # Delete the database file and lock file
+
+    yield db_path
+
+    # Teardown: close the database and delete the file
+    with _suppress_com_seh():
         try:
-            lock_file = db_path.replace('.accdb', '.laccdb')
-            if os.path.exists(lock_file):
-                os.remove(lock_file)
+            app.CloseCurrentDatabase()
         except Exception:
             pass
-        
+
+    gc.collect()
+    time.sleep(1)
+
+    for path in (db_path.replace('.accdb', '.laccdb'), db_path):
         try:
-            if os.path.exists(db_path):
-                os.remove(db_path)
+            if os.path.exists(path):
+                os.remove(path)
         except Exception:
             pass
+
+
+def _release_test_backend(backend) -> None:
+    """Cancel the TTL timer and release the backend's COM reference."""
+    if backend._close_timer is not None:
+        backend._close_timer.cancel()
+    with _suppress_com_seh():
+        backend._app = None
 
 
 @pytest.mark.integration
 @pytest.mark.skipif(not COM_AVAILABLE, reason="Access COM not available")
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows only")
 def test_access_com_getobject_existing_database(temp_access_db):
-    """Test that GetObject can reference an existing open database."""
-    import win32com.client
-    
-    # Open the database in Access
-    app = win32com.client.Dispatch("Access.Application")
-    import ctypes
+    """Test that a backend attaches to an already-open database via GetObject."""
+    backend = AccessCOMBackend(temp_access_db, 30)
+
     try:
-        ctypes.windll.user32.ShowWindow(app.hWndAccessApp(), 5)  # SW_SHOW
-    except Exception:
-        pass
-    app.OpenCurrentDatabase(temp_access_db)
-    
-    try:
-        # Now create backend - it should use GetObject to get the existing database
-        backend = AccessCOMBackend(temp_access_db, 30)
-        
-        # Verify it can access the database
         tables = backend.list_tables()
         table_names = [t["name"] for t in tables]
         assert "TestTable" in table_names
-        
-        # Verify it can access the query
+
         views = backend.list_views()
         view_names = [v["name"] for v in views]
         assert "TestQuery" in view_names
-        
-        # Get the query details
+
         query = backend.get_query_by_name("TestQuery")
         assert query["name"] == "TestQuery"
         assert "TestTable" in query["sql"]
         assert query["type"] == "Select"
-        
     finally:
-        # Only quit Access if it still has our temp test database open.
-        # Never close a user's Access session.
-        _safe_quit_test_access(app, temp_access_db)
+        _release_test_backend(backend)
 
 
 @pytest.mark.integration
 @pytest.mark.skipif(not COM_AVAILABLE, reason="Access COM not available")
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows only")
-def test_access_com_with_closed_database(temp_access_db):
-    """Test that backend opens database if it's not already open."""
+def test_access_com_backend_connects_and_queries(temp_access_db):
+    """Test that a fresh backend can connect and query the database."""
     backend = AccessCOMBackend(temp_access_db, 30)
-    
+
     try:
-        # Should be able to access the database even though it wasn't open
         tables = backend.list_tables()
         table_names = [t["name"] for t in tables]
         assert "TestTable" in table_names
     finally:
-        # Only quit Access if it has our temp test database open.
-        # Never close a user's Access session.
-        _safe_quit_test_access(backend._app, temp_access_db)
+        _release_test_backend(backend)
 
 
 @pytest.mark.integration
@@ -599,32 +590,25 @@ def test_access_com_with_closed_database(temp_access_db):
 def test_access_com_no_lock_between_operations(temp_access_db):
     """Test that no .laccdb lock file persists between COM operations."""
     import time
-    
+
     backend = AccessCOMBackend(temp_access_db, 30)
     lock_file = temp_access_db.replace('.accdb', '.laccdb')
-    
+
     try:
-        # Perform an operation
         tables = backend.list_tables()
         assert len(tables) > 0
-        
-        # Give a moment for file system to catch up
+
         time.sleep(0.5)
-        
-        # Check that no lock file persists after the operation
-        # Note: if Access has the DB open via CurrentDb, a lock is expected.
-        # This test is most meaningful when Access does NOT have the DB open.
-        if not lock_file_exists_from_access_app(backend, temp_access_db):
+
+        if not _access_has_db_open(backend, temp_access_db):
             assert not os.path.exists(lock_file), \
                 "Lock file (.laccdb) should not persist between operations"
     finally:
-        # Only quit Access if it has our temp test database open.
-        # Never close a user's Access session.
-        _safe_quit_test_access(backend._app, temp_access_db)
+        _release_test_backend(backend)
 
 
-def lock_file_exists_from_access_app(backend, db_path):
-    """Check if Access Application has the database open as CurrentDb."""
+def _access_has_db_open(backend, db_path):
+    """Check if the backend's Access Application has the database open."""
     if backend._app is None:
         return False
     try:
@@ -632,31 +616,3 @@ def lock_file_exists_from_access_app(backend, db_path):
         return current_db is not None
     except Exception:
         return False
-
-
-def _safe_quit_test_access(app, expected_db_path: str) -> None:
-    """Quit an Access instance ONLY if it has the expected test database open.
-
-    Automated tests must never close a user's Access session.  This helper
-    verifies that the Access instance's CurrentDb matches the temporary
-    test database before calling Quit().  If the database doesn't match
-    (e.g. the backend attached to a user's existing session via GetObject),
-    the COM reference is simply released without quitting.
-    """
-    if app is None:
-        return
-    try:
-        current_db = app.CurrentDb()
-        if current_db is not None:
-            db_name = current_db.Name
-            paths_match = (
-                os.path.normcase(os.path.abspath(db_name))
-                == os.path.normcase(os.path.abspath(expected_db_path))
-            )
-            if not paths_match:
-                # Not our temp DB — do NOT quit the user's Access session
-                return
-        # Either our temp DB or no DB open — safe to quit
-        app.Quit()
-    except Exception:
-        pass

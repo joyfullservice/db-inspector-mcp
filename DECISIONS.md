@@ -8,6 +8,26 @@
 
 ---
 
+## 2026-02-26 — Module-scoped fixtures for Access COM integration tests
+
+**Trigger**: The three integration tests in `tests/test_backends.py` took ~25s total because the `temp_access_db` fixture (function-scoped) launched and quit Access per test, and each test then launched Access again through the backend. That's 4+ launch/quit cycles at ~5s each, plus `gc.collect()` + `time.sleep()` delays. The tests were verifying database operations (list_tables, list_views, get_query_by_name), not the Application launch lifecycle.
+
+**Options explored**:
+- **Function-scoped fixture (status quo)** — isolated per test but extremely slow. Each test creates a fresh database in a fresh Access instance, quits, then the test launches Access again.
+- **Session-scoped fixture** — one Access for the entire pytest session. Rejected: too broad — other test modules don't need Access, and session scope complicates test selection with `-m integration`.
+- **Module-scoped fixtures (chosen)** — split into `access_app` (manages Application lifecycle) and `temp_access_db` (creates database using the shared app). Access launches once, database is created once, all three tests attach via `GetObject`, Access quits once in module teardown.
+
+**Decision**: Module-scoped fixtures. The `access_app` fixture launches Access once and quits in teardown. The `temp_access_db` fixture creates the test database using the shared app and leaves it open as CurrentDb — backends connect instantly via `GetObject(db_path)` (~10ms vs ~5s cold start). Test teardown simplified to a `_release_test_backend()` helper that cancels the TTL timer and releases the COM reference (no quit). `_safe_quit_test_access` removed entirely. `test_access_com_with_closed_database` renamed to `test_access_com_backend_connects_and_queries` since it no longer tests the cold-start path (covered by mock unit tests).
+
+Also added `_suppress_com_seh()` context manager to suppress harmless `RPC_E_DISCONNECTED` SEH tracebacks that Python's `faulthandler` prints during COM teardown when Access has already been quit.
+
+**What this rules out**: The integration tests no longer exercise the cold-start `EnsureDispatch` path (Access not running at all). This path is covered by the mock unit test `test_access_com_get_query_by_name`. If the cold-start path needs integration-level coverage in the future, a dedicated test with its own function-scoped fixture could be added.
+
+**Relevant files**:
+- `tests/test_backends.py` — restructured fixtures, simplified teardowns, added `_suppress_com_seh()` and `_release_test_backend()`
+
+---
+
 ## 2026-02-26 — Fix stack overflow in Access COM unit tests (mock setup)
 
 **Trigger**: Four unit tests in `tests/test_backends.py` (`test_access_com_get_query_by_name`, `test_access_com_dao_database_closes_on_error`, `test_access_com_dao_database_uses_currentdb_when_available`, `test_access_com_list_views`) caused a fatal Windows stack overflow, crashing the entire pytest process. This was the first thing any contributor would hit when running the test suite.
