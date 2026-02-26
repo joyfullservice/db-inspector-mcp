@@ -33,7 +33,6 @@ def validate_readonly_sql(sql: str) -> None:
         ValueError: If write operations are detected in the SQL
     """
     # Normalize SQL: remove comments and string literals to avoid false positives
-    # This is a simple approach - for production, consider a proper SQL parser
     sql_upper = sql.upper()
     
     # Remove single-line comments (-- ...)

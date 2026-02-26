@@ -26,8 +26,6 @@
 - `src/db_inspector_mcp/tools.py` — updated `setup_db_inspector` prompt to conditionally skip mcp.json step
 - `tests/test_init.py` — 4 new tests for `is_globally_registered()` (registered, not registered, file missing, corrupt JSON)
 
-**Commits**:
-
 ---
 
 ## 2026-02-20 — Lazy backend imports for lightweight global MCP startup
@@ -54,8 +52,6 @@ After these changes, startup for projects without a `.env` file loads only: stdl
 - `src/db_inspector_mcp/tools.py` — moved `AccessCOMBackend` import into function body
 - `src/db_inspector_mcp/backends/__init__.py` — removed 4 concrete backend re-exports
 
-**Commits**:
-
 ---
 
 ## 2026-02-20 — CLI `init` command and MCP prompt for project setup
@@ -81,8 +77,6 @@ Template loading uses a two-strategy approach: first tries `Path(__file__).paren
 
 **Relevant files**: `src/db_inspector_mcp/init.py` (new), `src/db_inspector_mcp/main.py`, `src/db_inspector_mcp/tools.py`, `pyproject.toml`, `tests/test_init.py` (new), `README.md`
 
-**Commits**:
-
 ---
 
 ## 2026-02-20 — Inline cursor rule for test execution and shell commands
@@ -99,8 +93,6 @@ Template loading uses a two-strategy approach: first tries `Path(__file__).paren
 **What this rules out**: Nothing. The rule can be extended with additional commands as new failure patterns emerge. If the project moves to a different OS or shell, the PowerShell-specific guidance would need updating.
 
 **Relevant files**: `.cursor/rules/testing.mdc`
-
-**Commits**:
 
 ---
 
@@ -125,8 +117,6 @@ The resolver is called in two places: `get_backend()` and `initialize_backends()
 - `.env.example` — added relative path examples and explanation
 - `README.md` — added "Relative paths" note in Access Connection Strings section
 
-**Commits**:
-
 ---
 
 ## 2026-02-18 — Suppress noisy MCP SDK logging and deduplicate startup diagnostics
@@ -144,8 +134,6 @@ The resolver is called in two places: `get_backend()` and `initialize_backends()
 **What this rules out**: If a user wants to see per-request MCP protocol logging for debugging, they would need to change the `log_level` parameter or set `FASTMCP_LOG_LEVEL=INFO` (the SDK reads settings from environment variables with `FASTMCP_` prefix). The `_env_loaded` guard means that if something dynamically changes environment variables and re-calls `load_config()`, the dotenv files won't be reloaded — but this is intentional since env files should only be loaded once at startup.
 
 **Relevant files**: `src/db_inspector_mcp/tools.py`, `src/db_inspector_mcp/config.py`
-
-**Commits**:
 
 ---
 
@@ -171,8 +159,6 @@ Also removed the CTE example from `db_count_query_results` docstring (CTEs don't
 **What this rules out**: Nothing. Instructions can be further refined as real external agent usage patterns emerge. The current transcripts were primarily development sessions, so these changes are based on code analysis rather than observed agent failures.
 
 **Relevant files**: `src/db_inspector_mcp/tools.py`
-
-**Commits**:
 
 ---
 
@@ -232,8 +218,6 @@ Supporting changes: `with_logging` decorator updated to support async tool funct
 - `AGENTS.md` — added venv activation instructions for tests
 - `tests/test_config.py` — 6 new tests for `_find_project_root`
 - `tests/test_tools.py` — updated `test_db_list_databases_includes_dialect` for async
-
-**Commits**:
 
 ---
 
@@ -361,8 +345,6 @@ Both paths set `UserControl = True` and make newly created instances visible. Th
 
 **Relevant files**: `src/db_inspector_mcp/tools.py`
 
-**Commits**:
-
 ---
 
 ## 2026-02-12 — Added "distinct" topic to db_sql_help for Access
@@ -378,8 +360,6 @@ Both paths set `UserControl = True` and make newly created instances visible. Th
 **What this rules out**: Nothing. More topics can be added following the same pattern.
 
 **Relevant files**: `src/db_inspector_mcp/tools.py`
-
-**Commits**:
 
 ---
 
@@ -402,8 +382,6 @@ Both paths set `UserControl = True` and make newly created instances visible. Th
 - `.cursor/rules/agents.mdc` — created; always-apply rule pointing to `AGENTS.md`
 - `README.md` — added reference in Development section; fixed duplicate Feature bullets
 
-**Commits**:
-
 ---
 
 ## 2025-02-12 — Skip COM TTL caching; revisit later
@@ -420,8 +398,6 @@ Both paths set `UserControl = True` and make newly created instances visible. Th
 **What this rules out**: Nothing permanently. COM TTL can be added later if users report issues with stale COM references, Access memory footprint, or lock contention. The trigger to revisit would be: (a) moving scalar SQL execution to DAO/OpenRecordset (which would hold the database open longer), or (b) reports of the MCP server hanging due to Access modal dialogs.
 
 **Relevant files**: `src/db_inspector_mcp/backends/access_com.py`
-
-**Commits**:
 
 ---
 
@@ -443,8 +419,6 @@ Both paths set `UserControl = True` and make newly created instances visible. Th
 - `src/db_inspector_mcp/backends/access_com.py` — updated `__init__` to forward `connection_ttl_seconds` to internal ODBC backend
 - `src/db_inspector_mcp/config.py` — added `_get_access_conn_ttl()` reading `DB_MCP_ACCESS_CONN_TTL` env var, wired into `_create_backend()` for both Access backends
 - `tests/test_backends.py` — 7 new tests: TTL defaults, custom TTL, TTL=0 fallback, connection reuse, timer expiry, stale connection discard, non-pyodbc error handling
-
-**Commits**:
 
 ---
 
@@ -471,8 +445,6 @@ Key benchmark numbers (30 iterations, median):
 
 **Relevant files**: `benchmarks/bench_dao_vs_odbc.py`
 
-**Commits**:
-
 ---
 
 ## 2025-02-12 — Fix GetObject password prompt in benchmark script
@@ -489,5 +461,3 @@ Key benchmark numbers (30 iterations, median):
 **What this rules out**: The benchmark script can't automatically attach to an already-open Access instance. This is acceptable since the benchmark needs a controlled, fresh environment anyway. The production `_get_access_app()` in `access_com.py` is unchanged — it still tries `GetObject` first, which works when the user has the database open.
 
 **Relevant files**: `benchmarks/bench_dao_vs_odbc.py`
-
-**Commits**:

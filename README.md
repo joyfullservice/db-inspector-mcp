@@ -52,17 +52,14 @@ After installation, you may see warnings about scripts not being on PATH. If you
 
 **PowerShell (run as Administrator):**
 ```powershell
-$scriptsPath = "$env:LOCALAPPDATA\Python\pythoncore-3.14-64\Scripts"
+$scriptsPath = (python -c "import sysconfig; print(sysconfig.get_path('scripts'))")
 $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
 if ($currentPath -notlike "*$scriptsPath*") {
     [Environment]::SetEnvironmentVariable("Path", "$currentPath;$scriptsPath", "User")
 }
 ```
 
-**Note:** The exact path may vary based on your Python installation. Check the warning message for the correct path, or find it with:
-```powershell
-python -c "import sysconfig; print(sysconfig.get_path('scripts'))"
-```
+**Note:** The exact path may vary based on your Python installation. You can also check the warning message from `pip install` for the correct path.
 
 After updating PATH, restart your terminal (or Cursor) for changes to take effect.
 
@@ -398,7 +395,6 @@ DB_MCP_CONNECTION_STRING=Driver={ODBC Driver 17 for SQL Server};Server=localhost
 DB_MCP_LEGACY_DATABASE=access_com  # Use COM backend for query-by-name
 DB_MCP_LEGACY_CONNECTION_STRING=Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\path\to\legacy.accdb;
 # Note: Also supports .accda and .mdb files
-# Note: Also supports .accda and .mdb files
 
 DB_MCP_NEW_DATABASE=sqlserver
 DB_MCP_NEW_CONNECTION_STRING=Driver={ODBC Driver 17 for SQL Server};Server=localhost;Database=mydb;UID=user;PWD=password
@@ -429,7 +425,6 @@ This allows `.cursor/mcp.json` to override `.env` values when needed.
 # .env
 DB_MCP_LEGACY_DATABASE=access_com  # Use COM backend for query-by-name
 DB_MCP_LEGACY_CONNECTION_STRING=Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\path\to\legacy.accdb;
-# Note: Also supports .accda and .mdb files
 # Note: Also supports .accda and .mdb files
 
 DB_MCP_NEW_DATABASE=sqlserver

@@ -21,6 +21,12 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
 ]
+
+[project.urls]
+Homepage = "https://github.com/joyfullservice/db-inspector-mcp"
+Repository = "https://github.com/joyfullservice/db-inspector-mcp"
+Issues = "https://github.com/joyfullservice/db-inspector-mcp/issues"
+
 dependencies = [
     "mcp[cli]>=1.0.0",
     "pyodbc>=5.0.0",
