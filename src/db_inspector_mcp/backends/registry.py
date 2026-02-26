@@ -100,6 +100,16 @@ class BackendRegistry:
             )
         self._default_name = name
 
+    def clear(self) -> None:
+        """Remove all registered backends and reset the default.
+
+        Used during hot-reload when database configuration changes and
+        backends need to be re-initialized from updated environment
+        variables.
+        """
+        self._backends.clear()
+        self._default_name = None
+
 
 # Global registry instance
 _registry = BackendRegistry()

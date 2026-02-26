@@ -6,9 +6,13 @@ from unittest.mock import patch
 
 import pytest
 
+import db_inspector_mcp.config as config_module
 from db_inspector_mcp.config import (
+    _check_env_reload,
     _find_project_root,
+    _record_env_mtimes,
     _resolve_connection_string_paths,
+    _snapshot_backend_env,
     get_backend,
     load_config,
 )
@@ -281,4 +285,155 @@ class TestResolveConnectionStringPaths:
         result = _resolve_connection_string_paths(conn, "access_odbc", tmp_path)
         expected_path = str((tmp_path / "my.accdb").resolve())
         assert expected_path in result
+
+
+class TestEnvHotReload:
+    """Tests for .env file hot-reload via mtime checking."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_config_state(self):
+        """Reset module-level config state before and after each test."""
+        config_module._env_loaded = False
+        config_module._is_reload = False
+        config_module._project_root = None
+        config_module._env_mtimes.clear()
+        yield
+        config_module._env_loaded = False
+        config_module._is_reload = False
+        config_module._project_root = None
+        config_module._env_mtimes.clear()
+
+    def test_unchanged_mtime_does_not_reload(self, tmp_path, monkeypatch):
+        """When .env mtime is unchanged, _check_env_reload returns False."""
+        env_file = tmp_path / ".env"
+        env_file.write_text("DB_MCP_ALLOW_DATA_ACCESS=false\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("DB_MCP_PROJECT_DIR", raising=False)
+
+        config_module._env_loaded = True
+        config_module._project_root = tmp_path
+        _record_env_mtimes()
+
+        assert not _check_env_reload()
+        assert config_module._env_loaded is True
+
+    def test_mtime_change_triggers_reload(self, tmp_path, monkeypatch):
+        """When .env mtime changes, _check_env_reload resets _env_loaded."""
+        env_file = tmp_path / ".env"
+        env_file.write_text("DB_MCP_ALLOW_DATA_ACCESS=false\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("DB_MCP_PROJECT_DIR", raising=False)
+
+        config_module._env_loaded = True
+        config_module._project_root = tmp_path
+        _record_env_mtimes()
+
+        # Simulate a file edit by bumping the mtime forward
+        original_mtime = env_file.stat().st_mtime
+        os.utime(str(env_file), (original_mtime + 1, original_mtime + 1))
+
+        assert _check_env_reload() is True
+        assert config_module._env_loaded is False
+        assert config_module._is_reload is True
+
+    def test_permission_flag_hot_reload(self, tmp_path, monkeypatch):
+        """Editing a permission flag in .env is picked up by load_config."""
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "DB_MCP_DATABASE=sqlserver\n"
+            "DB_MCP_CONNECTION_STRING=test\n"
+            "DB_MCP_ALLOW_DATA_ACCESS=false\n"
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("DB_MCP_PROJECT_DIR", raising=False)
+
+        # First load
+        config = load_config()
+        assert config["DB_MCP_ALLOW_DATA_ACCESS"] == "false"
+
+        # Edit .env and bump mtime
+        original_mtime = env_file.stat().st_mtime
+        env_file.write_text(
+            "DB_MCP_DATABASE=sqlserver\n"
+            "DB_MCP_CONNECTION_STRING=test\n"
+            "DB_MCP_ALLOW_DATA_ACCESS=true\n"
+        )
+        os.utime(str(env_file), (original_mtime + 1, original_mtime + 1))
+
+        # Second load should pick up the change
+        config = load_config()
+        assert config["DB_MCP_ALLOW_DATA_ACCESS"] == "true"
+
+    def test_deleted_env_file_does_not_crash(self, tmp_path, monkeypatch):
+        """Deleting .env after initial load does not crash the mtime check."""
+        env_file = tmp_path / ".env"
+        env_file.write_text("DB_MCP_ALLOW_DATA_ACCESS=false\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("DB_MCP_PROJECT_DIR", raising=False)
+
+        config_module._env_loaded = True
+        config_module._project_root = tmp_path
+        _record_env_mtimes()
+        assert len(config_module._env_mtimes) == 1
+
+        # Delete the file
+        env_file.unlink()
+
+        # Should not crash — just return False (file gone, OSError caught)
+        assert _check_env_reload() is False
+
+    def test_env_local_mtime_change_triggers_reload(self, tmp_path, monkeypatch):
+        """.env.local mtime change also triggers a reload."""
+        env_file = tmp_path / ".env"
+        env_file.write_text("DB_MCP_ALLOW_DATA_ACCESS=false\n")
+        env_local = tmp_path / ".env.local"
+        env_local.write_text("DB_MCP_ALLOW_PREVIEW=false\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("DB_MCP_PROJECT_DIR", raising=False)
+
+        config_module._env_loaded = True
+        config_module._project_root = tmp_path
+        _record_env_mtimes()
+        assert len(config_module._env_mtimes) == 2
+
+        # Only touch .env.local
+        original_mtime = env_local.stat().st_mtime
+        os.utime(str(env_local), (original_mtime + 1, original_mtime + 1))
+
+        assert _check_env_reload() is True
+
+    def test_snapshot_backend_env(self, monkeypatch):
+        """_snapshot_backend_env captures database-related env vars."""
+        monkeypatch.setenv("DB_MCP_DATABASE", "sqlserver")
+        monkeypatch.setenv("DB_MCP_CONNECTION_STRING", "test_conn")
+        monkeypatch.setenv("DB_MCP_LEGACY_DATABASE", "postgres")
+        monkeypatch.setenv("DB_MCP_LEGACY_CONNECTION_STRING", "legacy_conn")
+        monkeypatch.setenv("DB_MCP_ALLOW_DATA_ACCESS", "true")
+
+        snap = _snapshot_backend_env()
+        assert "DB_MCP_DATABASE" in snap
+        assert "DB_MCP_CONNECTION_STRING" in snap
+        assert "DB_MCP_LEGACY_DATABASE" in snap
+        assert "DB_MCP_LEGACY_CONNECTION_STRING" in snap
+        # Permission flags should NOT be captured
+        assert "DB_MCP_ALLOW_DATA_ACCESS" not in snap
+
+    def test_record_env_mtimes_stores_existing_files(self, tmp_path):
+        """_record_env_mtimes stores mtimes for files that exist."""
+        (tmp_path / ".env").write_text("X=1\n")
+        config_module._project_root = tmp_path
+
+        _record_env_mtimes()
+        env_path = str(tmp_path / ".env")
+        assert env_path in config_module._env_mtimes
+
+        # .env.local doesn't exist, should not be tracked
+        env_local_path = str(tmp_path / ".env.local")
+        assert env_local_path not in config_module._env_mtimes
+
+    def test_no_mtimes_means_no_reload(self):
+        """With empty mtimes dict, _check_env_reload returns False."""
+        config_module._env_loaded = True
+        config_module._env_mtimes.clear()
+        assert _check_env_reload() is False
 

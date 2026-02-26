@@ -79,7 +79,9 @@ def _find_project_root() -> Path:
 
 
 _env_loaded = False
+_is_reload = False
 _project_root: Path | None = None
+_env_mtimes: dict[str, float] = {}  # path -> mtime at last load
 
 
 def _get_project_root() -> Path:
@@ -87,6 +89,59 @@ def _get_project_root() -> Path:
     if _project_root is not None:
         return _project_root
     return _find_project_root()
+
+
+def _record_env_mtimes() -> None:
+    """Store the modification times of loaded .env files for hot-reload detection."""
+    global _env_mtimes
+    _env_mtimes.clear()
+    root = _get_project_root()
+    for name in (".env", ".env.local"):
+        path = root / name
+        if path.exists():
+            try:
+                _env_mtimes[str(path)] = path.stat().st_mtime
+            except OSError:
+                pass
+
+
+def _check_env_reload() -> bool:
+    """Compare current .env mtimes against stored values, trigger reload if changed.
+
+    Returns True if a reload was triggered (``_env_loaded`` reset to False).
+    """
+    global _env_loaded, _is_reload
+    if not _env_loaded or not _env_mtimes:
+        return False
+
+    for path_str, old_mtime in _env_mtimes.items():
+        try:
+            current_mtime = Path(path_str).stat().st_mtime
+            if current_mtime != old_mtime:
+                _env_loaded = False
+                _is_reload = True
+                _env_mtimes.clear()
+                return True
+        except OSError:
+            pass
+
+    return False
+
+
+def _snapshot_backend_env() -> dict[str, str]:
+    """Capture current backend-related env vars for change detection."""
+    snapshot: dict[str, str] = {}
+    for key, value in os.environ.items():
+        upper = key.upper()
+        if upper.startswith("DB_MCP_") and (
+            upper.endswith("_DATABASE")
+            or upper.endswith("_CONNECTION_STRING")
+            or upper == "DB_MCP_DATABASE"
+            or upper == "DB_MCP_CONNECTION_STRING"
+            or upper == "DB_MCP_QUERY_TIMEOUT_SECONDS"
+        ):
+            snapshot[key] = value
+    return snapshot
 
 
 def _load_env_files() -> None:
@@ -103,46 +158,58 @@ def _load_env_files() -> None:
     Prints diagnostic messages to stderr so users can verify which files were
     loaded (visible in Cursor's MCP server output pane).
     """
-    global _env_loaded, _project_root
+    global _env_loaded, _is_reload, _project_root
     if _env_loaded:
         return
     _env_loaded = True
 
     import sys
+
+    reloading = _is_reload
+    _is_reload = False
     
     project_root = _find_project_root()
     _project_root = project_root
     cwd = Path.cwd().resolve()
 
-    print(f"Working directory: {cwd}", file=sys.stderr)
-    if os.getenv("DB_MCP_PROJECT_DIR"):
-        print(f"DB_MCP_PROJECT_DIR: {os.getenv('DB_MCP_PROJECT_DIR')}", file=sys.stderr)
-    print(f"Resolved project root: {project_root}", file=sys.stderr)
+    if not reloading:
+        print(f"Working directory: {cwd}", file=sys.stderr)
+        if os.getenv("DB_MCP_PROJECT_DIR"):
+            print(f"DB_MCP_PROJECT_DIR: {os.getenv('DB_MCP_PROJECT_DIR')}", file=sys.stderr)
+        print(f"Resolved project root: {project_root}", file=sys.stderr)
     
+    # On reload, use override=True so edited values replace old ones.
+    # On first load, override=False preserves MCP env-section precedence.
+    env_override = reloading
+
     # Load .env file if it exists
     env_path = project_root / ".env"
     if env_path.exists():
-        result = load_dotenv(str(env_path), override=False)
+        result = load_dotenv(str(env_path), override=env_override)
         if result:
-            print(f"Loaded .env from {env_path}", file=sys.stderr)
-        else:
+            label = "Reloaded" if reloading else "Loaded"
+            print(f"{label} .env from {env_path}", file=sys.stderr)
+        elif not reloading:
             print(
                 f"Warning: .env file exists at {env_path} but no new variables were loaded "
                 f"(they may already be set via mcp.json env section)",
                 file=sys.stderr,
             )
-    else:
+    elif not reloading:
         print(
             f"No .env file found at {env_path} — "
             f"if this is unexpected, set DB_MCP_PROJECT_DIR to your project path",
             file=sys.stderr,
         )
     
-    # Load .env.local if it exists (takes precedence over .env)
+    # Load .env.local if it exists (always overrides)
     env_local_path = project_root / ".env.local"
     if env_local_path.exists():
         load_dotenv(str(env_local_path), override=True)
-        print(f"Loaded .env.local from {env_local_path}", file=sys.stderr)
+        label = "Reloaded" if reloading else "Loaded"
+        print(f"{label} .env.local from {env_local_path}", file=sys.stderr)
+
+    _record_env_mtimes()
 
 
 def _load_env_from_directory(directory: Path) -> bool:
@@ -174,6 +241,7 @@ def _load_env_from_directory(directory: Path) -> bool:
         print(f"Loaded .env.local from {env_local_path}", file=sys.stderr)
         loaded = True
 
+    _record_env_mtimes()
     return loaded
 
 
@@ -211,14 +279,27 @@ def load_config() -> dict[str, Any]:
     
     Automatically loads .env and .env.local files from the project root.
     Environment variables passed via MCP server env section take precedence.
+
+    On subsequent calls the .env file modification time is checked; if the
+    file was edited since last load the environment is refreshed
+    automatically (hot-reload).  When backend-related variables change the
+    database backends are re-initialized.
     
     Returns:
         Dictionary with configuration values
     """
-    # Load .env files first (if not already loaded)
+    import sys
+
+    # Snapshot backend env vars before a potential reload so we can detect changes.
+    old_backend_env = _snapshot_backend_env() if _env_loaded else None
+
+    # Check for .env file changes and trigger reload if needed.
+    reloaded = _check_env_reload()
+
+    # Load .env files (first load or reload).
     _load_env_files()
-    
-    return {
+
+    config = {
         "DB_MCP_DATABASE": os.getenv("DB_MCP_DATABASE", "").lower(),
         "DB_MCP_CONNECTION_STRING": os.getenv("DB_MCP_CONNECTION_STRING", ""),
         "DB_MCP_QUERY_TIMEOUT_SECONDS": int(os.getenv("DB_MCP_QUERY_TIMEOUT_SECONDS", "30")),
@@ -232,6 +313,41 @@ def load_config() -> dict[str, Any]:
         "DB_MCP_LOG_MAX_SIZE_MB": int(os.getenv("DB_MCP_LOG_MAX_SIZE_MB", "10")),
         "DB_MCP_LOG_BACKUP_COUNT": int(os.getenv("DB_MCP_LOG_BACKUP_COUNT", "5")),
     }
+
+    if reloaded and old_backend_env is not None:
+        new_backend_env = _snapshot_backend_env()
+        if new_backend_env != old_backend_env:
+            print("Backend configuration changed — re-initializing backends…", file=sys.stderr)
+            registry = get_registry()
+            registry.clear()
+
+            # Reset lazy-init flag in tools module so workspace detection
+            # doesn't get skipped after a registry clear.
+            _reset_lazy_init()
+
+            try:
+                initialize_backends()
+                from .main import _verify_readonly
+                _verify_readonly(config, get_registry())
+            except Exception as exc:
+                print(f"Warning: backend re-init after .env reload failed: {exc}", file=sys.stderr)
+        else:
+            print("Configuration reloaded (no backend changes).", file=sys.stderr)
+
+    return config
+
+
+def _reset_lazy_init() -> None:
+    """Reset the lazy-init flag in the tools module.
+
+    Called after a backend re-initialization so that the workspace
+    detection path is available again if needed.
+    """
+    try:
+        from . import tools as _tools_mod
+        _tools_mod._lazy_init_attempted = False
+    except Exception:
+        pass
 
 
 def _get_access_conn_ttl() -> float | None:
