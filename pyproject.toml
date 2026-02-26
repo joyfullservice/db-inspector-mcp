@@ -23,12 +23,6 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
 ]
-
-[project.urls]
-Homepage = "https://github.com/joyfullservice/db-inspector-mcp"
-Repository = "https://github.com/joyfullservice/db-inspector-mcp"
-Issues = "https://github.com/joyfullservice/db-inspector-mcp/issues"
-
 dependencies = [
     "mcp[cli]>=1.0.0",
     "pyodbc>=5.0.0",
@@ -36,6 +30,11 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "pywin32>=306; sys_platform == 'win32'",
 ]
+
+[project.urls]
+Homepage = "https://github.com/joyfullservice/db-inspector-mcp"
+Repository = "https://github.com/joyfullservice/db-inspector-mcp"
+Issues = "https://github.com/joyfullservice/db-inspector-mcp/issues"
 
 [project.optional-dependencies]
 dev = [
