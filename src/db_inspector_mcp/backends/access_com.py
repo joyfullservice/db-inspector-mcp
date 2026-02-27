@@ -3,6 +3,7 @@
 import logging
 import os
 import re
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -250,6 +251,13 @@ class AccessCOMBackend(DatabaseBackend):
     def _close_on_timer(self) -> None:
         """Called by the Timer thread when the Application TTL expires."""
         with self._com_lock:
+            if self._app is not None:
+                db_name = os.path.basename(self._db_path)
+                print(
+                    f"[{db_name}] COM Application cache expired "
+                    f"(idle {self._app_ttl}s) — releasing reference",
+                    file=sys.stderr,
+                )
             self._release_app()
             self._close_timer = None
 

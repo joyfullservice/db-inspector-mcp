@@ -1,7 +1,9 @@
 """Microsoft Access backend implementation using pyodbc."""
 
 import logging
+import os
 import re
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -57,6 +59,12 @@ class AccessODBCBackend(DatabaseBackend):
         connection_string = self._ensure_dbq_parameter(connection_string)
         super().__init__(connection_string, query_timeout_seconds)
         
+        # Short label for log messages (just the filename)
+        match = re.search(r'DBQ=([^;]+)', connection_string, re.IGNORECASE)
+        self._db_label: str = (
+            os.path.basename(match.group(1).strip()) if match else "access"
+        )
+
         # TTL connection cache state
         self._conn: pyodbc.Connection | None = None
         self._conn_lock = threading.Lock()
@@ -126,7 +134,11 @@ class AccessODBCBackend(DatabaseBackend):
         with self._conn_lock:
             # Only close if the timer hasn't been cancelled/rescheduled
             if self._conn is not None:
-                logger.debug("TTL expired — closing cached ODBC connection")
+                print(
+                    f"[{self._db_label}] ODBC connection cache expired "
+                    f"(idle {self._conn_ttl}s) — closing connection",
+                    file=sys.stderr,
+                )
                 try:
                     self._conn.close()
                 except Exception:
