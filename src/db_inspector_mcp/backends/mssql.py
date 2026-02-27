@@ -7,6 +7,7 @@ from typing import Any
 import pyodbc
 
 from .base import DatabaseBackend
+from .sql_utils import inject_top_clause, split_cte_prefix
 
 
 class MSSQLBackend(DatabaseBackend):
@@ -57,7 +58,8 @@ class MSSQLBackend(DatabaseBackend):
     
     def count_query_results(self, query: str) -> int:
         """Count row count by wrapping query in SELECT COUNT(*)."""
-        wrapped_query = f"SELECT COUNT(*) as cnt FROM ({query}) AS subquery"
+        cte, core = split_cte_prefix(query)
+        wrapped_query = f"{cte}SELECT COUNT(*) as cnt FROM ({core}) AS subquery"
         cursor = self._execute_query(wrapped_query)
         result = cursor.fetchone()
         cursor.close()
@@ -65,8 +67,8 @@ class MSSQLBackend(DatabaseBackend):
     
     def get_query_columns(self, query: str) -> list[dict[str, Any]]:
         """Get column metadata using cursor description."""
-        # Use a subquery with TOP 0 to get metadata without fetching data
-        wrapped_query = f"SELECT TOP 0 * FROM ({query}) AS subquery"
+        cte, core = split_cte_prefix(query)
+        wrapped_query = f"{cte}SELECT TOP 0 * FROM ({core}) AS subquery"
         cursor = self._execute_query(wrapped_query)
         
         columns = []
@@ -85,7 +87,8 @@ class MSSQLBackend(DatabaseBackend):
     
     def sum_query_column(self, query: str, column: str) -> float | None:
         """Compute SUM of a column from query results."""
-        wrapped_query = f"SELECT SUM([{column}]) as sum_val FROM ({query}) AS subquery"
+        cte, core = split_cte_prefix(query)
+        wrapped_query = f"{cte}SELECT SUM([{column}]) as sum_val FROM ({core}) AS subquery"
         cursor = self._execute_query(wrapped_query)
         result = cursor.fetchone()
         cursor.close()
@@ -93,22 +96,13 @@ class MSSQLBackend(DatabaseBackend):
     
     def measure_query(self, query: str, max_rows: int) -> dict[str, Any]:
         """Measure query execution time and retrieve limited rows."""
-        # Add TOP clause to limit rows
-        if "TOP " not in query.upper():
-            # Simple approach: add TOP before SELECT
-            query_upper = query.upper().strip()
-            if query_upper.startswith("SELECT"):
-                query = f"SELECT TOP {max_rows} " + query[6:].lstrip()
-            else:
-                # If it's a complex query, wrap it
-                query = f"SELECT TOP {max_rows} * FROM ({query}) AS subquery"
+        query = inject_top_clause(query, max_rows)
         
         start_time = time.time()
         cursor = self._execute_query(query)
         rows = cursor.fetchall()
         execution_time_ms = (time.time() - start_time) * 1000
         
-        # Convert rows to sanitized dictionaries (handles bytes, Decimal, etc.)
         column_names = [col[0] for col in cursor.description] if cursor.description else []
         result_rows = self._sanitize_rows(column_names, rows)
         
@@ -125,18 +119,11 @@ class MSSQLBackend(DatabaseBackend):
     
     def preview(self, query: str, max_rows: int) -> list[dict[str, Any]]:
         """Sample N rows from a query result."""
-        # Add TOP clause to limit rows
-        if "TOP " not in query.upper():
-            query_upper = query.upper().strip()
-            if query_upper.startswith("SELECT"):
-                query = f"SELECT TOP {max_rows} " + query[6:].lstrip()
-            else:
-                query = f"SELECT TOP {max_rows} * FROM ({query}) AS subquery"
+        query = inject_top_clause(query, max_rows)
         
         cursor = self._execute_query(query)
         rows = cursor.fetchall()
         
-        # Convert rows to sanitized dictionaries (handles bytes, Decimal, etc.)
         column_names = [col[0] for col in cursor.description] if cursor.description else []
         result = self._sanitize_rows(column_names, rows)
         

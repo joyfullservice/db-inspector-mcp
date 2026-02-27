@@ -145,23 +145,15 @@ _ACCESS_ERROR_HINTS: list[tuple[re.Pattern[str], str | None, str]] = [
             "Call db_sql_help('limits') for examples."
         ),
     ),
-    # Wildcard-related errors (% or _ in error message or query context)
+    # Wildcard-related errors — Access ODBC uses ANSI wildcards (% and _)
     (
         re.compile(r"(invalid|syntax|operator).*LIKE", re.IGNORECASE),
-        None,
+        r"[*?]",
         (
-            "Access SQL uses * and ? as wildcard characters in LIKE, "
-            "not % and _. Call db_sql_help('wildcards') for examples."
-        ),
-    ),
-    # DISTINCT errors → suggest GROUP BY
-    (
-        re.compile(r"missing operator", re.IGNORECASE),
-        r"\bDISTINCT\b",
-        (
-            "SELECT DISTINCT can be unreliable in Access. "
-            "Use GROUP BY as a more reliable alternative. "
-            "Call db_sql_help('distinct') for examples."
+            "Access via ODBC uses standard ANSI wildcards in LIKE: "
+            "% (any characters) and _ (single character). "
+            "The Access-native * and ? wildcards do not work through ODBC. "
+            "Call db_sql_help('wildcards') for examples."
         ),
     ),
     # "undefined function" → VBA UDF or domain function needs COM backend
@@ -241,10 +233,9 @@ mcp = FastMCP(
         "Access SQL differs significantly from standard SQL. Key differences:\n"
         "- Multiple JOINs require parentheses: FROM ((A JOIN B ON ...) JOIN C ON ...)\n"
         "- Use IIF(cond, true, false) instead of CASE WHEN\n"
-        "- Use * and ? for wildcards in LIKE, not % and _\n"
+        "- Use % and _ for wildcards in LIKE (ANSI standard, not Access-native * and ?)\n"
         "- Use #2024-01-15# for dates, not quotes\n"
         "- Use TOP N instead of LIMIT N\n"
-        "- Prefer GROUP BY over SELECT DISTINCT (DISTINCT is unreliable in Access)\n"
         "- CTEs (WITH ... AS) are NOT supported in Access\n"
         "- EXPLAIN / execution plans are NOT supported in Access\n"
         "- VBA UDFs and domain functions (DLookup, DCount) require access_com backend\n"
@@ -1216,23 +1207,28 @@ _SQL_HELP = {
             "pattern": "#YYYY-MM-DD# or #YYYY-MM-DD HH:MM:SS#"
         },
         "wildcards": {
-            "title": "Wildcard Characters in Access SQL",
-            "description": "Access uses * and ? instead of % and _ for LIKE patterns.",
+            "title": "Wildcard Characters in Access SQL (via ODBC)",
+            "description": (
+                "Through ODBC, Access uses standard ANSI wildcards: "
+                "% (any characters) and _ (single character). "
+                "The Access-native wildcards * and ? do NOT work through ODBC — "
+                "they match nothing. Only use * and ? in the Access query designer."
+            ),
             "examples": [
                 {
-                    "description": "Match any characters (use * not %)",
-                    "sql": "SELECT * FROM users WHERE name LIKE '*Smith*'"
+                    "description": "Match any characters (use %)",
+                    "sql": "SELECT * FROM users WHERE name LIKE '%Smith%'"
                 },
                 {
-                    "description": "Match single character (use ? not _)",
-                    "sql": "SELECT * FROM products WHERE code LIKE 'A?1'"
+                    "description": "Match single character (use _)",
+                    "sql": "SELECT * FROM products WHERE code LIKE 'A_1'"
                 },
                 {
                     "description": "Combined wildcards",
-                    "sql": "SELECT * FROM files WHERE filename LIKE 'report_????_*'"
+                    "sql": "SELECT * FROM files WHERE filename LIKE 'report_____%'"
                 }
             ],
-            "pattern": "* = any characters, ? = single character"
+            "pattern": "% = any characters, _ = single character (ANSI standard via ODBC)"
         },
         "limits": {
             "title": "Limiting Rows in Access SQL",
@@ -1280,27 +1276,30 @@ _SQL_HELP = {
             "pattern": "And, Or, Not, <> (not &&, ||, !=)"
         },
         "distinct": {
-            "title": "DISTINCT vs GROUP BY in Access SQL",
+            "title": "DISTINCT and GROUP BY in Access SQL",
             "description": (
-                "SELECT DISTINCT can be unreliable in Access, especially with "
-                "complex expressions or multiple columns. GROUP BY is a more "
-                "reliable alternative for deduplication."
+                "SELECT DISTINCT works correctly in Access via ODBC, including "
+                "with table aliases, multiple columns, JOINs, NULLs, and "
+                "expressions. Both DISTINCT and GROUP BY produce identical "
+                "results. If you get a 'missing operator' error with DISTINCT, "
+                "the cause is almost certainly unparenthesized JOINs — see "
+                "db_sql_help('joins')."
             ),
             "examples": [
                 {
-                    "description": "Unreliable — DISTINCT may fail with 'missing operator'",
+                    "description": "DISTINCT with alias — works fine",
                     "sql": "SELECT DISTINCT p.category FROM products p WHERE p.category IS NOT NULL"
                 },
                 {
-                    "description": "Reliable — use GROUP BY instead",
+                    "description": "GROUP BY equivalent",
                     "sql": "SELECT p.category FROM products p WHERE p.category IS NOT NULL GROUP BY p.category"
                 },
                 {
-                    "description": "Multiple columns",
-                    "sql": "SELECT category, status FROM products GROUP BY category, status"
+                    "description": "DISTINCT with multiple columns and JOINs",
+                    "sql": "SELECT DISTINCT o.status, c.region FROM (orders o INNER JOIN customers c ON o.customer_id = c.id)"
                 }
             ],
-            "pattern": "Replace SELECT DISTINCT col1, col2 FROM ... with SELECT col1, col2 FROM ... GROUP BY col1, col2"
+            "pattern": "Both SELECT DISTINCT and GROUP BY work. If DISTINCT fails, check JOIN parentheses first."
         },
         "aggregates": {
             "title": "Conditional Aggregation in Access SQL",
@@ -1360,12 +1359,12 @@ _SQL_HELP = {
                 "Multiple JOINs": "Wrap in parentheses: FROM ((A JOIN B ON ...) JOIN C ON ...)",
                 "Conditionals": "Use IIF(cond, true, false) not CASE WHEN",
                 "Booleans": "Use True/False keywords",
-                "Wildcards": "Use * and ? in LIKE, not % and _",
+                "Wildcards": "Use % and _ in LIKE (ANSI standard — not * and ? through ODBC)",
                 "Dates": "Use #2024-01-15# format",
                 "Row limit": "Use SELECT TOP N not LIMIT N",
                 "Logical ops": "Use And/Or not &&/||",
                 "Not equal": "Use <> not !=",
-                "DISTINCT": "Prefer GROUP BY over SELECT DISTINCT (more reliable)",
+                "DISTINCT": "Works fine — if you get errors, check JOIN parentheses first",
                 "VBA UDFs": "Require access_com backend — call db_sql_help('udfs')"
             }
         }
@@ -1411,12 +1410,12 @@ def db_sql_help(topic: str | None = None, database: str | None = None) -> dict[s
     - "joins": Multiple JOINs require parentheses
     - "conditionals": IIF() instead of CASE WHEN
     - "dates": #YYYY-MM-DD# date literals
-    - "wildcards": * and ? instead of % and _
+    - "wildcards": % and _ through ODBC (not * and ?)
     - "limits": TOP N instead of LIMIT
     - "booleans": True/False keywords
     - "operators": And/Or/<> operators
     - "aggregates": Sum(IIF(...)) for conditional aggregation
-    - "distinct": GROUP BY is more reliable than SELECT DISTINCT
+    - "distinct": DISTINCT works fine; common errors are usually JOIN-related
     - "udfs": VBA user-defined functions and domain functions (DLookup, DCount, etc.)
     - "all": Quick reference summary of all differences
     

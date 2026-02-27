@@ -8,6 +8,66 @@
 
 ---
 
+## 2026-02-27 — Correct Access SQL dialect guidance (DISTINCT and wildcards)
+
+**Trigger**: While fixing the TOP N injection bugs (below), we questioned whether the Access SQL guidance in `db_sql_help` and the MCP server instructions was empirically accurate. Two claims were tested against live Access databases via ODBC and found to be wrong.
+
+**Claims tested** (10 live query pairs for DISTINCT, 4 for wildcards):
+
+1. **"SELECT DISTINCT is unreliable in Access"** — FALSE. DISTINCT returned identical results to GROUP BY in every scenario tested: single column, multiple columns, table aliases, multiple parenthesized JOINs, IIF expressions, NULLs, CStr conversions, and complex WHERE clauses with 3-table joins. The "unreliable" claim likely originated from old Jet engine lore or from confusion with the separate issue of unparenthesized JOINs (which cause `missing operator` errors regardless of DISTINCT).
+
+2. **"Access uses * and ? for LIKE wildcards, not % and _"** — BACKWARDS for ODBC. The Access ODBC driver operates in ANSI SQL mode where `%` and `_` are the correct wildcards. `*` and `?` are Access-native (Jet/ACE) wildcards used only in the Access query designer and DAO. Through ODBC, `LIKE '*Wire*'` matches zero rows while `LIKE '%Wire%'` matches correctly.
+
+**Other claims verified correct**: `<>` (not `!=`), `IIF` (not `CASE WHEN`), `TOP N` (not `LIMIT`), `AND`/`OR` (not `&&`/`||`), `#date#` literals.
+
+**Decision**: Updated all Access SQL guidance to reflect empirical reality:
+- **DISTINCT**: Removed "unreliable" language. New guidance says both DISTINCT and GROUP BY work; if DISTINCT fails, check JOIN parentheses first.
+- **Wildcards**: Flipped from `*`/`?` to `%`/`_`. New guidance explains ODBC uses ANSI wildcards and that Access-native wildcards don't work through ODBC.
+- **Error hint for DISTINCT**: Removed entirely (was steering agents to GROUP BY for a non-existent problem).
+- **Error hint for wildcards**: Updated to detect `*`/`?` in the query and tell agents to use `%`/`_` instead.
+
+**What this rules out**: If there ARE edge cases where Access DISTINCT truly fails via ODBC, we no longer warn about them preemptively. The JOIN-parentheses hint should catch the most common false attribution. The wildcard guidance is now correct for ODBC but would be wrong for DAO — however, the DAO fallback path (access_com backend with VBA UDFs) is a rare codepath and agents don't construct LIKE queries differently for it.
+
+**Relevant files**:
+- `src/db_inspector_mcp/tools.py` — server instructions, `_ACCESS_ERROR_HINTS`, `db_sql_help` topics (distinct, wildcards, all)
+
+---
+
+## 2026-02-27 — Fix TOP N injection and subquery wrapping for whitespace, DISTINCT, and CTEs
+
+**Trigger**: Three bugs discovered during production use on a SQL Server database. (1) Queries with leading whitespace before `SELECT` produced invalid SQL — the `TOP N` insertion point was calculated from the original string offset, not the stripped position, so `"\nSELECT col"` became `"SELECT TOP 10 ECT col"` (fragmenting `SELECT` and creating an `Invalid column name 'T'` error). (2) `SELECT DISTINCT` queries got `TOP N` inserted between `SELECT` and `DISTINCT`, producing the invalid `SELECT TOP N DISTINCT ...` instead of the correct `SELECT DISTINCT TOP N ...`. (3) CTE queries (`WITH ... AS`) broke all tools — subquery wrapping placed `WITH` inside parentheses (`FROM (WITH cte AS (...) SELECT ...)`), and TOP injection failed because the query starts with `WITH`, not `SELECT`.
+
+All three bugs were confirmed in usage logs showing repeated failures with `Invalid column name 'T'`, `Incorrect syntax near the keyword 'DISTINCT'`, and `Incorrect syntax near the keyword 'WITH'`.
+
+**Options explored**:
+- **Inline fixes in each backend method** — patch the `query[6:]` offset, add DISTINCT detection, and add CTE splitting in each of the 15+ affected call sites. Error-prone and duplicative.
+- **Shared utility module (chosen)** — extract the SQL manipulation logic into `sql_utils.py` with two functions: `inject_top_clause(query, n)` for TOP injection and `split_cte_prefix(query)` for CTE-aware subquery wrapping. Each backend method calls these instead of doing its own string manipulation.
+
+**Decision**: New `backends/sql_utils.py` module with three public functions:
+
+1. `inject_top_clause(query, n)` — strips whitespace, detects DISTINCT/ALL modifiers (inserts TOP after them), handles CTEs (finds the final top-level SELECT via parenthesis-depth tracking), and skips injection when TOP is already present.
+2. `split_cte_prefix(query)` — splits a CTE query into `(cte_definitions, final_select)` so callers can wrap only the final SELECT while keeping CTE definitions at the top level. Returns `("", query)` for non-CTE queries.
+3. `_find_final_select_pos(sql)` — internal helper that finds the last SELECT keyword at parenthesis depth 0, skipping SELECTs inside subqueries, CTEs, and single-quoted string literals.
+
+The `_find_final_select_pos` parser tracks three things: parenthesis depth, single-quoted string boundaries (with escaped quote handling), and keyword word boundaries. It does not track SQL comments (`--`, `/* */`), which is a known limitation unlikely to matter in practice.
+
+Affected backend methods (all updated to use the shared helpers):
+- **TOP injection**: `measure_query` and `preview` in `MSSQLBackend`, `AccessODBCBackend`, and `AccessCOMBackend` DAO fallback
+- **Subquery wrapping**: `count_query_results`, `get_query_columns`, and `sum_query_column` in all three backends
+
+PostgreSQL is unaffected: it uses LIMIT (appended at the end, so whitespace/DISTINCT don't matter) and supports CTEs inside subqueries natively.
+
+**What this rules out**: Nothing. The shared helpers are purely additive. The `"TOP " in query.upper()` guard still prevents double-injection but could false-positive on `TOP` inside a string literal or column name — this is a pre-existing edge case, not a regression.
+
+**Relevant files**:
+- `src/db_inspector_mcp/backends/sql_utils.py` — new module with `inject_top_clause`, `split_cte_prefix`, `_find_final_select_pos`
+- `src/db_inspector_mcp/backends/mssql.py` — 5 query methods updated to use helpers
+- `src/db_inspector_mcp/backends/access_odbc.py` — 5 query methods updated to use helpers
+- `src/db_inspector_mcp/backends/access_com.py` — 5 DAO fallback methods updated to use helpers
+- `tests/test_sql_utils.py` — 45 tests covering all three bugs and edge cases
+
+---
+
 ## 2026-02-27 — VBA UDF support via ODBC-first, DAO-fallback in Access COM backend
 
 **Trigger**: Access queries that reference VBA user-defined functions or domain aggregate functions (`DLookup`, `DCount`, `DSum`, etc.) fail when executed through the ODBC driver because it lacks the Access Application context.  The COM backend already delegates all SQL execution to an internal ODBC backend, so these queries fail even though the Application is available.
@@ -310,6 +370,8 @@ The resolver is called in two places: `get_backend()` and `initialize_backends()
 
 Also removed the CTE example from `db_count_query_results` docstring (CTEs don't work in Access, the primary use case), and added an Access-specific note to the `db_explain` docstring.
 
+> **⚠ Partially superseded** (2026-02-27): Item 3 ("DISTINCT vs GROUP BY unreliability") was empirically disproven — see "Correct Access SQL dialect guidance" entry above. The DISTINCT guidance was removed from the server instructions. Item 4 (wildcards using `*` and `?`) was also corrected — Access ODBC uses ANSI `%` and `_`.
+
 **What this rules out**: Nothing. Instructions can be further refined as real external agent usage patterns emerge. The current transcripts were primarily development sessions, so these changes are based on code analysis rather than observed agent failures.
 
 **Relevant files**: `src/db_inspector_mcp/tools.py`
@@ -495,6 +557,8 @@ Both paths set `UserControl = True` and make newly created instances visible. Th
 
 **Decision**: Inline helper in `tools.py`. Five patterns are matched: missing-operator+JOIN (parenthesized JOINs), missing-operator+CASE (use IIF), syntax-error+LIMIT (use TOP N), LIKE-related errors (use * and ? wildcards), and missing-operator+DISTINCT (use GROUP BY). The helper is a no-op for non-Access dialects. This keeps the fix localized and easy to extend — adding a new pattern is one tuple in `_ACCESS_ERROR_HINTS`.
 
+> **⚠ Partially superseded** (2026-02-27): The DISTINCT hint was removed (DISTINCT works fine; the errors were caused by unparenthesized JOINs, not DISTINCT itself). The wildcard hint was corrected — Access ODBC uses ANSI wildcards (`%` and `_`), not `*` and `?`. See "Correct Access SQL dialect guidance" entry above.
+
 **What this rules out**: Nothing permanent. If the hint list grows large or needs to be shared with other modules (e.g., usage_logging pattern detection), it could be extracted to a shared module. The current approach is sufficient for the 5 known patterns.
 
 **Relevant files**: `src/db_inspector_mcp/tools.py`
@@ -502,6 +566,8 @@ Both paths set `UserControl = True` and make newly created instances visible. Th
 ---
 
 ## 2026-02-12 — Added "distinct" topic to db_sql_help for Access
+
+> **⚠ Superseded** (2026-02-27): The premise of this entry — that SELECT DISTINCT is unreliable in Access — was empirically disproven by testing 10 query scenarios against live Access databases via ODBC. The topic was rewritten to say DISTINCT works fine and to point agents to JOIN parenthesization as the likely cause of errors. See "Correct Access SQL dialect guidance" entry above.
 
 **Trigger**: Real-world usage showed that `SELECT DISTINCT` is unreliable in Access and agents don't know to use `GROUP BY` instead. The `db_sql_help` tool already had 8 Access-specific topics but was missing this one.
 

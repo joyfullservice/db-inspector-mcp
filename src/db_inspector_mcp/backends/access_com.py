@@ -8,6 +8,8 @@ import time
 from contextlib import contextmanager
 from typing import Any
 
+from .sql_utils import inject_top_clause, split_cte_prefix
+
 try:
     import pythoncom
     import pywintypes
@@ -757,12 +759,14 @@ class AccessCOMBackend(DatabaseBackend):
     # ------------------------------------------------------------------
 
     def _dao_count_query_results(self, query: str) -> int:
-        wrapped = f"SELECT COUNT(*) AS cnt FROM ({query}) AS subquery"
+        cte, core = split_cte_prefix(query)
+        wrapped = f"{cte}SELECT COUNT(*) AS cnt FROM ({core}) AS subquery"
         _, rows = self._dao_execute(wrapped, max_rows=1)
         return rows[0][0] if rows else 0
 
     def _dao_get_query_columns(self, query: str) -> list[dict[str, Any]]:
-        wrapped = f"SELECT TOP 0 * FROM ({query}) AS subquery"
+        cte, core = split_cte_prefix(query)
+        wrapped = f"{cte}SELECT TOP 0 * FROM ({core}) AS subquery"
         dbOpenSnapshot = 4
         with self._dao_currentdb() as db:
             rs = db.OpenRecordset(wrapped, dbOpenSnapshot)
@@ -782,19 +786,15 @@ class AccessCOMBackend(DatabaseBackend):
                 rs.Close()
 
     def _dao_sum_query_column(self, query: str, column: str) -> float | None:
-        wrapped = f"SELECT SUM([{column}]) AS sum_val FROM ({query}) AS subquery"
+        cte, core = split_cte_prefix(query)
+        wrapped = f"{cte}SELECT SUM([{column}]) AS sum_val FROM ({core}) AS subquery"
         _, rows = self._dao_execute(wrapped, max_rows=1)
         if rows and rows[0][0] is not None:
             return rows[0][0]
         return None
 
     def _dao_measure_query(self, query: str, max_rows: int) -> dict[str, Any]:
-        if "TOP " not in query.upper():
-            query_upper = query.upper().strip()
-            if query_upper.startswith("SELECT"):
-                query = f"SELECT TOP {max_rows} " + query[6:].lstrip()
-            else:
-                query = f"SELECT TOP {max_rows} * FROM ({query}) AS subquery"
+        query = inject_top_clause(query, max_rows)
 
         start_time = time.time()
         _, rows = self._dao_execute(query, max_rows=max_rows)
@@ -808,12 +808,7 @@ class AccessCOMBackend(DatabaseBackend):
         }
 
     def _dao_preview(self, query: str, max_rows: int) -> list[dict[str, Any]]:
-        if "TOP " not in query.upper():
-            query_upper = query.upper().strip()
-            if query_upper.startswith("SELECT"):
-                query = f"SELECT TOP {max_rows} " + query[6:].lstrip()
-            else:
-                query = f"SELECT TOP {max_rows} * FROM ({query}) AS subquery"
+        query = inject_top_clause(query, max_rows)
 
         col_names, rows = self._dao_execute(query, max_rows=max_rows)
         return [{col: val for col, val in zip(col_names, row)} for row in rows]
