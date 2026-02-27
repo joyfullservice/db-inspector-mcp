@@ -164,6 +164,30 @@ _ACCESS_ERROR_HINTS: list[tuple[re.Pattern[str], str | None, str]] = [
             "Call db_sql_help('distinct') for examples."
         ),
     ),
+    # "undefined function" → VBA UDF or domain function needs COM backend
+    (
+        re.compile(r"undefined function", re.IGNORECASE),
+        None,
+        (
+            "The query references a VBA user-defined function or Access domain "
+            "function (DLookup, DCount, etc.) that is not available via ODBC. "
+            "Use the access_com backend (DB_MCP_DATABASE=access_com) which "
+            "executes these queries through the Application context. "
+            "Call db_sql_help('udfs') for details."
+        ),
+    ),
+    # "too few parameters" → may be an unresolved VBA UDF
+    (
+        re.compile(r"too few parameters", re.IGNORECASE),
+        None,
+        (
+            "The ODBC driver could not resolve all identifiers in the query. "
+            "If the query calls VBA functions or Access domain functions "
+            "(DLookup, DCount, Nz on columns, etc.), use the access_com backend "
+            "(DB_MCP_DATABASE=access_com) which can resolve them. "
+            "Call db_sql_help('udfs') for details."
+        ),
+    ),
 ]
 
 
@@ -223,7 +247,14 @@ mcp = FastMCP(
         "- Prefer GROUP BY over SELECT DISTINCT (DISTINCT is unreliable in Access)\n"
         "- CTEs (WITH ... AS) are NOT supported in Access\n"
         "- EXPLAIN / execution plans are NOT supported in Access\n"
+        "- VBA UDFs and domain functions (DLookup, DCount) require access_com backend\n"
         "Call db_sql_help('all') for complete Access syntax reference.\n\n"
+        "**VBA UDF support (access_com only):**\n"
+        "Queries referencing VBA user-defined functions or domain functions "
+        "(DLookup, DCount, DSum, etc.) are automatically handled by the access_com "
+        "backend. If ODBC cannot resolve a function, the query is retried via DAO "
+        "CurrentDb which has access to the compiled VBA project. This is transparent — "
+        "no special syntax or flags are needed.\n\n"
         "**Error handling:**\n"
         "When an Access query fails, the error message includes an actionable hint "
         "identifying the likely cause and referencing the relevant db_sql_help() topic. "
@@ -1290,6 +1321,38 @@ _SQL_HELP = {
             ],
             "pattern": "Sum(IIF(condition, 1, 0)) for COUNT, Sum(IIF(condition, value, 0)) for SUM"
         },
+        "udfs": {
+            "title": "VBA User-Defined Functions and Domain Functions in Access SQL",
+            "description": (
+                "Access queries can call VBA functions defined in modules and "
+                "built-in domain aggregate functions. These require the access_com "
+                "backend (not access_odbc) because they need the Application context "
+                "to resolve VBA code. With access_com, queries containing UDFs are "
+                "automatically executed via DAO when ODBC cannot resolve them."
+            ),
+            "examples": [
+                {
+                    "description": "Query calling a VBA UDF",
+                    "sql": "SELECT *, FormatFullName(FirstName, LastName) AS FullName FROM Customers"
+                },
+                {
+                    "description": "Domain aggregate function — DLookup",
+                    "sql": "SELECT *, DLookup('Name', 'Categories', 'ID=' & CategoryID) AS CategoryName FROM Products"
+                },
+                {
+                    "description": "Domain aggregate function — DCount",
+                    "sql": "SELECT CustomerID, DCount('*', 'Orders', 'CustomerID=' & CustomerID) AS OrderCount FROM Customers"
+                },
+                {
+                    "description": "Nz() for null handling (works via ODBC too, but complex expressions may not)",
+                    "sql": "SELECT Nz(Phone, 'N/A') AS Phone FROM Customers"
+                },
+            ],
+            "pattern": (
+                "VBA UDFs and domain functions (DLookup, DCount, DSum, DAvg, DFirst, DLast) "
+                "require access_com backend. Set DB_MCP_DATABASE=access_com."
+            ),
+        },
         "all": {
             "title": "Access SQL Quick Reference",
             "description": "Key differences from standard SQL.",
@@ -1302,7 +1365,8 @@ _SQL_HELP = {
                 "Row limit": "Use SELECT TOP N not LIMIT N",
                 "Logical ops": "Use And/Or not &&/||",
                 "Not equal": "Use <> not !=",
-                "DISTINCT": "Prefer GROUP BY over SELECT DISTINCT (more reliable)"
+                "DISTINCT": "Prefer GROUP BY over SELECT DISTINCT (more reliable)",
+                "VBA UDFs": "Require access_com backend — call db_sql_help('udfs')"
             }
         }
     },
@@ -1353,6 +1417,7 @@ def db_sql_help(topic: str | None = None, database: str | None = None) -> dict[s
     - "operators": And/Or/<> operators
     - "aggregates": Sum(IIF(...)) for conditional aggregation
     - "distinct": GROUP BY is more reliable than SELECT DISTINCT
+    - "udfs": VBA user-defined functions and domain functions (DLookup, DCount, etc.)
     - "all": Quick reference summary of all differences
     
     Use this tool when:
@@ -1375,7 +1440,7 @@ def db_sql_help(topic: str | None = None, database: str | None = None) -> dict[s
         # Returns IIF() examples
     
     Args:
-        topic: Help topic (joins, conditionals, dates, wildcards, limits, booleans, operators, aggregates, distinct, all).
+        topic: Help topic (joins, conditionals, dates, wildcards, limits, booleans, operators, aggregates, distinct, udfs, all).
                If None, returns "all" summary.
         database: Database name to get dialect-specific help for (uses default if not specified)
         

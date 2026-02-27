@@ -8,6 +8,39 @@
 
 ---
 
+## 2026-02-27 — VBA UDF support via ODBC-first, DAO-fallback in Access COM backend
+
+**Trigger**: Access queries that reference VBA user-defined functions or domain aggregate functions (`DLookup`, `DCount`, `DSum`, etc.) fail when executed through the ODBC driver because it lacks the Access Application context.  The COM backend already delegates all SQL execution to an internal ODBC backend, so these queries fail even though the Application is available.
+
+**Options explored**:
+
+- **DAO-only execution** — Replace ODBC with DAO for all queries in the COM backend.  Simpler code path, but DAO Recordset iteration is slower than ODBC for large result sets (out-of-process COM call per row), and loses ODBC's connection-pooling benefits.
+- **ODBC-first with DAO fallback (chosen)** — Try ODBC first.  If it fails with a UDF-related error ("undefined function" or "too few parameters"), retry via DAO `CurrentDb().OpenRecordset()`.  Zero overhead on the happy path; transparent fallback for UDF queries.
+- **Explicit DAO mode parameter** — Add a `use_dao=True` flag to query tools.  Most explicit, but requires API changes and puts the burden on the caller to know when DAO is needed.
+
+**Decision**: ODBC-first with DAO fallback.  Each public query method (`count_query_results`, `get_query_columns`, `sum_query_column`, `measure_query`, `preview`) catches exceptions, checks `_is_udf_error(e)` against two regex patterns, and retries via a parallel `_dao_*` method if matched.
+
+Key design details:
+
+- **CurrentDb requirement**: VBA modules are compiled into the Application's CurrentDb project.  `DBEngine.OpenDatabase()` cannot resolve them.  A dedicated `_dao_currentdb()` context manager guarantees `CurrentDb()` by calling `_ensure_current_db(app)` before yielding the DAO Database.
+- **CurrentDb lifecycle**: The yielded DAO Database is owned by the Application — callers must NOT call `.Close()` on it.  Only Recordsets opened from it are explicitly closed (in `_dao_execute`'s `try/finally`).  The COM proxy goes out of scope when the context manager exits.
+- **Error detection heuristic**: `_UDF_ERROR_PATTERNS` matches "undefined function" (explicit) and "too few parameters" (ODBC treats unrecognised function calls as parameter placeholders).  Non-matching errors propagate without retry.
+- **DAO field types**: `_DAO_FIELD_TYPES` maps DAO `Field.Type` integer codes to human-readable names for `get_query_columns` output.
+
+Also added:
+- UDF error hints in `_ACCESS_ERROR_HINTS` (for ODBC-only backends — suggests switching to `access_com`)
+- `db_sql_help('udfs')` topic with VBA UDF and domain function examples
+- MCP server instructions updated to mention VBA UDF support
+
+**What this rules out**: Pure DAO execution mode (no way to force DAO without first failing on ODBC).  If a query triggers a "too few parameters" error for a reason unrelated to UDFs, it will be retried via DAO (adding latency but producing a potentially more descriptive DAO error).
+
+**Relevant files**:
+- `src/db_inspector_mcp/backends/access_com.py` — `_dao_currentdb()`, `_dao_execute()`, `_is_udf_error()`, `_dao_*` query methods, ODBC→DAO fallback in public methods
+- `src/db_inspector_mcp/tools.py` — UDF error hints, `db_sql_help('udfs')`, updated MCP instructions
+- `tests/test_backends.py` — 8 new unit tests for DAO fallback behaviour
+
+---
+
 ## 2026-02-27 — Composite `@db_tool` decorator for config hot-reload and logging
 
 **Trigger**: Two interrelated bugs discovered during production use. (1) `.env` hot-reload only triggered on 2 of 13 tools (`db_preview` and `db_compare_queries` via `check_data_access()` -> `load_config()`). The other 11 tools never called `load_config()`, so editing `.env` had no effect until server restart. (2) The logging system cached `_logging_enabled = False` permanently when `_initialize_logging()` ran before the lazy `.env` load populated `DB_MCP_ENABLE_LOGGING`. Logging was silently disabled for two weeks after the lazy-init change on Feb 17.

@@ -431,6 +431,309 @@ def test_access_com_list_views():
 
 
 # =============================================================================
+# DAO fallback tests for VBA UDF support (Access COM backend)
+# =============================================================================
+
+def _make_dao_recordset(columns, rows):
+    """Create a mock DAO Recordset with the given columns and rows.
+
+    Args:
+        columns: list of (name, dao_type) tuples
+        rows: list of lists of values (one inner list per row)
+
+    Returns:
+        MagicMock configured as a DAO Recordset
+    """
+    rs = MagicMock()
+    rs.Fields.Count = len(columns)
+
+    fields = []
+    for i, (name, dao_type) in enumerate(columns):
+        field = MagicMock()
+        field.Name = name
+        field.Type = dao_type
+        field.Required = False
+        field.Size = 50
+        fields.append(field)
+
+    # Fields(i) and Fields("name") both need to work
+    field_by_name = {f.Name: f for f in fields}
+
+    def field_accessor(key):
+        if isinstance(key, int):
+            return fields[key]
+        return field_by_name[key]
+
+    rs.Fields.side_effect = field_accessor
+
+    # EOF / MoveNext: iterate through rows then signal EOF
+    row_iter = iter(rows)
+    current_row = [None]  # mutable container
+
+    def advance():
+        try:
+            current_row[0] = next(row_iter)
+            for i, val in enumerate(current_row[0]):
+                fields[i].Value = val
+        except StopIteration:
+            current_row[0] = None
+
+    # Load first row
+    if rows:
+        current_row[0] = rows[0]
+        for i, val in enumerate(rows[0]):
+            fields[i].Value = val
+        remaining = iter(rows[1:])
+    else:
+        remaining = iter([])
+
+    # Track position for EOF
+    position = {"idx": 0, "total": len(rows)}
+
+    def move_next():
+        position["idx"] += 1
+
+    # EOF returns True when we've gone past the last row
+    type(rs).EOF = property(lambda self: position["idx"] >= position["total"])
+    rs.MoveNext = move_next
+
+    # When MoveNext is called, update field values
+    original_move_next = rs.MoveNext
+
+    def move_next_with_values():
+        position["idx"] += 1
+        if position["idx"] < position["total"]:
+            for i, val in enumerate(rows[position["idx"]]):
+                fields[i].Value = val
+
+    rs.MoveNext = move_next_with_values
+
+    return rs
+
+
+def _make_com_backend_with_currentdb(mock_current_db):
+    """Create an AccessCOMBackend wired to use the given mock CurrentDb.
+
+    Returns (backend, mock_app).  Caller must cancel backend._close_timer.
+    """
+    connection_string = "Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\test.accdb;"
+
+    mock_app = MagicMock()
+    mock_app.CurrentDb.return_value = mock_current_db
+    mock_app.hWndAccessApp.return_value = 0
+    mock_current_db.Name = "C:\\test.accdb"
+
+    with patch('db_inspector_mcp.backends.access_com.win32com.client') as mock_win32com, \
+         patch('db_inspector_mcp.backends.access_com.gencache') as mock_gencache:
+        mock_win32com.GetObject.side_effect = Exception("No existing database")
+        mock_gencache.EnsureDispatch.return_value = mock_app
+        backend = AccessCOMBackend(connection_string, 30)
+
+    # Pre-set the app so _get_access_app uses it directly
+    backend._app = mock_app
+    return backend, mock_app
+
+
+def test_access_com_dao_fallback_on_undefined_function():
+    """ODBC 'undefined function' error triggers DAO fallback for count."""
+    mock_current_db = MagicMock()
+    mock_current_db.Name = "C:\\test.accdb"
+
+    rs = _make_dao_recordset([("cnt", 4)], [[42]])
+    mock_current_db.OpenRecordset.return_value = rs
+
+    backend, _ = _make_com_backend_with_currentdb(mock_current_db)
+
+    # Make ODBC raise a UDF error
+    backend._odbc_backend.count_query_results = MagicMock(
+        side_effect=Exception("(-3025) undefined function 'MyVBAFunc' in expression")
+    )
+
+    result = backend.count_query_results("SELECT MyVBAFunc(ID) FROM TestTable")
+    assert result == 42
+
+    # Verify ODBC was tried first
+    backend._odbc_backend.count_query_results.assert_called_once()
+    # Verify DAO recordset was used and closed
+    rs.Close.assert_called_once()
+
+    if backend._close_timer is not None:
+        backend._close_timer.cancel()
+
+
+def test_access_com_dao_fallback_on_too_few_parameters():
+    """ODBC 'too few parameters' error triggers DAO fallback for preview."""
+    mock_current_db = MagicMock()
+    mock_current_db.Name = "C:\\test.accdb"
+
+    rs = _make_dao_recordset(
+        [("ID", 4), ("Name", 10)],
+        [[1, "Alice"], [2, "Bob"]],
+    )
+    mock_current_db.OpenRecordset.return_value = rs
+
+    backend, _ = _make_com_backend_with_currentdb(mock_current_db)
+
+    backend._odbc_backend.preview = MagicMock(
+        side_effect=Exception("Too few parameters. Expected 1. (-3025)")
+    )
+
+    result = backend.preview("SELECT MyUDF(Name) FROM TestTable", max_rows=10)
+    assert len(result) == 2
+    assert result[0]["ID"] == 1
+    assert result[1]["Name"] == "Bob"
+
+    backend._odbc_backend.preview.assert_called_once()
+    rs.Close.assert_called_once()
+
+    if backend._close_timer is not None:
+        backend._close_timer.cancel()
+
+
+def test_access_com_no_dao_fallback_on_syntax_error():
+    """Non-UDF errors (e.g. syntax errors) propagate without DAO retry."""
+    mock_current_db = MagicMock()
+    mock_current_db.Name = "C:\\test.accdb"
+
+    backend, _ = _make_com_backend_with_currentdb(mock_current_db)
+
+    backend._odbc_backend.count_query_results = MagicMock(
+        side_effect=Exception("Syntax error in query expression")
+    )
+
+    with pytest.raises(Exception, match="Syntax error"):
+        backend.count_query_results("SELECT BAD SYNTAX")
+
+    # DAO should NOT have been called
+    mock_current_db.OpenRecordset.assert_not_called()
+
+    if backend._close_timer is not None:
+        backend._close_timer.cancel()
+
+
+def test_access_com_dao_fallback_also_fails():
+    """When both ODBC and DAO fail, the DAO error is raised."""
+    mock_current_db = MagicMock()
+    mock_current_db.Name = "C:\\test.accdb"
+    mock_current_db.OpenRecordset.side_effect = Exception("DAO: unknown column 'Bogus'")
+
+    backend, _ = _make_com_backend_with_currentdb(mock_current_db)
+
+    backend._odbc_backend.count_query_results = MagicMock(
+        side_effect=Exception("undefined function 'MyFunc'")
+    )
+
+    with pytest.raises(Exception, match="DAO: unknown column"):
+        backend.count_query_results("SELECT MyFunc(Bogus) FROM TestTable")
+
+    if backend._close_timer is not None:
+        backend._close_timer.cancel()
+
+
+def test_access_com_odbc_success_skips_dao():
+    """When ODBC succeeds, DAO CurrentDb is never touched for queries."""
+    mock_current_db = MagicMock()
+    mock_current_db.Name = "C:\\test.accdb"
+
+    backend, _ = _make_com_backend_with_currentdb(mock_current_db)
+
+    backend._odbc_backend.count_query_results = MagicMock(return_value=99)
+
+    result = backend.count_query_results("SELECT * FROM TestTable")
+    assert result == 99
+
+    # DAO should NOT have been called for query execution
+    mock_current_db.OpenRecordset.assert_not_called()
+
+    if backend._close_timer is not None:
+        backend._close_timer.cancel()
+
+
+def test_access_com_dao_fallback_get_query_columns():
+    """DAO fallback works for get_query_columns with correct Field metadata."""
+    mock_current_db = MagicMock()
+    mock_current_db.Name = "C:\\test.accdb"
+
+    # TOP 0 recordset — no rows, just field metadata
+    rs = _make_dao_recordset(
+        [("ID", 4), ("FullName", 10), ("Active", 1)],
+        [],
+    )
+    mock_current_db.OpenRecordset.return_value = rs
+
+    backend, _ = _make_com_backend_with_currentdb(mock_current_db)
+
+    backend._odbc_backend.get_query_columns = MagicMock(
+        side_effect=Exception("undefined function 'FormatName'")
+    )
+
+    columns = backend.get_query_columns("SELECT FormatName(First, Last) FROM T")
+    assert len(columns) == 3
+    assert columns[0]["name"] == "ID"
+    assert columns[0]["type"] == "Long"
+    assert columns[1]["name"] == "FullName"
+    assert columns[1]["type"] == "Text"
+    assert columns[2]["name"] == "Active"
+    assert columns[2]["type"] == "Boolean"
+
+    rs.Close.assert_called_once()
+
+    if backend._close_timer is not None:
+        backend._close_timer.cancel()
+
+
+def test_access_com_dao_fallback_sum_query_column():
+    """DAO fallback works for sum_query_column."""
+    mock_current_db = MagicMock()
+    mock_current_db.Name = "C:\\test.accdb"
+
+    rs = _make_dao_recordset([("sum_val", 7)], [[1234.56]])
+    mock_current_db.OpenRecordset.return_value = rs
+
+    backend, _ = _make_com_backend_with_currentdb(mock_current_db)
+
+    backend._odbc_backend.sum_query_column = MagicMock(
+        side_effect=Exception("Too few parameters. Expected 1.")
+    )
+
+    result = backend.sum_query_column("SELECT CalcAmount(ID) AS amt FROM T", "amt")
+    assert result == 1234.56
+
+    rs.Close.assert_called_once()
+
+    if backend._close_timer is not None:
+        backend._close_timer.cancel()
+
+
+def test_access_com_dao_fallback_measure_query():
+    """DAO fallback works for measure_query with timing."""
+    mock_current_db = MagicMock()
+    mock_current_db.Name = "C:\\test.accdb"
+
+    rs = _make_dao_recordset(
+        [("ID", 4), ("Val", 7)],
+        [[1, 10.0], [2, 20.0]],
+    )
+    mock_current_db.OpenRecordset.return_value = rs
+
+    backend, _ = _make_com_backend_with_currentdb(mock_current_db)
+
+    backend._odbc_backend.measure_query = MagicMock(
+        side_effect=Exception("undefined function 'CalcVal'")
+    )
+
+    result = backend.measure_query("SELECT CalcVal(X) FROM T", max_rows=100)
+    assert result["row_count"] == 2
+    assert result["hit_limit"] is False
+    assert "execution_time_ms" in result
+
+    rs.Close.assert_called_once()
+
+    if backend._close_timer is not None:
+        backend._close_timer.cancel()
+
+
+# =============================================================================
 # Integration tests for Access COM backend
 # These tests require Access to be installed and will be skipped if not available.
 #

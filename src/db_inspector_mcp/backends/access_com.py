@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import threading
+import time
 from contextlib import contextmanager
 from typing import Any
 
@@ -41,6 +42,40 @@ _MSYS_TYPE_MODULE = -32761
 # Access can exit normally when the user closes it.  We never close the
 # database or quit Access — that is the user's responsibility.
 _DEFAULT_APP_TTL_SECONDS = 5.0
+
+# ODBC error patterns that indicate the query likely references a VBA UDF or
+# Access domain function (DLookup, DCount, etc.) that requires the Application
+# context.  When any of these match, the COM backend retries the query via DAO
+# CurrentDb().OpenRecordset() which has access to compiled VBA modules.
+_UDF_ERROR_PATTERNS = [
+    re.compile(r"undefined function", re.IGNORECASE),
+    re.compile(r"too few parameters", re.IGNORECASE),
+]
+
+# DAO Field.Type integer codes → human-readable type names.
+# Reference: https://learn.microsoft.com/en-us/office/client-developer/access/desktop-database-reference/datatypeenum-enumeration-dao
+_DAO_FIELD_TYPES: dict[int, str] = {
+    1: "Boolean",
+    2: "Byte",
+    3: "Integer",
+    4: "Long",
+    5: "Currency",
+    6: "Single",
+    7: "Double",
+    8: "Date",
+    9: "Binary",
+    10: "Text",
+    11: "LongBinary",
+    12: "Memo",
+    15: "GUID",
+    16: "BigInt",
+    17: "VarBinary",
+    18: "Char",
+    19: "Numeric",
+    20: "Float",
+    21: "Time",
+    22: "TimeStamp",
+}
 
 
 def _set_access_visible(app) -> None:
@@ -155,6 +190,18 @@ class AccessCOMBackend(DatabaseBackend):
             "rpc server", "disconnected", "server unavailable",
             "object is not connected",
         ))
+
+    @staticmethod
+    def _is_udf_error(exc: Exception) -> bool:
+        """Check whether *exc* looks like a missing VBA UDF or domain function.
+
+        The ODBC driver cannot resolve VBA user-defined functions or
+        Application-level domain functions (DLookup, DCount, …).  It
+        reports them as "undefined function" or treats unrecognised
+        identifiers as parameters ("too few parameters").
+        """
+        msg = str(exc)
+        return any(p.search(msg) for p in _UDF_ERROR_PATTERNS)
 
     # ------------------------------------------------------------------
     # COM Application lifecycle (TTL timer)
@@ -524,6 +571,71 @@ class AccessCOMBackend(DatabaseBackend):
                     pass
             self._schedule_app_close()
     
+    @contextmanager
+    def _dao_currentdb(self):
+        """Context manager yielding CurrentDb — required for VBA UDF queries.
+
+        Unlike ``_dao_database()`` which falls back to
+        ``DBEngine.OpenDatabase``, this guarantees ``CurrentDb()`` is
+        available.  VBA modules are only accessible through the
+        Application's current database.
+
+        The yielded DAO Database is **owned by the Application** — callers
+        must NOT call ``.Close()`` on it.  Only Recordsets opened from it
+        should be explicitly closed.
+
+        Yields:
+            DAO Database object (CurrentDb)
+        """
+        with self._com_lock:
+            self._cancel_close_timer()
+
+        app = self._get_access_app()
+        try:
+            self._ensure_current_db(app)
+            db = app.CurrentDb()
+        except Exception as first_err:
+            if self._is_com_disconnected(first_err):
+                logger.info("COM disconnected during _dao_currentdb — retrying")
+                self._app = None
+                app = self._get_access_app()
+                self._ensure_current_db(app)
+                db = app.CurrentDb()
+            else:
+                raise
+
+        try:
+            yield db
+        finally:
+            self._schedule_app_close()
+
+    def _dao_execute(
+        self, sql: str, max_rows: int | None = None,
+    ) -> tuple[list[str], list[list[Any]]]:
+        """Execute *sql* via DAO CurrentDb and return ``(column_names, rows)``.
+
+        Each value is passed through ``_sanitize_value`` so the result is
+        JSON-safe.  The Recordset is always closed in a ``finally`` block.
+        """
+        dbOpenSnapshot = 4
+        with self._dao_currentdb() as db:
+            rs = db.OpenRecordset(sql, dbOpenSnapshot)
+            try:
+                field_count = rs.Fields.Count
+                col_names = [rs.Fields(i).Name for i in range(field_count)]
+                rows: list[list[Any]] = []
+                while not rs.EOF:
+                    if max_rows is not None and len(rows) >= max_rows:
+                        break
+                    rows.append([
+                        self._sanitize_value(rs.Fields(i).Value)
+                        for i in range(field_count)
+                    ])
+                    rs.MoveNext()
+                return col_names, rows
+            finally:
+                rs.Close()
+
     def call_vba_function(self, function_name: str, *args) -> Any:
         """
         Call a VBA function in the Access database via Application.Run.
@@ -640,27 +752,126 @@ class AccessCOMBackend(DatabaseBackend):
                 "type": query_type,
             }
     
-    # Delegate all standard DatabaseBackend methods to ODBC backend
+    # ------------------------------------------------------------------
+    # DAO query execution (VBA UDF fallback)
+    # ------------------------------------------------------------------
+
+    def _dao_count_query_results(self, query: str) -> int:
+        wrapped = f"SELECT COUNT(*) AS cnt FROM ({query}) AS subquery"
+        _, rows = self._dao_execute(wrapped, max_rows=1)
+        return rows[0][0] if rows else 0
+
+    def _dao_get_query_columns(self, query: str) -> list[dict[str, Any]]:
+        wrapped = f"SELECT TOP 0 * FROM ({query}) AS subquery"
+        dbOpenSnapshot = 4
+        with self._dao_currentdb() as db:
+            rs = db.OpenRecordset(wrapped, dbOpenSnapshot)
+            try:
+                columns: list[dict[str, Any]] = []
+                for i in range(rs.Fields.Count):
+                    field = rs.Fields(i)
+                    columns.append({
+                        "name": field.Name,
+                        "type": _DAO_FIELD_TYPES.get(field.Type, str(field.Type)),
+                        "nullable": not getattr(field, "Required", False),
+                        "precision": getattr(field, "Size", None) or None,
+                        "scale": None,
+                    })
+                return columns
+            finally:
+                rs.Close()
+
+    def _dao_sum_query_column(self, query: str, column: str) -> float | None:
+        wrapped = f"SELECT SUM([{column}]) AS sum_val FROM ({query}) AS subquery"
+        _, rows = self._dao_execute(wrapped, max_rows=1)
+        if rows and rows[0][0] is not None:
+            return rows[0][0]
+        return None
+
+    def _dao_measure_query(self, query: str, max_rows: int) -> dict[str, Any]:
+        if "TOP " not in query.upper():
+            query_upper = query.upper().strip()
+            if query_upper.startswith("SELECT"):
+                query = f"SELECT TOP {max_rows} " + query[6:].lstrip()
+            else:
+                query = f"SELECT TOP {max_rows} * FROM ({query}) AS subquery"
+
+        start_time = time.time()
+        _, rows = self._dao_execute(query, max_rows=max_rows)
+        execution_time_ms = (time.time() - start_time) * 1000
+
+        row_count = len(rows)
+        return {
+            "execution_time_ms": round(execution_time_ms, 2),
+            "row_count": row_count,
+            "hit_limit": row_count >= max_rows,
+        }
+
+    def _dao_preview(self, query: str, max_rows: int) -> list[dict[str, Any]]:
+        if "TOP " not in query.upper():
+            query_upper = query.upper().strip()
+            if query_upper.startswith("SELECT"):
+                query = f"SELECT TOP {max_rows} " + query[6:].lstrip()
+            else:
+                query = f"SELECT TOP {max_rows} * FROM ({query}) AS subquery"
+
+        col_names, rows = self._dao_execute(query, max_rows=max_rows)
+        return [{col: val for col, val in zip(col_names, row)} for row in rows]
+
+    # ------------------------------------------------------------------
+    # Public query methods — ODBC first, DAO fallback for VBA UDFs
+    # ------------------------------------------------------------------
+
     def count_query_results(self, query: str) -> int:
         """Count row count by wrapping query in SELECT COUNT(*)."""
-        return self._odbc_backend.count_query_results(query)
-    
+        try:
+            return self._odbc_backend.count_query_results(query)
+        except Exception as e:
+            if self._is_udf_error(e):
+                logger.info("ODBC query failed (likely VBA UDF); retrying via DAO")
+                return self._dao_count_query_results(query)
+            raise
+
     def get_query_columns(self, query: str) -> list[dict[str, Any]]:
         """Get column metadata using TOP 0 to get metadata without fetching data."""
-        return self._odbc_backend.get_query_columns(query)
-    
+        try:
+            return self._odbc_backend.get_query_columns(query)
+        except Exception as e:
+            if self._is_udf_error(e):
+                logger.info("ODBC query failed (likely VBA UDF); retrying via DAO")
+                return self._dao_get_query_columns(query)
+            raise
+
     def sum_query_column(self, query: str, column: str) -> float | None:
         """Compute SUM of a column from query results."""
-        return self._odbc_backend.sum_query_column(query, column)
-    
+        try:
+            return self._odbc_backend.sum_query_column(query, column)
+        except Exception as e:
+            if self._is_udf_error(e):
+                logger.info("ODBC query failed (likely VBA UDF); retrying via DAO")
+                return self._dao_sum_query_column(query, column)
+            raise
+
     def measure_query(self, query: str, max_rows: int) -> dict[str, Any]:
         """Measure query execution time and retrieve limited rows."""
-        return self._odbc_backend.measure_query(query, max_rows)
-    
+        try:
+            return self._odbc_backend.measure_query(query, max_rows)
+        except Exception as e:
+            if self._is_udf_error(e):
+                logger.info("ODBC query failed (likely VBA UDF); retrying via DAO")
+                return self._dao_measure_query(query, max_rows)
+            raise
+
     def preview(self, query: str, max_rows: int) -> list[dict[str, Any]]:
         """Sample N rows from a query result."""
-        return self._odbc_backend.preview(query, max_rows)
-    
+        try:
+            return self._odbc_backend.preview(query, max_rows)
+        except Exception as e:
+            if self._is_udf_error(e):
+                logger.info("ODBC query failed (likely VBA UDF); retrying via DAO")
+                return self._dao_preview(query, max_rows)
+            raise
+
     def explain_query(self, query: str) -> str:
         """Get execution plan."""
         return self._odbc_backend.explain_query(query)
