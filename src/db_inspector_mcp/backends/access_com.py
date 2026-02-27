@@ -151,6 +151,7 @@ class AccessCOMBackend(DatabaseBackend):
                 "Install it with: pip install pywin32"
             )
         self._app = None
+        self._we_created_app: bool = False
         self._db_path = self._extract_db_path(connection_string)
         # Use ODBC backend internally for query execution
         self._odbc_backend = AccessODBCBackend(
@@ -249,6 +250,7 @@ class AccessCOMBackend(DatabaseBackend):
         if self._app is not None:
             logger.debug("COM Application TTL expired — releasing reference")
             self._app = None
+            self._we_created_app = False
 
     def _close_on_timer(self) -> None:
         """Called by the Timer thread when the Application TTL expires."""
@@ -283,6 +285,10 @@ class AccessCOMBackend(DatabaseBackend):
         Needed for operations that require the full Application context
         (e.g. VBA function calls via ``Application.Run``).  If the database
         is already the CurrentDb this is a no-op.
+
+        Safety: ``OpenCurrentDatabase`` is only called when we created the
+        Access instance ourselves (``_we_created_app`` is True).  For
+        user-owned instances we never close their database.
         """
         try:
             db = app.CurrentDb()
@@ -290,6 +296,15 @@ class AccessCOMBackend(DatabaseBackend):
                 return  # Already open
         except Exception:
             pass
+
+        if not self._we_created_app:
+            db_name = os.path.basename(self._db_path)
+            raise RuntimeError(
+                f"Cannot open '{db_name}' as CurrentDb: the Access instance "
+                f"belongs to the user and opening would close their database. "
+                f"Please open '{db_name}' in Access manually."
+            )
+
         password = self._extract_password(self.connection_string)
         app.OpenCurrentDatabase(self._db_path, False, password)
 
@@ -399,16 +414,12 @@ class AccessCOMBackend(DatabaseBackend):
         The Application reference is cached and managed by a TTL timer.
         After a period of inactivity the reference is released so that
         Access can exit normally when the user closes it.  On the next
-        tool call the reference is re-acquired via GetObject (fast, ~10 ms
-        when Access is still running) because UserControl=True keeps the
-        process alive.
+        tool call the reference is re-acquired via the Running Object
+        Table (fast, ~10 ms when Access is still running) because
+        UserControl=True keeps the process alive.
 
-        Early Binding Strategy:
-        When creating a new Access instance, we use gencache.EnsureDispatch() instead
-        of plain Dispatch(). This generates and caches type library bindings, which:
-        - Makes COM automation more reliable
-        - Enables Application.Run to work correctly (late binding often fails)
-        - Benefits subsequent GetObject calls (bindings are cached system-wide)
+        Safety: we never call ``OpenCurrentDatabase`` on a user-owned
+        instance.  Only fresh instances created by us are opened.
         """
         # Validate cached reference before returning it
         if self._app is not None:
@@ -419,10 +430,12 @@ class AccessCOMBackend(DatabaseBackend):
                 if self._is_com_disconnected(e):
                     logger.info("Cached Access Application reference is stale — re-acquiring")
                     self._app = None
+                    self._we_created_app = False
                 else:
                     # Some other COM error — clear and re-acquire to be safe
                     logger.warning("Unexpected COM error validating Access reference: %s", e)
                     self._app = None
+                    self._we_created_app = False
 
         if self._app is not None:
             # Cancel any pending release — we're about to use the Application
@@ -434,13 +447,8 @@ class AccessCOMBackend(DatabaseBackend):
         password = self._extract_password(self.connection_string)
 
         if password:
-            # Password-protected: skip GetObject(db_path) to avoid the
-            # password dialog triggered by OLE moniker resolution.
             self._app = self._acquire_password_protected(password)
         else:
-            # No password: GetObject(db_path) is the fastest and most
-            # reliable way to find the specific Access instance with our
-            # database open, even in multi-instance scenarios.
             self._app = self._acquire_for_open_db()
 
         return self._app
@@ -458,42 +466,91 @@ class AccessCOMBackend(DatabaseBackend):
         first one the ROT provides.  If no instance has our database, a new
         one is created and the database is opened with the password.
         """
-        # Search ALL Access instances via the Running Object Table
+        db_name = os.path.basename(self._db_path)
         existing = self._find_existing_instance()
         if existing is not None:
+            print(
+                f"[{db_name}] Found existing Access instance via ROT",
+                file=sys.stderr,
+            )
             return existing
 
-        # Not found — create new instance and open with password
-        app = gencache.EnsureDispatch("Access.Application")
-        _set_access_visible(app)
-        app.UserControl = True
-        app.OpenCurrentDatabase(self._db_path, False, password)
-        return app
+        return self._create_fresh_instance(password=password)
 
     def _acquire_for_open_db(self):
         """Acquire COM Application for a non-password database.
 
-        Uses ``GetObject(db_path)`` which is the most reliable way to find
-        the specific Access instance that has our database open, even when
-        the user has multiple Access windows with different databases.  If
-        no instance has our database open, creates a new one.
-        """
-        try:
-            # GetObject with a file path returns the Application that has
-            # our database open.  Works reliably in multi-instance scenarios.
-            return win32com.client.GetObject(self._db_path)
-        except Exception:
-            pass
+        Searches the Running Object Table (ROT) for an existing Access
+        instance with our database open.  This is a read-only scan —
+        unlike ``GetObject(file_path)`` it never triggers OLE moniker
+        activation, which can close and reopen the user's database.
 
-        # Our database is not open anywhere.  Create a new instance.
-        # (If Access is running with a different database, EnsureDispatch
-        # creates a separate instance — we don't interfere.)
+        If no existing instance is found, creates a fresh one.
+        """
+        db_name = os.path.basename(self._db_path)
+        existing = self._find_existing_instance()
+        if existing is not None:
+            print(
+                f"[{db_name}] Found existing Access instance via ROT",
+                file=sys.stderr,
+            )
+            return existing
+
+        return self._create_fresh_instance()
+
+    def _create_fresh_instance(self, password: str = "") -> Any:
+        """Create a new Access instance and open our database in it.
+
+        Guards against ``EnsureDispatch`` returning an existing user
+        instance instead of a fresh one.  If the returned app already
+        has a database open:
+        - If it's OUR database → reuse it (no ``OpenCurrentDatabase``).
+        - If it's a DIFFERENT database → do NOT touch it.  Raise so the
+          caller knows we couldn't safely create an isolated instance.
+
+        ``OpenCurrentDatabase`` is only called on genuinely fresh
+        instances (no database open), preserving the user's Shift-bypass
+        state and any other open-time settings.
+        """
+        db_name = os.path.basename(self._db_path)
         app = gencache.EnsureDispatch("Access.Application")
+
+        # Check whether EnsureDispatch gave us an existing instance
+        try:
+            existing_db = app.CurrentDb()
+        except Exception:
+            existing_db = None
+
+        if existing_db is not None:
+            if self._paths_match(existing_db.Name, self._db_path):
+                print(
+                    f"[{db_name}] EnsureDispatch returned existing instance "
+                    f"with our database already open — reusing",
+                    file=sys.stderr,
+                )
+                return app
+            # Got someone else's instance — don't touch it
+            raise RuntimeError(
+                f"Cannot create a new Access instance for '{db_name}': "
+                f"EnsureDispatch returned an existing instance with "
+                f"'{os.path.basename(existing_db.Name)}' open. "
+                f"Please open '{db_name}' manually in Access."
+            )
+
+        # Genuinely fresh instance — safe to open our database
         _set_access_visible(app)
         app.UserControl = True
-        app.OpenCurrentDatabase(self._db_path, False)
+        if password:
+            app.OpenCurrentDatabase(self._db_path, False, password)
+        else:
+            app.OpenCurrentDatabase(self._db_path, False)
+        self._we_created_app = True
+        print(
+            f"[{db_name}] Created new Access instance",
+            file=sys.stderr,
+        )
         return app
-    
+
     def _open_dao_database(self, app):
         """Open a DAO Database via the given Application, returning (db, needs_close).
 
@@ -568,6 +625,7 @@ class AccessCOMBackend(DatabaseBackend):
             if self._is_com_disconnected(first_err):
                 logger.info("COM disconnected during _dao_database — retrying")
                 self._app = None
+                self._we_created_app = False
                 app = self._get_access_app()
                 db, needs_close = self._open_dao_database(app)
             else:
@@ -610,6 +668,7 @@ class AccessCOMBackend(DatabaseBackend):
             if self._is_com_disconnected(first_err):
                 logger.info("COM disconnected during _dao_currentdb — retrying")
                 self._app = None
+                self._we_created_app = False
                 app = self._get_access_app()
                 self._ensure_current_db(app)
                 db = app.CurrentDb()

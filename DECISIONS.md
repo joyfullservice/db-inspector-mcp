@@ -8,6 +8,33 @@
 
 ---
 
+## 2026-02-27 — Never close a user's open Access database
+
+**Trigger**: Restarting the MCP server caused the COM backend to close and reopen the user's already-open Access databases, losing Shift-bypass state (autoexec macros and startup forms run on reopen). The user opens databases with special flags that suppress startup behavior; `OpenCurrentDatabase` destroys this state.
+
+**Root cause**: Three code paths could call `OpenCurrentDatabase` on a user-owned Access instance:
+
+1. `_acquire_for_open_db()` used `GetObject(file_path)`, which performs OLE moniker activation — this can close and reopen the database. Its fallback path called `EnsureDispatch("Access.Application")` followed by `OpenCurrentDatabase`, which could target a user's existing instance.
+2. `_acquire_password_protected()` had the same `EnsureDispatch` + `OpenCurrentDatabase` fallback risk.
+3. `_ensure_current_db()` unconditionally called `OpenCurrentDatabase` when the current database didn't match, even on instances the user opened.
+
+**Options explored**:
+
+- **Keep `GetObject(file_path)`** — simple but unsafe. OLE moniker activation can close/reopen databases even when they're already open. Rejected.
+- **ROT scan + guarded `OpenCurrentDatabase` (chosen)** — replace `GetObject` with the read-only `_find_existing_instance()` ROT scan (already used for password-protected databases). Guard all `OpenCurrentDatabase` calls with a `_we_created_app` flag so we never close databases on instances we didn't create.
+
+**Decision**: Three-part safety system:
+
+1. **Replace `GetObject(file_path)` with `_find_existing_instance()`** in `_acquire_for_open_db()`. The ROT scan is read-only — no moniker activation, no risk of closing databases. Both password and non-password paths now use the same safe acquisition.
+2. **Add `_create_fresh_instance()` helper** that checks whether `EnsureDispatch` returned a fresh instance or reused an existing one. If the returned instance already has our database open, reuse it (no `OpenCurrentDatabase`). If it has a *different* database, raise `RuntimeError` instead of closing the user's database. Only call `OpenCurrentDatabase` on genuinely fresh instances (no database open).
+3. **Guard `_ensure_current_db()` with `_we_created_app` flag** — only allow `OpenCurrentDatabase` when we created the instance. If the instance belongs to the user and the database doesn't match, raise `RuntimeError`.
+
+**What this rules out**: The server can no longer automatically open a database in an Access instance that already has a different database open. This is the correct trade-off — silently closing someone's database is never acceptable.
+
+**Relevant files**: `src/db_inspector_mcp/backends/access_com.py`, `tests/test_backends.py`
+
+---
+
 ## 2026-02-27 — Route system-table queries directly to DAO, broaden error fallback
 
 **Trigger**: Agents frequently write queries referencing `MSysObjects` (e.g. `SELECT COUNT(*) FROM MSysObjects WHERE Type=1`) to explore Access databases.  These fail through ODBC because the driver cannot access system tables.  The ODBC driver reports different errors depending on query structure: "no read permission on 'MSysObjects'" for simple queries, but "reserved word or argument name that is misspelled" when the query is wrapped in a subquery (as `get_query_columns` and `count_query_results` do).  Pattern-matching ODBC error messages is fragile — different query shapes produce different errors for the same root cause.

@@ -812,12 +812,143 @@ def test_access_com_dao_fallback_measure_query():
 
 
 # =============================================================================
+# Guard tests — prevent OpenCurrentDatabase on user instances
+# =============================================================================
+
+
+def test_create_fresh_instance_reuses_existing_with_our_db():
+    """EnsureDispatch returning an instance with our DB reuses it without OpenCurrentDatabase."""
+    connection_string = "Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\test.accdb;"
+
+    mock_app = MagicMock()
+    mock_existing_db = MagicMock()
+    mock_existing_db.Name = "C:\\test.accdb"
+    mock_app.CurrentDb.return_value = mock_existing_db
+
+    with patch('db_inspector_mcp.backends.access_com.win32com.client'), \
+         patch('db_inspector_mcp.backends.access_com.gencache') as mock_gencache:
+        mock_gencache.EnsureDispatch.return_value = mock_app
+        backend = AccessCOMBackend(connection_string, 30)
+        result = backend._create_fresh_instance()
+
+    assert result is mock_app
+    mock_app.OpenCurrentDatabase.assert_not_called()
+    assert not backend._we_created_app
+
+    if backend._close_timer is not None:
+        backend._close_timer.cancel()
+
+
+def test_create_fresh_instance_refuses_different_db():
+    """EnsureDispatch returning an instance with a DIFFERENT DB raises RuntimeError."""
+    connection_string = "Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\test.accdb;"
+
+    mock_app = MagicMock()
+    mock_other_db = MagicMock()
+    mock_other_db.Name = "C:\\Users\\someone\\other.accdb"
+    mock_app.CurrentDb.return_value = mock_other_db
+
+    with patch('db_inspector_mcp.backends.access_com.win32com.client'), \
+         patch('db_inspector_mcp.backends.access_com.gencache') as mock_gencache:
+        mock_gencache.EnsureDispatch.return_value = mock_app
+        backend = AccessCOMBackend(connection_string, 30)
+
+        with pytest.raises(RuntimeError, match="existing instance"):
+            backend._create_fresh_instance()
+
+    mock_app.OpenCurrentDatabase.assert_not_called()
+
+    if backend._close_timer is not None:
+        backend._close_timer.cancel()
+
+
+def test_create_fresh_instance_opens_on_genuinely_new():
+    """EnsureDispatch returning a fresh (no DB) instance safely opens our database."""
+    connection_string = "Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\test.accdb;"
+
+    mock_app = MagicMock()
+    mock_app.CurrentDb.return_value = None
+
+    with patch('db_inspector_mcp.backends.access_com.win32com.client'), \
+         patch('db_inspector_mcp.backends.access_com.gencache') as mock_gencache:
+        mock_gencache.EnsureDispatch.return_value = mock_app
+        backend = AccessCOMBackend(connection_string, 30)
+        result = backend._create_fresh_instance()
+
+    assert result is mock_app
+    mock_app.OpenCurrentDatabase.assert_called_once_with("C:\\test.accdb", False)
+    assert backend._we_created_app
+
+    if backend._close_timer is not None:
+        backend._close_timer.cancel()
+
+
+def test_ensure_current_db_refuses_on_user_instance():
+    """_ensure_current_db raises when the instance isn't ours and DB doesn't match."""
+    mock_current_db = MagicMock()
+    mock_current_db.Name = "C:\\test.accdb"
+
+    backend, mock_app = _make_com_backend_with_currentdb(mock_current_db)
+    backend._we_created_app = False
+
+    # Make CurrentDb return a different database
+    other_db = MagicMock()
+    other_db.Name = "C:\\other.accdb"
+    mock_app.CurrentDb.return_value = other_db
+
+    with pytest.raises(RuntimeError, match="belongs to the user"):
+        backend._ensure_current_db(mock_app)
+
+    mock_app.OpenCurrentDatabase.assert_not_called()
+
+    if backend._close_timer is not None:
+        backend._close_timer.cancel()
+
+
+def test_ensure_current_db_allows_on_our_instance():
+    """_ensure_current_db calls OpenCurrentDatabase when we created the instance."""
+    mock_current_db = MagicMock()
+    mock_current_db.Name = "C:\\test.accdb"
+
+    backend, mock_app = _make_com_backend_with_currentdb(mock_current_db)
+    backend._we_created_app = True
+
+    # Make CurrentDb return a different database
+    other_db = MagicMock()
+    other_db.Name = "C:\\other.accdb"
+    mock_app.CurrentDb.return_value = other_db
+
+    backend._ensure_current_db(mock_app)
+
+    mock_app.OpenCurrentDatabase.assert_called_once()
+
+    if backend._close_timer is not None:
+        backend._close_timer.cancel()
+
+
+def test_ensure_current_db_noop_when_already_open():
+    """_ensure_current_db is a no-op when CurrentDb already matches."""
+    mock_current_db = MagicMock()
+    mock_current_db.Name = "C:\\test.accdb"
+
+    backend, mock_app = _make_com_backend_with_currentdb(mock_current_db)
+    backend._we_created_app = False  # Doesn't matter — DB already matches
+
+    backend._ensure_current_db(mock_app)
+
+    mock_app.OpenCurrentDatabase.assert_not_called()
+
+    if backend._close_timer is not None:
+        backend._close_timer.cancel()
+
+
+# =============================================================================
 # Integration tests for Access COM backend
 # These tests require Access to be installed and will be skipped if not available.
 #
 # Fixtures use module scope so Access is launched once and quit once for the
 # entire module.  Individual tests create fresh AccessCOMBackend instances
-# that attach to the running Access via GetObject.
+# that attach to the running Access via ROT scan.
 # =============================================================================
 
 @pytest.fixture(scope="module")
