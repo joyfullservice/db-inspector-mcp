@@ -590,6 +590,84 @@ def test_access_com_dao_fallback_on_too_few_parameters():
         backend._close_timer.cancel()
 
 
+def test_access_com_msys_query_routed_directly_to_dao():
+    """Queries referencing MSys* tables skip ODBC and go straight to DAO."""
+    mock_current_db = MagicMock()
+    mock_current_db.Name = "C:\\test.accdb"
+
+    rs = _make_dao_recordset([("cnt", 4)], [[100]])
+    mock_current_db.OpenRecordset.return_value = rs
+
+    backend, _ = _make_com_backend_with_currentdb(mock_current_db)
+
+    backend._odbc_backend.count_query_results = MagicMock()
+
+    result = backend.count_query_results(
+        "SELECT COUNT(*) FROM MSysObjects WHERE Type=1"
+    )
+    assert result == 100
+
+    # ODBC should NOT have been called at all
+    backend._odbc_backend.count_query_results.assert_not_called()
+    rs.Close.assert_called_once()
+
+    if backend._close_timer is not None:
+        backend._close_timer.cancel()
+
+
+def test_access_com_msys_get_query_columns_routed_to_dao():
+    """get_query_columns on MSys* tables goes directly to DAO."""
+    mock_current_db = MagicMock()
+    mock_current_db.Name = "C:\\test.accdb"
+
+    rs = _make_dao_recordset([("Name", 10), ("Type", 3)], [])
+    mock_current_db.OpenRecordset.return_value = rs
+
+    backend, _ = _make_com_backend_with_currentdb(mock_current_db)
+
+    backend._odbc_backend.get_query_columns = MagicMock()
+
+    result = backend.get_query_columns(
+        "SELECT [Name], [Type] FROM MSysObjects WHERE [Type] IN (1,5)"
+    )
+    assert any(c["name"] == "Name" for c in result)
+
+    backend._odbc_backend.get_query_columns.assert_not_called()
+    rs.Close.assert_called_once()
+
+    if backend._close_timer is not None:
+        backend._close_timer.cancel()
+
+
+def test_access_com_dao_fallback_on_no_read_permission():
+    """ODBC 'no read permission' on non-MSys tables still triggers DAO fallback."""
+    mock_current_db = MagicMock()
+    mock_current_db.Name = "C:\\test.accdb"
+
+    rs = _make_dao_recordset([("cnt", 4)], [[42]])
+    mock_current_db.OpenRecordset.return_value = rs
+
+    backend, _ = _make_com_backend_with_currentdb(mock_current_db)
+
+    backend._odbc_backend.count_query_results = MagicMock(
+        side_effect=Exception(
+            "Record(s) cannot be read; no read permission on 'SomeTable'"
+        )
+    )
+
+    result = backend.count_query_results(
+        "SELECT COUNT(*) FROM SomeTable"
+    )
+    assert result == 42
+
+    # ODBC was tried first, then DAO fallback kicked in
+    backend._odbc_backend.count_query_results.assert_called_once()
+    rs.Close.assert_called_once()
+
+    if backend._close_timer is not None:
+        backend._close_timer.cancel()
+
+
 def test_access_com_no_dao_fallback_on_syntax_error():
     """Non-UDF errors (e.g. syntax errors) propagate without DAO retry."""
     mock_current_db = MagicMock()

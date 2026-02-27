@@ -46,13 +46,16 @@ _MSYS_TYPE_MODULE = -32761
 # database or quit Access — that is the user's responsibility.
 _DEFAULT_APP_TTL_SECONDS = 5.0
 
-# ODBC error patterns that indicate the query likely references a VBA UDF or
-# Access domain function (DLookup, DCount, etc.) that requires the Application
-# context.  When any of these match, the COM backend retries the query via DAO
-# CurrentDb().OpenRecordset() which has access to compiled VBA modules.
-_UDF_ERROR_PATTERNS = [
+# ODBC error patterns that indicate the query should be retried via DAO.
+# Covers two categories:
+#  1. VBA UDFs / domain functions (DLookup, DCount, …) — ODBC can't resolve
+#     these; DAO CurrentDb has access to the compiled VBA project.
+#  2. System-table permission errors — ODBC cannot read MSysObjects and other
+#     system tables; DAO through the Application context can.
+_DAO_RETRY_PATTERNS = [
     re.compile(r"undefined function", re.IGNORECASE),
     re.compile(r"too few parameters", re.IGNORECASE),
+    re.compile(r"no read permission", re.IGNORECASE),
 ]
 
 # DAO Field.Type integer codes → human-readable type names.
@@ -195,16 +198,15 @@ class AccessCOMBackend(DatabaseBackend):
         ))
 
     @staticmethod
-    def _is_udf_error(exc: Exception) -> bool:
-        """Check whether *exc* looks like a missing VBA UDF or domain function.
+    def _should_retry_via_dao(exc: Exception) -> bool:
+        """Check whether *exc* indicates the query should be retried via DAO.
 
-        The ODBC driver cannot resolve VBA user-defined functions or
-        Application-level domain functions (DLookup, DCount, …).  It
-        reports them as "undefined function" or treats unrecognised
-        identifiers as parameters ("too few parameters").
+        Returns True for errors that ODBC cannot handle but DAO can:
+        - VBA UDFs / domain functions ("undefined function", "too few parameters")
+        - System table access ("no read permission" on MSysObjects etc.)
         """
         msg = str(exc)
-        return any(p.search(msg) for p in _UDF_ERROR_PATTERNS)
+        return any(p.search(msg) for p in _DAO_RETRY_PATTERNS)
 
     # ------------------------------------------------------------------
     # COM Application lifecycle (TTL timer)
@@ -773,8 +775,9 @@ class AccessCOMBackend(DatabaseBackend):
         return rows[0][0] if rows else 0
 
     def _dao_get_query_columns(self, query: str) -> list[dict[str, Any]]:
-        cte, core = split_cte_prefix(query)
-        wrapped = f"{cte}SELECT TOP 0 * FROM ({core}) AS subquery"
+        # Use TOP 1 instead of TOP 0 — Jet/DAO doesn't support TOP 0.
+        # We only read field metadata, not row data, so 1 row is fine.
+        wrapped = inject_top_clause(query, 1)
         dbOpenSnapshot = 4
         with self._dao_currentdb() as db:
             rs = db.OpenRecordset(wrapped, dbOpenSnapshot)
@@ -822,56 +825,73 @@ class AccessCOMBackend(DatabaseBackend):
         return [{col: val for col, val in zip(col_names, row)} for row in rows]
 
     # ------------------------------------------------------------------
-    # Public query methods — ODBC first, DAO fallback for VBA UDFs
+    # Public query methods — ODBC first, DAO fallback
     # ------------------------------------------------------------------
+
+    _MSYS_RE = re.compile(r"\bMSys\w+", re.IGNORECASE)
+
+    @staticmethod
+    def _references_system_table(query: str) -> bool:
+        """Return True if *query* references an Access system table (MSys*)."""
+        return bool(AccessCOMBackend._MSYS_RE.search(query))
 
     def count_query_results(self, query: str) -> int:
         """Count row count by wrapping query in SELECT COUNT(*)."""
+        if self._references_system_table(query):
+            return self._dao_count_query_results(query)
         try:
             return self._odbc_backend.count_query_results(query)
         except Exception as e:
-            if self._is_udf_error(e):
-                logger.info("ODBC query failed (likely VBA UDF); retrying via DAO")
+            if self._should_retry_via_dao(e):
+                logger.info("ODBC query failed (%s); retrying via DAO", e)
                 return self._dao_count_query_results(query)
             raise
 
     def get_query_columns(self, query: str) -> list[dict[str, Any]]:
         """Get column metadata using TOP 0 to get metadata without fetching data."""
+        if self._references_system_table(query):
+            return self._dao_get_query_columns(query)
         try:
             return self._odbc_backend.get_query_columns(query)
         except Exception as e:
-            if self._is_udf_error(e):
-                logger.info("ODBC query failed (likely VBA UDF); retrying via DAO")
+            if self._should_retry_via_dao(e):
+                logger.info("ODBC query failed (%s); retrying via DAO", e)
                 return self._dao_get_query_columns(query)
             raise
 
     def sum_query_column(self, query: str, column: str) -> float | None:
         """Compute SUM of a column from query results."""
+        if self._references_system_table(query):
+            return self._dao_sum_query_column(query, column)
         try:
             return self._odbc_backend.sum_query_column(query, column)
         except Exception as e:
-            if self._is_udf_error(e):
-                logger.info("ODBC query failed (likely VBA UDF); retrying via DAO")
+            if self._should_retry_via_dao(e):
+                logger.info("ODBC query failed (%s); retrying via DAO", e)
                 return self._dao_sum_query_column(query, column)
             raise
 
     def measure_query(self, query: str, max_rows: int) -> dict[str, Any]:
         """Measure query execution time and retrieve limited rows."""
+        if self._references_system_table(query):
+            return self._dao_measure_query(query, max_rows)
         try:
             return self._odbc_backend.measure_query(query, max_rows)
         except Exception as e:
-            if self._is_udf_error(e):
-                logger.info("ODBC query failed (likely VBA UDF); retrying via DAO")
+            if self._should_retry_via_dao(e):
+                logger.info("ODBC query failed (%s); retrying via DAO", e)
                 return self._dao_measure_query(query, max_rows)
             raise
 
     def preview(self, query: str, max_rows: int) -> list[dict[str, Any]]:
         """Sample N rows from a query result."""
+        if self._references_system_table(query):
+            return self._dao_preview(query, max_rows)
         try:
             return self._odbc_backend.preview(query, max_rows)
         except Exception as e:
-            if self._is_udf_error(e):
-                logger.info("ODBC query failed (likely VBA UDF); retrying via DAO")
+            if self._should_retry_via_dao(e):
+                logger.info("ODBC query failed (%s); retrying via DAO", e)
                 return self._dao_preview(query, max_rows)
             raise
 

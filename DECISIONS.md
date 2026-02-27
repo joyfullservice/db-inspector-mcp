@@ -8,6 +8,28 @@
 
 ---
 
+## 2026-02-27 — Route system-table queries directly to DAO, broaden error fallback
+
+**Trigger**: Agents frequently write queries referencing `MSysObjects` (e.g. `SELECT COUNT(*) FROM MSysObjects WHERE Type=1`) to explore Access databases.  These fail through ODBC because the driver cannot access system tables.  The ODBC driver reports different errors depending on query structure: "no read permission on 'MSysObjects'" for simple queries, but "reserved word or argument name that is misspelled" when the query is wrapped in a subquery (as `get_query_columns` and `count_query_results` do).  Pattern-matching ODBC error messages is fragile — different query shapes produce different errors for the same root cause.
+
+**Options explored**:
+
+- **Broaden error patterns only** — add more regex patterns to `_DAO_RETRY_PATTERNS`.  Fragile: the ODBC driver produces unpredictable error messages for system-table access depending on query wrapping.  Would require ongoing pattern additions.
+- **Preemptive detection + error fallback (chosen)** — detect `MSys*` table references in the query text and route directly to DAO, skipping ODBC entirely.  Keep the error-based fallback as a safety net for other DAO-eligible failures (VBA UDFs, unexpected permission errors on non-system tables).
+
+**Decision**: Two-layer approach in `AccessCOMBackend`:
+
+1. **Preemptive routing**: `_references_system_table(query)` uses `re.compile(r"\bMSys\w+", re.IGNORECASE)` to detect system table references.  All five public query methods (`count_query_results`, `get_query_columns`, `sum_query_column`, `measure_query`, `preview`) check this first and go straight to DAO if matched.
+2. **Error-based fallback**: Renamed `_is_udf_error()` → `_should_retry_via_dao()` and `_UDF_ERROR_PATTERNS` → `_DAO_RETRY_PATTERNS`, added `re.compile(r"no read permission", re.IGNORECASE)` as a third pattern.  This catches non-MSys permission errors that ODBC can't handle.  Log messages updated to include the actual error.
+
+**What this rules out**: Queries containing `MSys` as a substring (e.g. a column named `MSysID`) would be routed to DAO unnecessarily.  This is extremely unlikely in practice, and DAO handles normal queries correctly, so the only cost is slightly different execution path (DAO vs ODBC).
+
+**Relevant files**:
+- `src/db_inspector_mcp/backends/access_com.py` — `_references_system_table()`, renamed method/patterns, preemptive checks in query methods
+- `tests/test_backends.py` — `test_access_com_msys_query_routed_directly_to_dao`, `test_access_com_msys_get_query_columns_routed_to_dao`, updated `test_access_com_dao_fallback_on_no_read_permission`
+
+---
+
 ## 2026-02-27 — Correct Access SQL dialect guidance (DISTINCT and wildcards)
 
 **Trigger**: While fixing the TOP N injection bugs (below), we questioned whether the Access SQL guidance in `db_sql_help` and the MCP server instructions was empirically accurate. Two claims were tested against live Access databases via ODBC and found to be wrong.
