@@ -8,6 +8,47 @@
 
 ---
 
+## 2026-02-26 — Hot-reload `.env` files via mtime check
+
+**Trigger**: When running the MCP server globally (user-level `mcp.json`), changing per-project data-access permissions in `.env` required restarting the server. This was friction for users toggling `DB_MCP_ALLOW_DATA_ACCESS` or `DB_MCP_ALLOW_PREVIEW` across different projects.
+
+**Options explored**:
+- **File watcher (`watchdog`)** — true hot-reload via OS-level file events. Adds a dependency, requires a background thread, and needs thread-safe config access. Overkill for monitoring one or two files.
+- **Periodic polling (mtime check per tool call)** — compare the `.env` file's modification time on each `load_config()` call. Zero dependencies, no background threads, effectively instant because every tool call checks. Cost is a single `os.stat()` per tool call (~microseconds).
+- **Explicit `db_reload_config` tool** — the AI or user invokes a tool to reload. Simplest, but not automatic.
+
+**Decision**: Mtime-based polling in `load_config()`. On every tool call, `_check_env_reload()` compares the stored mtime of `.env` and `.env.local` against the current value. If changed, the environment is re-read and config takes effect immediately.
+
+**How it works**:
+
+```mermaid
+flowchart TD
+    ToolCall["Tool call begins"] --> LoadConfig["load_config()"]
+    LoadConfig --> CheckMtime["_check_env_reload()"]
+    CheckMtime -->|"mtime unchanged"| ReadEnv["Read from os.getenv()"]
+    CheckMtime -->|"mtime changed"| Reload["Re-load .env files"]
+    Reload --> DetectChanges["Compare old vs new config"]
+    DetectChanges -->|"Only permission flags changed"| ReadEnv
+    DetectChanges -->|"Backend config changed"| ReInit["Clear registry, re-initialize backends"]
+    ReInit --> VerifyReadonly["Re-verify readonly status"]
+    VerifyReadonly --> ReadEnv
+    ReadEnv --> ReturnConfig["Return config dict"]
+```
+
+Key behaviours:
+- **First load** uses `load_dotenv(override=False)` so MCP `env`-section values take precedence.
+- **Reloads** use `load_dotenv(override=True)` so the user's edits replace old values.
+- **Permission-only changes** (e.g. `DB_MCP_ALLOW_DATA_ACCESS`) take effect immediately — no backend re-init needed.
+- **Backend config changes** (e.g. `DB_MCP_DATABASE`, `DB_MCP_CONNECTION_STRING`) trigger `registry.clear()` and `initialize_backends()`, followed by read-only verification.
+- **Removed variables**: if a line is deleted from `.env`, the old value remains in `os.environ` until server restart. This is documented as a known limitation — the alternative (tracking every key loaded from `.env`) adds complexity for a rare edge case.
+- **Backend re-init safety**: old backend objects are discarded. Access connections expire via 5 s TTL; MSSQL/Postgres connections close via `__del__` on GC.
+
+**What this rules out**: Full variable removal detection without restart. Acceptable trade-off for simplicity.
+
+**Relevant files**: `src/db_inspector_mcp/config.py`, `src/db_inspector_mcp/backends/registry.py`, `tests/test_config.py`
+
+---
+
 ## 2026-02-26 — Module-scoped fixtures for Access COM integration tests
 
 **Trigger**: The three integration tests in `tests/test_backends.py` took ~25s total because the `temp_access_db` fixture (function-scoped) launched and quit Access per test, and each test then launched Access again through the backend. That's 4+ launch/quit cycles at ~5s each, plus `gc.collect()` + `time.sleep()` delays. The tests were verifying database operations (list_tables, list_views, get_query_by_name), not the Application launch lifecycle.
@@ -410,7 +451,7 @@ Both paths set `UserControl = True` and make newly created instances visible. Th
 
 ---
 
-## 2025-02-12 — Three-layer agent discoverability for DECISIONS.md
+## 2026-02-12 — Three-layer agent discoverability for DECISIONS.md
 
 **Trigger**: `DECISIONS.md` existed but had no guaranteed discovery path. AI agents making architectural changes would not reliably find it before proceeding. Needed a way for agents across different tools (Cursor, Claude Code) and human contributors to discover this file automatically.
 
@@ -431,7 +472,7 @@ Both paths set `UserControl = True` and make newly created instances visible. Th
 
 ---
 
-## 2025-02-12 — Skip COM TTL caching; revisit later
+## 2026-02-12 — Skip COM TTL caching; revisit later
 
 **Trigger**: After implementing ODBC TTL caching, explored whether the Access COM backend should also have TTL-based lifecycle management for the Application object and/or DAO database references.
 
@@ -448,7 +489,7 @@ Both paths set `UserControl = True` and make newly created instances visible. Th
 
 ---
 
-## 2025-02-12 — TTL-cached ODBC connections for Access backend (5-second default)
+## 2026-02-12 — TTL-cached ODBC connections for Access backend (5-second default)
 
 **Trigger**: Benchmarking showed Access ODBC connect-per-request costs ~220ms per call, purely in connection overhead. During a typical MCP conversation the LLM fires 3-10 tool calls in quick succession, wasting 660-2200ms on reconnections. A persistent ODBC connection delivers 0.2ms queries but holds the `.laccdb` lock indefinitely, blocking other users.
 
@@ -469,7 +510,7 @@ Both paths set `UserControl = True` and make newly created instances visible. Th
 
 ---
 
-## 2025-02-12 — DAO vs ODBC benchmark results and hybrid strategy recommendation
+## 2026-02-12 — DAO vs ODBC benchmark results and hybrid strategy recommendation
 
 **Trigger**: Previous benchmarks identified ~220ms ODBC connection overhead. User asked whether COM/DAO should replace ODBC entirely for Access, and specifically requested benchmarking `CurrentDb.Execute` with `dbFailOnError`.
 
@@ -494,7 +535,7 @@ Key benchmark numbers (30 iterations, median):
 
 ---
 
-## 2025-02-12 — Fix GetObject password prompt in benchmark script
+## 2026-02-12 — Fix GetObject password prompt in benchmark script
 
 **Trigger**: The `bench_dao_vs_odbc.py` benchmark script hung indefinitely when run against a password-protected Access database. Access was showing a password dialog, blocking the script.
 
@@ -508,44 +549,3 @@ Key benchmark numbers (30 iterations, median):
 **What this rules out**: The benchmark script can't automatically attach to an already-open Access instance. This is acceptable since the benchmark needs a controlled, fresh environment anyway. The production `_get_access_app()` in `access_com.py` is unchanged — it still tries `GetObject` first, which works when the user has the database open.
 
 **Relevant files**: `benchmarks/bench_dao_vs_odbc.py`
-
----
-
-## 2026-02-26 — Hot-reload `.env` files via mtime check
-
-**Trigger**: When running the MCP server globally (user-level `mcp.json`), changing per-project data-access permissions in `.env` required restarting the server. This was friction for users toggling `DB_MCP_ALLOW_DATA_ACCESS` or `DB_MCP_ALLOW_PREVIEW` across different projects.
-
-**Options explored**:
-- **File watcher (`watchdog`)** — true hot-reload via OS-level file events. Adds a dependency, requires a background thread, and needs thread-safe config access. Overkill for monitoring one or two files.
-- **Periodic polling (mtime check per tool call)** — compare the `.env` file's modification time on each `load_config()` call. Zero dependencies, no background threads, effectively instant because every tool call checks. Cost is a single `os.stat()` per tool call (~microseconds).
-- **Explicit `db_reload_config` tool** — the AI or user invokes a tool to reload. Simplest, but not automatic.
-
-**Decision**: Mtime-based polling in `load_config()`. On every tool call, `_check_env_reload()` compares the stored mtime of `.env` and `.env.local` against the current value. If changed, the environment is re-read and config takes effect immediately.
-
-**How it works**:
-
-```mermaid
-flowchart TD
-    ToolCall["Tool call begins"] --> LoadConfig["load_config()"]
-    LoadConfig --> CheckMtime["_check_env_reload()"]
-    CheckMtime -->|"mtime unchanged"| ReadEnv["Read from os.getenv()"]
-    CheckMtime -->|"mtime changed"| Reload["Re-load .env files"]
-    Reload --> DetectChanges["Compare old vs new config"]
-    DetectChanges -->|"Only permission flags changed"| ReadEnv
-    DetectChanges -->|"Backend config changed"| ReInit["Clear registry, re-initialize backends"]
-    ReInit --> VerifyReadonly["Re-verify readonly status"]
-    VerifyReadonly --> ReadEnv
-    ReadEnv --> ReturnConfig["Return config dict"]
-```
-
-Key behaviours:
-- **First load** uses `load_dotenv(override=False)` so MCP `env`-section values take precedence.
-- **Reloads** use `load_dotenv(override=True)` so the user's edits replace old values.
-- **Permission-only changes** (e.g. `DB_MCP_ALLOW_DATA_ACCESS`) take effect immediately — no backend re-init needed.
-- **Backend config changes** (e.g. `DB_MCP_DATABASE`, `DB_MCP_CONNECTION_STRING`) trigger `registry.clear()` and `initialize_backends()`, followed by read-only verification.
-- **Removed variables**: if a line is deleted from `.env`, the old value remains in `os.environ` until server restart. This is documented as a known limitation — the alternative (tracking every key loaded from `.env`) adds complexity for a rare edge case.
-- **Backend re-init safety**: old backend objects are discarded. Access connections expire via 5 s TTL; MSSQL/Postgres connections close via `__del__` on GC.
-
-**What this rules out**: Full variable removal detection without restart. Acceptable trade-off for simplicity.
-
-**Relevant files**: `src/db_inspector_mcp/config.py`, `src/db_inspector_mcp/backends/registry.py`, `tests/test_config.py`
