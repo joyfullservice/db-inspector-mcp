@@ -227,9 +227,13 @@ def _write_log_entry(entry: dict[str, Any]) -> None:
         _log_handler.stream.write(log_line)
         _log_handler.stream.flush()
         
-        # Check if rotation is needed
-        if _log_handler.shouldRollover(None):
-            _log_handler.doRollover()
+        # Check if rotation is needed by comparing file size directly.
+        # We can't use shouldRollover() because it expects a LogRecord and
+        # we're writing to the stream directly, bypassing the logging module.
+        if _log_handler.maxBytes > 0:
+            _log_handler.stream.seek(0, 2)
+            if _log_handler.stream.tell() >= _log_handler.maxBytes:
+                _log_handler.doRollover()
             
     except Exception as e:
         # Silently fail - logging should never break the tool
