@@ -437,3 +437,81 @@ class TestEnvHotReload:
         config_module._env_mtimes.clear()
         assert _check_env_reload() is False
 
+    def test_hot_reload_resets_logging(self, tmp_path, monkeypatch):
+        """reset_logging() is called when .env is reloaded."""
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "DB_MCP_DATABASE=sqlserver\n"
+            "DB_MCP_CONNECTION_STRING=test\n"
+            "DB_MCP_ENABLE_LOGGING=false\n"
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("DB_MCP_PROJECT_DIR", raising=False)
+
+        load_config()
+
+        original_mtime = env_file.stat().st_mtime
+        env_file.write_text(
+            "DB_MCP_DATABASE=sqlserver\n"
+            "DB_MCP_CONNECTION_STRING=test\n"
+            "DB_MCP_ENABLE_LOGGING=true\n"
+        )
+        os.utime(str(env_file), (original_mtime + 1, original_mtime + 1))
+
+        with patch("db_inspector_mcp.usage_logging.reset_logging") as mock_reset:
+            load_config()
+            mock_reset.assert_called_once()
+
+    def test_hot_reload_resets_logging_without_backend_change(self, tmp_path, monkeypatch):
+        """reset_logging() is called even when only logging config changes
+        (no backend connection string changes).
+        """
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "DB_MCP_DATABASE=sqlserver\n"
+            "DB_MCP_CONNECTION_STRING=test\n"
+            "DB_MCP_ENABLE_LOGGING=false\n"
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("DB_MCP_PROJECT_DIR", raising=False)
+
+        load_config()
+
+        original_mtime = env_file.stat().st_mtime
+        env_file.write_text(
+            "DB_MCP_DATABASE=sqlserver\n"
+            "DB_MCP_CONNECTION_STRING=test\n"
+            "DB_MCP_ENABLE_LOGGING=true\n"
+        )
+        os.utime(str(env_file), (original_mtime + 1, original_mtime + 1))
+
+        with patch("db_inspector_mcp.usage_logging.reset_logging") as mock_reset:
+            config = load_config()
+            mock_reset.assert_called_once()
+            assert config["DB_MCP_ENABLE_LOGGING"] is True
+
+    def test_db_tool_calls_load_config(self, tmp_path, monkeypatch):
+        """A tool decorated with @db_tool calls load_config() before
+        executing the tool body.
+        """
+        env_file = tmp_path / ".env"
+        env_file.write_text("DB_MCP_DATABASE=sqlserver\nDB_MCP_CONNECTION_STRING=test\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("DB_MCP_PROJECT_DIR", raising=False)
+
+        from unittest.mock import MagicMock
+
+        with patch("db_inspector_mcp.tools.load_config") as mock_load, \
+             patch("db_inspector_mcp.tools.get_registry") as mock_reg:
+            registry = MagicMock()
+            backend = MagicMock()
+            backend.count_query_results.return_value = 42
+            backend.sql_dialect = "mssql"
+            registry.get.return_value = backend
+            registry.list_backends.return_value = ["default"]
+            mock_reg.return_value = registry
+
+            from db_inspector_mcp.tools import db_count_query_results
+            db_count_query_results("SELECT 1")
+            mock_load.assert_called()
+

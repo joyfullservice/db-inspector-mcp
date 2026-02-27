@@ -19,6 +19,8 @@ All tools are read-only by default and designed for safe database exploration an
 - Performance measurement and execution plans
 """
 
+import functools
+import inspect
 import re
 import sys
 from pathlib import Path
@@ -28,7 +30,7 @@ from urllib.parse import unquote, urlparse
 from mcp.server.fastmcp import Context, FastMCP
 
 from .backends.registry import get_registry
-from .config import check_data_access, get_config, initialize_from_workspace
+from .config import check_data_access, get_config, initialize_from_workspace, load_config
 from .security import validate_readonly_sql
 from .usage_logging import with_logging
 
@@ -278,11 +280,47 @@ def setup_db_inspector() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Composite tool decorator
+# ---------------------------------------------------------------------------
+
+def db_tool(name: str):
+    """Register an MCP tool with config hot-reload and usage logging.
+
+    Composes three concerns in the correct order so that every tool call:
+    1. Refreshes configuration from ``.env`` (one ``stat()`` call, reload
+       only when the file has changed).
+    2. Initializes or re-initializes usage logging with the current env vars.
+    3. Executes the tool body and logs the outcome.
+
+    Usage::
+
+        @db_tool("db_my_tool")
+        def db_my_tool(query: str, database: str | None = None) -> dict[str, Any]:
+            ...
+    """
+    def decorator(func):
+        logged = with_logging(name)(func)
+
+        if inspect.iscoroutinefunction(func):
+            @functools.wraps(func)
+            async def with_refresh(*args, **kwargs):
+                load_config()
+                return await logged(*args, **kwargs)
+        else:
+            @functools.wraps(func)
+            def with_refresh(*args, **kwargs):
+                load_config()
+                return logged(*args, **kwargs)
+
+        return mcp.tool()(with_refresh)
+    return decorator
+
+
+# ---------------------------------------------------------------------------
 # MCP Tools
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
-@with_logging("db_count_query_results")
+@db_tool("db_count_query_results")
 def db_count_query_results(query: str, database: str | None = None) -> dict[str, Any]:
     """
     Count the number of rows a SELECT query returns.
@@ -335,8 +373,7 @@ def db_count_query_results(query: str, database: str | None = None) -> dict[str,
         return {"error": msg, "count": None}
 
 
-@mcp.tool()
-@with_logging("db_get_query_columns")
+@db_tool("db_get_query_columns")
 def db_get_query_columns(query: str, database: str | None = None) -> dict[str, Any]:
     """
     Analyze the column schema of a SELECT query's results.
@@ -396,8 +433,7 @@ def db_get_query_columns(query: str, database: str | None = None) -> dict[str, A
         return {"error": msg, "columns": []}
 
 
-@mcp.tool()
-@with_logging("db_sum_query_column")
+@db_tool("db_sum_query_column")
 def db_sum_query_column(query: str, column: str, database: str | None = None) -> dict[str, Any]:
     """
     Sum a specific column from a SELECT query's results.
@@ -455,8 +491,7 @@ def db_sum_query_column(query: str, column: str, database: str | None = None) ->
         return {"error": msg, "sum": None}
 
 
-@mcp.tool()
-@with_logging("db_measure_query")
+@db_tool("db_measure_query")
 def db_measure_query(query: str, max_rows: int = 1000, database: str | None = None) -> dict[str, Any]:
     """
     Measure query execution time and retrieve limited rows for performance testing.
@@ -513,8 +548,7 @@ def db_measure_query(query: str, max_rows: int = 1000, database: str | None = No
         return {"error": msg, "execution_time_ms": None, "row_count": 0, "hit_limit": False}
 
 
-@mcp.tool()
-@with_logging("db_preview")
+@db_tool("db_preview")
 def db_preview(query: str, max_rows: int = 100, database: str | None = None) -> dict[str, Any]:
     """
     Sample N rows from a query result to preview actual data.
@@ -569,8 +603,7 @@ def db_preview(query: str, max_rows: int = 100, database: str | None = None) -> 
         return {"error": msg, "rows": []}
 
 
-@mcp.tool()
-@with_logging("db_explain")
+@db_tool("db_explain")
 def db_explain(query: str, database: str | None = None) -> dict[str, Any]:
     """
     Return database-native execution plan (EXPLAIN/EXPLAIN PLAN output).
@@ -628,8 +661,7 @@ def db_explain(query: str, database: str | None = None) -> dict[str, Any]:
         return {"error": msg, "plan": None}
 
 
-@mcp.tool()
-@with_logging("db_compare_queries")
+@db_tool("db_compare_queries")
 def db_compare_queries(
     sql1: str,
     sql2: str,
@@ -777,8 +809,7 @@ def db_compare_queries(
         return {"error": msg}
 
 
-@mcp.tool()
-@with_logging("db_list_tables")
+@db_tool("db_list_tables")
 def db_list_tables(database: str | None = None, name_filter: str | None = None) -> dict[str, Any]:
     """
     List all tables in the database with metadata.
@@ -834,8 +865,7 @@ def db_list_tables(database: str | None = None, name_filter: str | None = None) 
         return {"error": str(e), "tables": []}
 
 
-@mcp.tool()
-@with_logging("db_list_views")
+@db_tool("db_list_views")
 def db_list_views(database: str | None = None, name_filter: str | None = None) -> dict[str, Any]:
     """
     List all views in the database with their SQL definitions.
@@ -894,8 +924,7 @@ def db_list_views(database: str | None = None, name_filter: str | None = None) -
         return {"error": str(e), "views": []}
 
 
-@mcp.tool()
-@with_logging("db_check_readonly_status")
+@db_tool("db_check_readonly_status")
 def db_check_readonly_status(database: str | None = None) -> dict[str, Any]:
     """
     Verify that the database connection is read-only for safety confirmation.
@@ -943,8 +972,7 @@ def db_check_readonly_status(database: str | None = None) -> dict[str, Any]:
         return {"readonly": False, "details": f"Error during verification: {str(e)}"}
 
 
-@mcp.tool()
-@with_logging("db_get_access_query_definition")
+@db_tool("db_get_access_query_definition")
 def db_get_access_query_definition(name: str, database: str | None = None) -> dict[str, Any]:
     """
     Get Access query SQL definition by name (requires access_com backend).
@@ -1012,8 +1040,7 @@ def db_get_access_query_definition(name: str, database: str | None = None) -> di
         ) from e
 
 
-@mcp.tool()
-@with_logging("db_list_databases")
+@db_tool("db_list_databases")
 async def db_list_databases(ctx: Context) -> dict[str, Any]:
     """
     List all available database backends that have been configured.
@@ -1308,8 +1335,7 @@ _SQL_HELP = {
 }
 
 
-@mcp.tool()
-@with_logging("db_sql_help")
+@db_tool("db_sql_help")
 def db_sql_help(topic: str | None = None, database: str | None = None) -> dict[str, Any]:
     """
     Get SQL syntax help for the database's dialect.

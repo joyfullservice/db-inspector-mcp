@@ -8,6 +8,39 @@
 
 ---
 
+## 2026-02-27 — Composite `@db_tool` decorator for config hot-reload and logging
+
+**Trigger**: Two interrelated bugs discovered during production use. (1) `.env` hot-reload only triggered on 2 of 13 tools (`db_preview` and `db_compare_queries` via `check_data_access()` -> `load_config()`). The other 11 tools never called `load_config()`, so editing `.env` had no effect until server restart. (2) The logging system cached `_logging_enabled = False` permanently when `_initialize_logging()` ran before the lazy `.env` load populated `DB_MCP_ENABLE_LOGGING`. Logging was silently disabled for two weeks after the lazy-init change on Feb 17.
+
+**Options explored**:
+- **Add `load_config()` call to each tool** — simple but error-prone. Developers adding new tools must remember two separate concerns (config refresh + logging), and forgetting either is a silent bug.
+- **Separate `@with_config_refresh` decorator** — three stacked decorators per tool (`@mcp.tool()` + `@with_config_refresh` + `@with_logging`). Ordering matters and is easy to get wrong.
+- **Composite `@db_tool("name")` decorator (chosen)** — single decorator replaces `@mcp.tool()` + `@with_logging("name")`. Internally composes `load_config()` -> `with_logging` -> tool body, guaranteeing correct call order. Impossible to forget config refresh on new tools.
+
+**Decision**: Composite `@db_tool("name")` decorator in `tools.py`. Call order:
+
+```
+FastMCP dispatch
+  -> with_refresh (load_config — one stat() call, reload if .env changed)
+    -> with_logging (check _initialize_logging() with fresh env vars, time execution, log result)
+      -> tool function body
+```
+
+Config refresh runs first so `_initialize_logging()` sees current env vars. The logging timer measures only tool execution, not config reload overhead.
+
+Additional fixes in this change:
+- `_initialize_logging()` no longer caches `False` when disabled. This lets it re-check `os.getenv()` on each call until logging is successfully initialized or a real I/O failure occurs (which *is* cached to avoid retry spam).
+- `reset_logging()` function added to `usage_logging.py`. Closes the file handler and clears all module state.
+- `load_config()` calls `reset_logging()` unconditionally when `.env` is reloaded (not just when backend config changes), so logging config changes take effect immediately.
+
+**Known limitation**: In the lazy-init scenario (user-level MCP config), the first `db_list_databases` call won't be logged. The lazy-init loads `.env` inside the tool body (after `with_logging` already checked and found no `DB_MCP_ENABLE_LOGGING`). All subsequent calls log correctly.
+
+**What this rules out**: Per-tool customisation of reload behaviour. All tools share the same config refresh + logging lifecycle.
+
+**Relevant files**: `src/db_inspector_mcp/tools.py` (decorator + all 13 tool registrations), `src/db_inspector_mcp/usage_logging.py` (`_initialize_logging` fix, `reset_logging`), `src/db_inspector_mcp/config.py` (`reset_logging` call), `tests/test_logging.py` (new), `tests/test_config.py` (3 new tests), `CONTRIBUTING.md` (updated instructions)
+
+---
+
 ## 2026-02-26 — Hot-reload `.env` files via mtime check
 
 **Trigger**: When running the MCP server globally (user-level `mcp.json`), changing per-project data-access permissions in `.env` required restarting the server. This was friction for users toggling `DB_MCP_ALLOW_DATA_ACCESS` or `DB_MCP_ALLOW_PREVIEW` across different projects.

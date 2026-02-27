@@ -197,12 +197,11 @@ db-inspector-mcp/
 
 ### Adding a New Tool
 
-1. Add the function in `tools.py` with `@mcp.tool()` decorator
-2. Add `@with_logging("tool_name")` decorator for usage tracking
-3. Write comprehensive docstring (shown to AI agents)
-4. Handle errors gracefully (return error dict, don't crash)
-5. Add tests in `tests/test_tools.py`
-6. Update README with usage examples
+1. Add the function in `tools.py` with the `@db_tool("tool_name")` decorator (this registers the tool with FastMCP, adds `.env` hot-reload, and enables usage logging in a single decorator)
+2. Write comprehensive docstring (shown to AI agents)
+3. Handle errors gracefully (return error dict, don't crash)
+4. Add tests in `tests/test_tools.py`
+5. Update README with usage examples
 
 ### Adding SQL Help Topics
 

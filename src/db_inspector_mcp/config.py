@@ -314,25 +314,32 @@ def load_config() -> dict[str, Any]:
         "DB_MCP_LOG_BACKUP_COUNT": int(os.getenv("DB_MCP_LOG_BACKUP_COUNT", "5")),
     }
 
-    if reloaded and old_backend_env is not None:
-        new_backend_env = _snapshot_backend_env()
-        if new_backend_env != old_backend_env:
-            print("Backend configuration changed — re-initializing backends…", file=sys.stderr)
-            registry = get_registry()
-            registry.clear()
+    if reloaded:
+        # Always reset logging so changes to DB_MCP_ENABLE_LOGGING,
+        # DB_MCP_LOG_DIR, etc. take effect even when backend config is
+        # unchanged.
+        from .usage_logging import reset_logging
+        reset_logging()
 
-            # Reset lazy-init flag in tools module so workspace detection
-            # doesn't get skipped after a registry clear.
-            _reset_lazy_init()
+        if old_backend_env is not None:
+            new_backend_env = _snapshot_backend_env()
+            if new_backend_env != old_backend_env:
+                print("Backend configuration changed — re-initializing backends…", file=sys.stderr)
+                registry = get_registry()
+                registry.clear()
 
-            try:
-                initialize_backends()
-                from .main import _verify_readonly
-                _verify_readonly(config, get_registry())
-            except Exception as exc:
-                print(f"Warning: backend re-init after .env reload failed: {exc}", file=sys.stderr)
-        else:
-            print("Configuration reloaded (no backend changes).", file=sys.stderr)
+                # Reset lazy-init flag in tools module so workspace detection
+                # doesn't get skipped after a registry clear.
+                _reset_lazy_init()
+
+                try:
+                    initialize_backends()
+                    from .main import _verify_readonly
+                    _verify_readonly(config, get_registry())
+                except Exception as exc:
+                    print(f"Warning: backend re-init after .env reload failed: {exc}", file=sys.stderr)
+            else:
+                print("Configuration reloaded (no backend changes).", file=sys.stderr)
 
     return config
 

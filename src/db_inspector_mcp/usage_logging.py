@@ -134,14 +134,17 @@ def _initialize_logging() -> bool:
     """
     global _logging_enabled, _log_handler, _log_file
     
-    # Return cached state if already initialized
-    if _logging_enabled is not None:
-        return _logging_enabled
-    
+    # Already successfully initialized -- skip re-init.
+    if _logging_enabled is True:
+        return True
+
     config = _get_logging_config()
-    
+
     if not config["enabled"]:
-        _logging_enabled = False
+        # Do NOT cache False: in the lazy-init path the .env file hasn't
+        # been loaded yet, so the env var is absent.  Leaving
+        # _logging_enabled as None lets us re-check on the next call once
+        # load_config() has populated the environment.
         return False
     
     # Determine log directory
@@ -185,6 +188,24 @@ def _initialize_logging() -> bool:
         print(f"Warning: Could not initialize logging: {e}", file=sys.stderr)
         _logging_enabled = False
         return False
+
+
+def reset_logging() -> None:
+    """Clear logging state so it re-initializes from fresh env vars.
+
+    Called by :func:`config.load_config` when a ``.env`` file change is
+    detected, ensuring that logging configuration changes (enable/disable,
+    log directory, rotation settings) take effect without a server restart.
+    """
+    global _logging_enabled, _log_handler, _log_file
+    if _log_handler is not None:
+        try:
+            _log_handler.close()
+        except Exception:
+            pass
+    _logging_enabled = None
+    _log_handler = None
+    _log_file = None
 
 
 def _write_log_entry(entry: dict[str, Any]) -> None:
