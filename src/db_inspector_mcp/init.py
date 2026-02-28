@@ -138,19 +138,15 @@ def run_init(argv: list[str] | None = None) -> None:
         print(f"Error: {target_dir} is not a directory.", file=sys.stderr)
         sys.exit(1)
 
-    env_path = target_dir / ".env"
-    if env_path.exists() and not args.force:
-        print(
-            f"Error: {env_path} already exists. Use --force to overwrite.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
     print("Initializing db-inspector-mcp...")
 
     # 1. Copy .env template
-    env_path = _write_env_file(target_dir, force=args.force)
-    print(f"  Created {env_path}")
+    env_path = target_dir / ".env"
+    if env_path.exists() and not args.force:
+        print(f"  {env_path} already exists (use --force to overwrite)")
+    else:
+        env_path = _write_env_file(target_dir, force=args.force)
+        print(f"  Created {env_path}")
 
     # 2. Register in global ~/.cursor/mcp.json
     _register_global_mcp()
