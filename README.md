@@ -53,18 +53,18 @@ Add this to the appropriate config file:
   "mcpServers": {
     "db-inspector-mcp": {
       "command": "uvx",
-      "args": ["--upgrade", "db-inspector-mcp"]
+      "args": ["db-inspector-mcp@latest"]
     }
   }
 }
 ```
 
-The `--upgrade` flag ensures `uvx` always pulls the latest version from [PyPI](https://pypi.org/project/db-inspector-mcp/) instead of using a cached copy.
+The `@latest` suffix ensures `uvx` always pulls the latest version from [PyPI](https://pypi.org/project/db-inspector-mcp/) instead of using a cached copy.
 
 **Alternative for Claude Code** -- you can use the CLI instead of editing JSON:
 
 ```bash
-claude mcp add db-inspector-mcp -- uvx --upgrade db-inspector-mcp
+claude mcp add db-inspector-mcp -- uvx db-inspector-mcp@latest
 ```
 
 **Shortcut** -- the built-in `init` command registers the server globally and creates a `.env` template in one step:
@@ -223,7 +223,7 @@ Call `db_list_databases()` first to discover available database names.
   "mcpServers": {
     "db-inspector-mcp": {
       "command": "uvx",
-      "args": ["--upgrade", "db-inspector-mcp"]
+      "args": ["db-inspector-mcp@latest"]
     }
   }
 }
@@ -240,7 +240,7 @@ Call `db_list_databases()` first to discover available database names.
   "mcpServers": {
     "db-inspector-mcp": {
       "command": "uvx",
-      "args": ["--upgrade", "db-inspector-mcp"]
+      "args": ["db-inspector-mcp@latest"]
     }
   }
 }
@@ -251,7 +251,7 @@ Call `db_list_databases()` first to discover available database names.
 **CLI alternative** -- register without editing JSON:
 
 ```bash
-claude mcp add db-inspector-mcp -- uvx --upgrade db-inspector-mcp
+claude mcp add db-inspector-mcp -- uvx db-inspector-mcp@latest
 ```
 
 ### Other MCP Clients
@@ -274,7 +274,7 @@ This works even when the working directory is not the project root (the typical 
   "mcpServers": {
     "db-inspector-mcp": {
       "command": "uvx",
-      "args": ["--upgrade", "db-inspector-mcp"],
+      "args": ["db-inspector-mcp@latest"],
       "env": {
         "DB_MCP_PROJECT_DIR": "C:\\Users\\me\\projects\\my-project"
       }

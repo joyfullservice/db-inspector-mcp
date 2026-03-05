@@ -279,7 +279,7 @@ CI runs on push/PR and validates tests (excluding Access integration tests), pac
 
 6. **Test the published package:**
    ```bash
-   uvx --upgrade db-inspector-mcp --version
+   uvx db-inspector-mcp@latest --version
    ```
 
 ## Code Style

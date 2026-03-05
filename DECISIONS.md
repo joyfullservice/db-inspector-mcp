@@ -79,6 +79,16 @@ contradictory guidance.
 
 ---
 
+## 2026-03-05 — Fix uvx syntax: @latest instead of --upgrade
+
+**Trigger**: `--upgrade` is not a valid `uvx` (`uv tool run`) flag — it exists for `uv pip install` and `uv tool install` but not `uvx`. All MCP config examples and the `init` command were silently broken.
+
+**Decision**: Changed args from `["--upgrade", "db-inspector-mcp"]` to `["db-inspector-mcp@latest"]`, which is the documented uvx syntax for always resolving the latest version. Also prints version at server startup for visibility in MCP logs.
+
+**Relevant files**: `init.py`, `main.py`, `README.md`, `CONTRIBUTING.md`
+
+---
+
 ## 2026-03-05 — Isolated Access instance for integration tests via DispatchEx
 
 **Trigger**: The `access_app` fixture used `win32com.client.Dispatch("Access.Application")`, which can attach to a user's already-running Access instance rather than creating a new one. When fixture teardown called `app.Quit()`, it closed the user's database — a data-loss risk that was previously masked because integration tests required an explicit opt-in env var.
@@ -229,7 +239,9 @@ Also fixed a stale test (`test_init_fails_if_env_exists` → `test_init_skips_en
 
 Key implementation choices:
 - **PyPI Trusted Publishing** — CI/CD uses GitHub Actions (`.github/workflows/publish.yml`) with PyPI's trusted publisher mechanism (OIDC tokens) instead of storing API keys as secrets. The workflow triggers on GitHub Release creation, builds the package, and uploads to PyPI automatically.
-- **MCP config uses uvx** — The `init` command now registers `{"command": "uvx", "args": ["db-inspector-mcp"]}` in `~/.cursor/mcp.json`. All README examples updated accordingly. Development installs still work via the direct `db-inspector-mcp` command.
+- **MCP config uses uvx** — The `init` command now registers `{"command": "uvx", "args": ["db-inspector-mcp@latest"]}` in `~/.cursor/mcp.json`. All README examples updated accordingly. Development installs still work via the direct `db-inspector-mcp` command.
+
+> **⚠ Partially superseded** (2026-03-05): This entry originally used `["--upgrade", "db-inspector-mcp"]` in the MCP config args. `--upgrade` is not a valid `uvx` flag and was silently ignored. Changed to `["db-inspector-mcp@latest"]`. See "Replace uvx --upgrade with @latest for version freshness" above.
 - **`__version__` in `__init__.py`** — Added for runtime version access and the new `--version` CLI flag.
 - **`.env.example` bundled in wheel** — Copied into `src/db_inspector_mcp/` so `importlib.resources` can find it in non-editable installs. The `load_env_example()` resolution order was updated to prefer `importlib.resources` first.
 - **License format updated** — `pyproject.toml` changed from deprecated `license = {text = "MIT"}` to SPDX string `license = "MIT"` to eliminate build warnings.

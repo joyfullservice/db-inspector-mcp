@@ -68,6 +68,9 @@ def main() -> None:
     if _handle_subcommand():
         return
 
+    from . import __version__
+    print(f"db-inspector-mcp v{__version__}", file=sys.stderr)
+
     # Load configuration (automatically loads .env files from project root)
     # Environment variables from MCP server env section take precedence
     config = get_config()
