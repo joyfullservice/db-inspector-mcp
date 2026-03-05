@@ -470,6 +470,25 @@ Some tools require explicit authorization:
 
 Metadata tools (row counts, column schemas, execution plans) are always available.
 
+### Data Access Considerations
+
+By default, db-inspector-mcp exposes only schema metadata and aggregates — table names, column types, row counts, and execution plans. No actual row data leaves your database.
+
+When you enable data access (`DB_MCP_ALLOW_DATA_ACCESS=true`), tools like `db_preview` return actual row values from your database. This data is sent to your AI provider as part of the conversation context. Depending on your provider and configuration, this data may be:
+
+- **Retained** in conversation logs or audit trails
+- **Used for model training**, potentially surfacing in future model outputs
+- **Stored in regions** that may not align with your data residency requirements
+
+Before enabling data access on databases that contain personally identifiable information (PII), protected health information (PHI), financial records, or other regulated data, verify your AI provider's data retention and model training policies. Most providers offer settings to opt out of training — ensure these are configured appropriately for your environment.
+
+For granular control, use per-connection overrides to enable data access selectively — for example, allowing it on development databases while keeping it off for production:
+
+```env
+DB_MCP_DEV_ALLOW_DATA_ACCESS=true
+DB_MCP_PROD_ALLOW_DATA_ACCESS=false
+```
+
 ### Read-Only Verification
 
 At startup (if `DB_MCP_VERIFY_READONLY=true`), the server verifies the database connection is read-only by checking role membership (SQL Server) or privileges (PostgreSQL). If write permissions are detected, a warning is logged. Set `DB_MCP_READONLY_FAIL_ON_WRITE=true` to exit on detection instead.

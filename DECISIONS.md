@@ -79,6 +79,23 @@ contradictory guidance.
 
 ---
 
+## 2026-03-05 — Improved data access documentation
+
+**Trigger**: Data access requires explicit opt-in, but the `.env.example` comments and README described the feature mechanically (what the flags do) without helping users understand the broader context (how data flows through AI providers and what that means for regulated environments).
+
+**Options explored**:
+- **Improved inline documentation** — expand `.env.example` comments and add a README section covering AI provider data handling considerations. Users already manually edit `.env` to enable data access, so the guidance appears at the natural decision point. No code changes, no friction.
+- **Runtime stderr warning** — emit a notice when the server starts with data access enabled. Low friction, but MCP stderr output typically goes to client logs rather than the chat, reducing visibility.
+- **Explicit acknowledgment gate** — require a second env var alongside the data access flag. Adds ceremony without clear benefit since users are already making a deliberate configuration change.
+
+**Decision**: Improved inline documentation. Added a brief note in `.env.example` at the data access flag explaining that row data flows to the AI provider when enabled, with a link to a new "Data Access Considerations" section in the README. The README section covers provider data retention, model training policies, data residency, and per-connection overrides for granular control.
+
+**What this rules out**: Runtime consent mechanisms or dual-flag patterns. Would revisit if user feedback suggests the inline guidance is insufficient.
+
+**Relevant files**: `.env.example`, `src/db_inspector_mcp/.env.example`, `README.md`.
+
+---
+
 ## 2026-03-05 — Per-connection data access permissions
 
 **Trigger**: Data access flags (`DB_MCP_ALLOW_DATA_ACCESS`, `DB_MCP_ALLOW_PREVIEW`) applied globally to all connections. In multi-database configurations (e.g. migration from Access to SQL Server) users needed to allow data preview on a legacy connection while keeping it disabled on others.
