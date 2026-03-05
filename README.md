@@ -503,7 +503,11 @@ Starts the MCP server (stdio transport). This is how MCP clients launch it.
 
 Initialize db-inspector-mcp in a project directory:
 
-1. Creates a `.env` file from the configuration template (use `--force` to overwrite)
+1. Configures your `.env` file:
+   - **No `.env`** -- creates one from the full configuration template
+   - **`.env` exists without `DB_MCP_` variables** -- appends a commented starter block with the two required variables and a link to the docs
+   - **`.env` already has `DB_MCP_` references** -- leaves it unchanged
+   - Use `--force` to replace an existing `.env` with the full template
 2. Registers the server in `~/.cursor/mcp.json` and `~/.claude.json` for automatic discovery
 
 ```bash

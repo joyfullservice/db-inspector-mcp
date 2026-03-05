@@ -9,6 +9,8 @@ import pytest
 
 from db_inspector_mcp.init import (
     MCP_JSON_SERVER_ENTRY,
+    _ENV_STARTER_BLOCK,
+    _env_has_db_mcp_vars,
     _register_global_mcp,
     _register_in_config,
     _write_env_file,
@@ -232,6 +234,34 @@ class TestIsGloballyRegistered:
         assert is_globally_registered() is False
 
 
+class TestEnvHasDbMcpVars:
+    """Tests for _env_has_db_mcp_vars detection."""
+
+    def test_detects_active_var(self, tmp_path):
+        """Returns True for uncommented DB_MCP_ variable."""
+        env = tmp_path / ".env"
+        env.write_text("DB_MCP_DATABASE=sqlserver\n")
+        assert _env_has_db_mcp_vars(env) is True
+
+    def test_detects_commented_var(self, tmp_path):
+        """Returns True for commented-out DB_MCP_ variable."""
+        env = tmp_path / ".env"
+        env.write_text("# DB_MCP_DATABASE=sqlserver\n")
+        assert _env_has_db_mcp_vars(env) is True
+
+    def test_false_without_db_mcp(self, tmp_path):
+        """Returns False when no DB_MCP_ references exist."""
+        env = tmp_path / ".env"
+        env.write_text("SECRET_KEY=abc\nDEBUG=true\n")
+        assert _env_has_db_mcp_vars(env) is False
+
+    def test_false_for_empty_file(self, tmp_path):
+        """Returns False for an empty .env file."""
+        env = tmp_path / ".env"
+        env.write_text("")
+        assert _env_has_db_mcp_vars(env) is False
+
+
 class TestRunInit:
     """Tests for the full run_init CLI command."""
 
@@ -257,9 +287,10 @@ class TestRunInit:
             data = json.loads(path.read_text())
             assert "db-inspector-mcp" in data["mcpServers"]
 
-    def test_init_skips_env_if_exists(self, tmp_path, monkeypatch):
-        """Init preserves existing .env and still registers the MCP server."""
-        (tmp_path / ".env").write_text("existing")
+    def test_init_skips_env_if_db_mcp_vars_present(self, tmp_path, monkeypatch):
+        """Init leaves .env unchanged when it already contains DB_MCP_ config."""
+        original = "SECRET_KEY=abc\nDB_MCP_DATABASE=sqlserver\n"
+        (tmp_path / ".env").write_text(original)
         cursor_json = tmp_path / "cursor_home" / ".cursor" / "mcp.json"
         claude_json = tmp_path / "cursor_home" / ".claude.json"
         monkeypatch.setattr(
@@ -269,9 +300,42 @@ class TestRunInit:
 
         run_init(["--dir", str(tmp_path)])
 
-        assert (tmp_path / ".env").read_text() == "existing"
+        assert (tmp_path / ".env").read_text() == original
         assert cursor_json.exists()
         assert claude_json.exists()
+
+    def test_init_skips_when_db_mcp_commented(self, tmp_path, monkeypatch):
+        """Init treats commented DB_MCP_ references as already configured."""
+        original = "SECRET_KEY=abc\n#DB_MCP_DATABASE=sqlserver\n"
+        (tmp_path / ".env").write_text(original)
+        cursor_json = tmp_path / "cursor_home" / ".cursor" / "mcp.json"
+        monkeypatch.setattr(
+            "db_inspector_mcp.init._MCP_CLIENT_CONFIGS",
+            [("Cursor", cursor_json)],
+        )
+
+        run_init(["--dir", str(tmp_path)])
+
+        assert (tmp_path / ".env").read_text() == original
+
+    def test_init_appends_when_no_db_mcp_vars(self, tmp_path, monkeypatch):
+        """Init appends starter block when .env exists without DB_MCP_ vars."""
+        original = "SECRET_KEY=abc\nDEBUG=true\n"
+        (tmp_path / ".env").write_text(original)
+        cursor_json = tmp_path / "cursor_home" / ".cursor" / "mcp.json"
+        monkeypatch.setattr(
+            "db_inspector_mcp.init._MCP_CLIENT_CONFIGS",
+            [("Cursor", cursor_json)],
+        )
+
+        run_init(["--dir", str(tmp_path)])
+
+        content = (tmp_path / ".env").read_text()
+        assert content.startswith(original)
+        assert "DB_MCP_DATABASE" in content
+        assert "DB_MCP_CONNECTION_STRING" in content
+        assert "db-inspector-mcp" in content
+        assert cursor_json.exists()
 
     def test_init_force_overwrites(self, tmp_path, monkeypatch):
         """Init with --force overwrites existing .env."""

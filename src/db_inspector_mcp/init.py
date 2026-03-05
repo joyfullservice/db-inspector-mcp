@@ -22,6 +22,20 @@ MCP_JSON_TEMPLATE = json.dumps(
     indent=2,
 )
 
+_DOCS_URL = "https://github.com/joyfullservice/db-inspector-mcp#configuration"
+
+_ENV_STARTER_BLOCK = f"""
+# db-inspector-mcp ({_DOCS_URL})
+#DB_MCP_DATABASE=sqlserver
+#DB_MCP_CONNECTION_STRING=Driver={{ODBC Driver 17 for SQL Server}};Server=localhost;Database=mydb;UID=user;PWD=password
+"""
+
+
+def _env_has_db_mcp_vars(env_path: Path) -> bool:
+    """Check if a .env file already references DB_MCP_ variables (even commented)."""
+    content = env_path.read_text(encoding="utf-8")
+    return "DB_MCP_" in content
+
 
 def load_env_example() -> str:
     """Read the .env.example template shipped with the package.
@@ -151,10 +165,18 @@ def run_init(argv: list[str] | None = None) -> None:
 
     print("Initializing db-inspector-mcp...")
 
-    # 1. Copy .env template
+    # 1. Configure .env
     env_path = target_dir / ".env"
+    env_appended = False
     if env_path.exists() and not args.force:
-        print(f"  {env_path} already exists (use --force to overwrite)")
+        if _env_has_db_mcp_vars(env_path):
+            print(f"  {env_path} already contains DB_MCP_ configuration")
+        else:
+            with open(env_path, "a", encoding="utf-8") as f:
+                f.write(_ENV_STARTER_BLOCK)
+            env_appended = True
+            print(f"  Appended DB_MCP_ starter config to {env_path}")
+            print(f"  Details: {_DOCS_URL}")
     else:
         env_path = _write_env_file(target_dir, force=args.force)
         print(f"  Created {env_path}")
@@ -165,7 +187,10 @@ def run_init(argv: list[str] | None = None) -> None:
     # 3. Next steps
     print()
     print("Next steps:")
-    print(f"  1. Edit {env_path} with your database connection details")
+    if env_appended:
+        print(f"  1. Edit the DB_MCP_ variables in {env_path}")
+    else:
+        print(f"  1. Edit {env_path} with your database connection details")
     print("  2. Restart your MCP client (Cursor, Claude Code, etc.) to load the server")
     print()
-    print("For configuration help, see: https://github.com/joyfullservice/db-inspector-mcp#configuration")
+    print(f"For configuration help, see: {_DOCS_URL}")

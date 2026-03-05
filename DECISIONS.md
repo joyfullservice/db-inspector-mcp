@@ -79,6 +79,25 @@ contradictory guidance.
 
 ---
 
+## 2026-03-05 — Append minimal starter block when .env already exists
+
+**Trigger**: When a user runs `db-inspector-mcp init` in a project that already has a `.env` file (e.g., for Django, Node, etc.), the command said "already exists" and provided no guidance on what `DB_MCP_*` variables to add. The `--force` flag would overwrite their entire file.
+
+**Options explored**:
+- **Separate reference file** (`.env.db-inspector-mcp`) — users could mistake it for the active config and enter credentials; most `.gitignore` files only match `.env` exactly, so the file could be committed with real credentials.
+- **Tool-specific `.env` file loaded as a config layer** — follows the `dotenv-flow`/`dotenv-multi` convention, but has the same `.gitignore` credential-leak risk as a separate reference file.
+- **Print to terminal only** — output disappears after scrolling; users often don't see MCP server startup messages, especially in Cursor.
+- **Append full 124-line template** — too verbose; clutters the user's existing `.env` with content for backends they may not use.
+- **Append minimal starter block (chosen)** — 3 commented-out lines (blank separator, comment with docs URL, the two required variables). Stays in `.env` which is already gitignored, nothing activates by accident, and the docs URL covers advanced settings.
+
+**Decision**: When `.env` exists, scan it for `DB_MCP_` (catches both active and commented-out references). If found, skip — the user already knows about us. If not found, append a minimal starter block. This keeps credentials in the one file that's already gitignored and avoids creating extra files that could confuse users or leak credentials.
+
+**What this rules out**: Creating any separate `.env.*` file during `init`. Would revisit if the starter block proves insufficient (e.g., users frequently need more than the two required variables to get started).
+
+**Relevant files**: `src/db_inspector_mcp/init.py`, `tests/test_init.py`, `README.md`
+
+---
+
 ## 2026-03-05 — Fix uvx syntax: @latest instead of --upgrade
 
 **Trigger**: `--upgrade` is not a valid `uvx` (`uv tool run`) flag — it exists for `uv pip install` and `uv tool install` but not `uvx`. All MCP config examples and the `init` command were silently broken.
