@@ -9,10 +9,12 @@ import json
 import sys
 from pathlib import Path
 
-# Minimal global mcp.json entry — no env overrides so project-level .env
-# settings (DB_MCP_ALLOW_DATA_ACCESS, etc.) are never shadowed.
+# Minimal global mcp.json entry — uses uvx for automatic package management.
+# No env overrides so project-level .env settings (DB_MCP_ALLOW_DATA_ACCESS,
+# etc.) are never shadowed.
 MCP_JSON_SERVER_ENTRY = {
-    "command": "db-inspector-mcp",
+    "command": "uvx",
+    "args": ["db-inspector-mcp"],
 }
 
 MCP_JSON_TEMPLATE = json.dumps(
@@ -25,23 +27,23 @@ def load_env_example() -> str:
     """Read the .env.example template shipped with the package.
 
     Resolution order:
-    1. Repo root relative to this file (editable / source installs)
-    2. ``importlib.resources`` (wheel / regular installs where the file is
-       bundled via ``package-data``)
+    1. ``importlib.resources`` (works for both wheel installs and editable
+       installs since the file lives in the package directory)
+    2. Repo root relative to this file (fallback for editable installs if
+       the package-local copy is missing)
     """
-    # Editable install: __file__ is src/db_inspector_mcp/init.py
-    repo_root = Path(__file__).resolve().parent.parent.parent
-    candidate = repo_root / ".env.example"
-    if candidate.is_file():
-        return candidate.read_text(encoding="utf-8")
-
-    # Regular install with package-data
     try:
         import importlib.resources
         ref = importlib.resources.files("db_inspector_mcp").joinpath(".env.example")
         return ref.read_text(encoding="utf-8")
     except (FileNotFoundError, TypeError, AttributeError):
         pass
+
+    # Fallback: editable install with file at repo root only
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    candidate = repo_root / ".env.example"
+    if candidate.is_file():
+        return candidate.read_text(encoding="utf-8")
 
     raise FileNotFoundError(
         "Could not find .env.example template. "

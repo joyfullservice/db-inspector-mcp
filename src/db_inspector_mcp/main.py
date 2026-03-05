@@ -20,12 +20,17 @@ def _handle_subcommand() -> bool:
         from .init import run_init
         run_init(sys.argv[2:])
         return True
+    if command in ("--version", "-V"):
+        from . import __version__
+        print(f"db-inspector-mcp {__version__}")
+        return True
     if command in ("--help", "-h"):
-        print("usage: db-inspector-mcp [init | --help]")
+        print("usage: db-inspector-mcp [init | --version | --help]")
         print()
         print("commands:")
-        print("  init    Initialize db-inspector-mcp in a project (creates .env,")
-        print("          registers in ~/.cursor/mcp.json)")
+        print("  init       Initialize db-inspector-mcp in a project (creates .env,")
+        print("             registers in ~/.cursor/mcp.json)")
+        print("  --version  Show version number")
         print()
         print("When run without arguments, starts the MCP server (stdio transport).")
         return True

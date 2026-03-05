@@ -25,14 +25,49 @@ A lightweight, extensible, cross-database MCP server (Model Context Protocol ser
 
 ## Installation
 
-### Basic Installation
+### Install with uvx (Recommended)
+
+The simplest way to use db-inspector-mcp is with [uvx](https://docs.astral.sh/uv/guides/tools/) (the tool runner from uv). You don't need to clone the repo or set up a virtual environment — just add the server to your MCP client config.
+
+**1. Install uv** (if you don't have it):
+
+```bash
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+**2. Add the MCP server config** to your `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (project-level):
+
+```json
+{
+  "mcpServers": {
+    "db-inspector-mcp": {
+      "command": "uvx",
+      "args": ["db-inspector-mcp"]
+    }
+  }
+}
+```
+
+**3. Create a `.env` file** in your project root with your database connection details (see [Configuration](#configuration) below).
+
+**4. Restart Cursor** to load the MCP server.
+
+That's it. `uvx` will automatically download, cache, and run the latest version of the package from [PyPI](https://pypi.org/project/db-inspector-mcp/).
+
+### Development Install (Editable)
+
+If you're contributing to the project or want to run from source:
 
 ```bash
 # Clone the repository
 git clone https://github.com/joyfullservice/db-inspector-mcp.git
 cd db-inspector-mcp
 
-# Create and activate a virtual environment (recommended)
+# Create and activate a virtual environment
 python -m venv venv
 
 # On Windows:
@@ -40,15 +75,15 @@ venv\Scripts\activate
 # On macOS/Linux:
 source venv/bin/activate
 
-# Install in development mode (editable install)
+# Install in editable mode
 pip install -e ".[dev]"
 ```
 
-**Note:** The `-e` flag installs the package in "editable" mode, which means changes to the source code are immediately reflected without needing to reinstall. This is recommended for development. See the [Building and Installing After Making Changes](#building-and-installing-after-making-changes) section for more details.
+The `-e` flag installs in editable mode — changes to source code take effect immediately without reinstalling. See the [Building and Installing After Making Changes](#building-and-installing-after-making-changes) section for more details.
 
-### Windows PATH Configuration
+#### Windows PATH Configuration
 
-After installation, you may see warnings about scripts not being on PATH. If you need to run `db-inspector-mcp` from the command line, add the Python Scripts directory to your PATH:
+After a development install, you may see warnings about scripts not being on PATH. If you need to run `db-inspector-mcp` from the command line, add the Python Scripts directory to your PATH:
 
 **PowerShell (run as Administrator):**
 ```powershell
@@ -58,8 +93,6 @@ if ($currentPath -notlike "*$scriptsPath*") {
     [Environment]::SetEnvironmentVariable("Path", "$currentPath;$scriptsPath", "User")
 }
 ```
-
-**Note:** The exact path may vary based on your Python installation. You can also check the warning message from `pip install` for the correct path.
 
 After updating PATH, restart your terminal (or Cursor) for changes to take effect.
 
@@ -89,13 +122,9 @@ Get up and running with db-inspector-mcp in Cursor in just a few steps:
 
 ### Step 1: Install the Package
 
-Make sure the package is installed (if you haven't already):
+If you haven't already, add the MCP server to your config (see [Installation](#installation) above). The recommended approach uses `uvx`, which requires no manual install step.
 
-```bash
-pip install -e ".[dev]"
-```
-
-Verify the command is available:
+For development installs, verify the command is available:
 
 ```bash
 db-inspector-mcp --help
@@ -117,7 +146,8 @@ This creates a `.env` file from the configuration template and registers the MCP
 {
   "mcpServers": {
     "db-inspector-mcp": {
-      "command": "db-inspector-mcp"
+      "command": "uvx",
+      "args": ["db-inspector-mcp"]
     }
   }
 }
@@ -215,7 +245,7 @@ If the MCP server doesn't load:
    - Ensure there are no syntax errors
 
 5. **Alternative command format:**
-   If `db-inspector-mcp` isn't in your PATH, you can update `.cursor/mcp.json` to use Python directly:
+   If you're using a development install and `db-inspector-mcp` isn't in your PATH, you can update `.cursor/mcp.json` to use Python directly:
    ```json
    {
      "mcpServers": {
@@ -371,7 +401,8 @@ Store non-sensitive settings that can be shared with your team:
 {
   "mcpServers": {
     "db-inspector-mcp": {
-      "command": "db-inspector-mcp",
+      "command": "uvx",
+      "args": ["db-inspector-mcp"],
       "env": {
         "DB_MCP_QUERY_TIMEOUT_SECONDS": "30",
         "DB_MCP_ALLOW_DATA_ACCESS": "false",
@@ -467,7 +498,8 @@ Add to `.cursor/mcp.json`:
 {
   "mcpServers": {
     "db-inspector-mcp": {
-      "command": "db-inspector-mcp",
+      "command": "uvx",
+      "args": ["db-inspector-mcp"],
       "env": {
         "DB_MCP_QUERY_TIMEOUT_SECONDS": "30",
         "DB_MCP_ALLOW_DATA_ACCESS": "false",
@@ -493,7 +525,8 @@ For migration scenarios where you need to compare Access and SQL Server:
 {
   "mcpServers": {
     "db-inspector-mcp": {
-      "command": "db-inspector-mcp",
+      "command": "uvx",
+      "args": ["db-inspector-mcp"],
       "env": {
         "DB_MCP_QUERY_TIMEOUT_SECONDS": "30",
         "DB_MCP_ALLOW_DATA_ACCESS": "true",
@@ -545,7 +578,8 @@ If the automatic workspace detection doesn't work in your environment, set `DB_M
 {
   "mcpServers": {
     "db-inspector-mcp": {
-      "command": "db-inspector-mcp",
+      "command": "uvx",
+      "args": ["db-inspector-mcp"],
       "env": {
         "DB_MCP_PROJECT_DIR": "C:\\Users\\me\\projects\\my-project",
         "DB_MCP_QUERY_TIMEOUT_SECONDS": "30",
@@ -564,7 +598,8 @@ Add to your Claude Code MCP configuration (similar format):
 {
   "mcpServers": {
     "db-inspector-mcp": {
-      "command": "db-inspector-mcp",
+      "command": "uvx",
+      "args": ["db-inspector-mcp"],
       "env": {
         "DB_MCP_QUERY_TIMEOUT_SECONDS": "30",
         "DB_MCP_ALLOW_DATA_ACCESS": "false"
@@ -999,7 +1034,9 @@ pip install -e .
 
 #### Building Distribution Packages
 
-To create installable distribution packages (wheel or source distribution):
+Production releases are built and published to [PyPI](https://pypi.org/project/db-inspector-mcp/) automatically via GitHub Actions when a new release is created on GitHub. You don't need to run these commands for normal development.
+
+To build locally for testing:
 
 ```bash
 # Install build tool (if not already installed)
@@ -1007,12 +1044,6 @@ pip install build
 
 # Build both wheel and source distribution
 python -m build
-
-# Or build just a wheel
-python -m build --wheel
-
-# Or build just a source distribution
-python -m build --sdist
 ```
 
 This creates packages in the `dist/` directory that can be installed with `pip install dist/db_inspector_mcp-*.whl`.
@@ -1025,6 +1056,9 @@ After building or reinstalling, verify it works:
 # Check the command is available
 db-inspector-mcp --help
 
+# Check the version
+db-inspector-mcp --version
+
 # Or test the import
 python -c "from db_inspector_mcp import main; print('Import successful')"
 ```
@@ -1033,10 +1067,10 @@ python -c "from db_inspector_mcp import main; print('Import successful')"
 
 | Scenario | Command | When Changes Take Effect |
 |----------|---------|-------------------------|
+| End users (uvx) | Add `uvx` config to `mcp.json` | Automatic via PyPI |
 | Development (editable) | `pip install -e ".[dev]"` | Immediately (no rebuild needed) |
 | Reinstall after metadata changes | `pip install -e ".[dev]"` | After reinstall |
-| Build distribution | `python -m build` | After installing the built package |
-| Standard install | `pip install .` | After reinstall (not recommended for development) |
+| Build locally | `python -m build` | After installing the built package |
 
 ### Testing Database Connections
 
@@ -1099,7 +1133,11 @@ db-inspector-mcp init --force
 db-inspector-mcp init --dir /path/to/project
 ```
 
-**Note:** The global `~/.cursor/mcp.json` entry contains only the server command (no `env` overrides). All tunable settings (`DB_MCP_ALLOW_DATA_ACCESS`, `DB_MCP_QUERY_TIMEOUT_SECONDS`, etc.) are configured per-project in `.env` so they can vary between projects.
+**Note:** The global `~/.cursor/mcp.json` entry uses `uvx` to run the server (no `env` overrides). All tunable settings (`DB_MCP_ALLOW_DATA_ACCESS`, `DB_MCP_QUERY_TIMEOUT_SECONDS`, etc.) are configured per-project in `.env` so they can vary between projects.
+
+### `db-inspector-mcp --version`
+
+Show the installed version number.
 
 ### `db-inspector-mcp --help`
 

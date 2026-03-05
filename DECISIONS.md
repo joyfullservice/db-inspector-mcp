@@ -8,6 +8,44 @@
 
 ---
 
+## 2026-02-27 — PyPI publishing and uvx as primary distribution
+
+**Trigger**: Preparing the project for public release on GitHub and PyPI. The editable install workflow (`pip install -e .`) works well for development but isn't practical for end users who just want to add the MCP server to their client config and go.
+
+**Options explored**:
+
+1. **Docker** — full isolation, but overkill for a lightweight Python CLI tool. Adds significant friction for Windows users who would need Docker Desktop running just to use an MCP server. No real benefit over Python-level isolation.
+
+2. **pip / pipx only** — standard Python packaging. Users would `pip install db-inspector-mcp` or `pipx install db-inspector-mcp`. Downsides: no auto-resolution on MCP client startup, users must manage virtualenvs or install pipx, and upgrades require explicit `pip install --upgrade` or `pipx upgrade` commands.
+
+3. **GitHub-only (no PyPI)** — users would `pip install git+https://github.com/joyfullservice/db-inspector-mcp`. This doesn't work with `uvx` at all, requires git on the user's machine, and makes version pinning awkward.
+
+4. **uvx via PyPI (chosen)** — `uvx` (from [uv](https://docs.astral.sh/uv/)) automatically downloads, caches, and runs the package in an isolated environment. Users don't clone the repo, create virtualenvs, or manage PATH. Cached environments are reused for near-instant subsequent starts. This is the emerging standard in the MCP ecosystem — most public MCP servers recommend `uvx` as the primary install method.
+
+**Decision**: Adopt `uvx` as the recommended installation method for end users. Publish the package to PyPI so `uvx db-inspector-mcp` works out of the box.
+
+Key implementation choices:
+- **PyPI Trusted Publishing** — CI/CD uses GitHub Actions (`.github/workflows/publish.yml`) with PyPI's trusted publisher mechanism (OIDC tokens) instead of storing API keys as secrets. The workflow triggers on GitHub Release creation, builds the package, and uploads to PyPI automatically.
+- **MCP config uses uvx** — The `init` command now registers `{"command": "uvx", "args": ["db-inspector-mcp"]}` in `~/.cursor/mcp.json`. All README examples updated accordingly. Development installs still work via the direct `db-inspector-mcp` command.
+- **`__version__` in `__init__.py`** — Added for runtime version access and the new `--version` CLI flag.
+- **`.env.example` bundled in wheel** — Copied into `src/db_inspector_mcp/` so `importlib.resources` can find it in non-editable installs. The `load_env_example()` resolution order was updated to prefer `importlib.resources` first.
+- **License format updated** — `pyproject.toml` changed from deprecated `license = {text = "MIT"}` to SPDX string `license = "MIT"` to eliminate build warnings.
+
+**What this rules out**:
+- The `init` command now writes a `uvx`-based config, so users without `uv` installed would need to manually edit `mcp.json` to use the direct `db-inspector-mcp` command instead. This is an acceptable trade-off since `uv` installation is a one-liner.
+- Version must be maintained in two places (`pyproject.toml` and `__init__.py`) until a single-source-of-truth approach (e.g., `setuptools-scm` or `importlib.metadata`) is adopted.
+
+**Relevant files**:
+- `src/db_inspector_mcp/__init__.py` — added `__version__`
+- `src/db_inspector_mcp/main.py` — added `--version` CLI flag
+- `src/db_inspector_mcp/init.py` — changed `MCP_JSON_SERVER_ENTRY` to use `uvx`, updated `load_env_example()` resolution order
+- `src/db_inspector_mcp/.env.example` — new file, package-bundled copy of root `.env.example`
+- `.github/workflows/publish.yml` — new file, GitHub Actions workflow for PyPI publishing
+- `pyproject.toml` — SPDX license format fix
+- `README.md` — restructured installation section (uvx primary, editable as dev path), updated all 7 MCP JSON config blocks to use `uvx`
+
+---
+
 ## 2026-02-27 — Never close a user's open Access database
 
 **Trigger**: Restarting the MCP server caused the COM backend to close and reopen the user's already-open Access databases, losing Shift-bypass state (autoexec macros and startup forms run on reopen). The user opens databases with special flags that suppress startup behavior; `OpenCurrentDatabase` destroys this state.
