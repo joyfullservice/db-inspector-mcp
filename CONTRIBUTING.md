@@ -234,6 +234,39 @@ finally:
 - Call `app.CloseCurrentDatabase()` without verifying it's the test database
 - Assume that `backend._app` is an instance the test created
 
+## Publishing a Release
+
+Releases are published to [PyPI](https://pypi.org/project/db-inspector-mcp/) automatically via GitHub Actions when you create a GitHub Release. End users install with `uvx db-inspector-mcp`.
+
+### Release checklist
+
+1. **Update the version number** in both places (they must match):
+   - `pyproject.toml` — the `version` field
+   - `src/db_inspector_mcp/__init__.py` — the `__version__` string
+
+2. **Verify the build locally:**
+   ```bash
+   python -m build
+   twine check dist/*
+   ```
+
+3. **Commit and push** the version bump to `main`.
+
+4. **Create a GitHub Release:**
+   - Go to the repo on GitHub → Releases → Draft a new release
+   - Create a new tag matching the version (e.g., `v0.2.0`)
+   - Write release notes summarizing what changed
+   - Click **Publish release**
+
+5. **Verify the publish workflow:**
+   - Go to Actions tab → check that the "Publish to PyPI" workflow completed successfully
+   - Visit `https://pypi.org/project/db-inspector-mcp/` to confirm the new version appears
+
+6. **Test the published package:**
+   ```bash
+   uvx --upgrade db-inspector-mcp --version
+   ```
+
 ## Code Style
 
 - Type hints on all function signatures
