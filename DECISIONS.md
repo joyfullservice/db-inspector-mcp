@@ -79,6 +79,49 @@ contradictory guidance.
 
 ---
 
+## 2026-03-05 — Isolated Access instance for integration tests via DispatchEx
+
+**Trigger**: The `access_app` fixture used `win32com.client.Dispatch("Access.Application")`, which can attach to a user's already-running Access instance rather than creating a new one. When fixture teardown called `app.Quit()`, it closed the user's database — a data-loss risk that was previously masked because integration tests required an explicit opt-in env var.
+
+**Options explored**:
+- **`Dispatch("Access.Application")`** (status quo) — creates a new instance when Access isn't running, but can attach to an existing one. `Quit()` in teardown risks closing the user's session.
+- **`_safe_quit_test_access()` with path check** (earlier approach from 2026-02-17) — checks `CurrentDb().Name` before quitting. Relies on correct path comparison and is fragile if the test DB path changes during teardown.
+- **`DispatchEx("Access.Application")` (chosen)** — always creates a new, isolated COM server process. The fixture owns this instance and can safely call `Quit()` regardless of what else the user has open. `UserControl = False` ensures auto-exit if references leak.
+
+**Decision**: Changed the `access_app` fixture to use `DispatchEx` with `UserControl = False`. This eliminates the attach-to-user-instance failure mode entirely. Also:
+- Auto-detect Access via `winreg` registry check (`HKEY_CLASSES_ROOT\Access.Application`) instead of requiring `DB_MCP_RUN_ACCESS_INTEGRATION=true`. The env var still works as an override.
+- Disabled `faulthandler` permanently after `app.Quit()` to suppress the harmless `RPC_E_DISCONNECTED` (0x80010108) traceback that Python's GC triggers when releasing stale COM proxies during process shutdown.
+
+**What this rules out**: Using `Dispatch` for integration test fixtures. `DispatchEx` is mandatory for any test that needs to call `Quit()` on the Access instance, because `Dispatch` cannot guarantee isolation from user sessions. Would revisit only if `DispatchEx` proves incompatible with a future Access/COM configuration.
+
+**Relevant files**:
+- `tests/test_backends.py` — `access_app` fixture, `_access_is_installed()`, `_RUN_ACCESS_INTEGRATION` auto-detection
+- `CONTRIBUTING.md` — updated safety model documentation
+
+---
+
+## 2026-03-05 — Explicit backend shutdown on registry replacement
+
+**Trigger**: Hot-reload paths (`load_config()` when backend env vars change) called `registry.clear()` and dropped backend object references, relying on garbage collection to eventually release long-lived resources. This left timing-sensitive cleanup (ODBC timers, open connections) to GC and made cleanup behavior non-deterministic.
+
+**Options explored**:
+- **Keep GC-driven cleanup** — minimal code churn, but resource release timing remains unpredictable and can delay lock/connection cleanup in long-lived MCP processes.
+- **Close in `config.load_config()` before `registry.clear()`** — works for hot-reload, but spreads lifecycle responsibility across modules and misses other replacement paths.
+- **Backend `close()` contract + registry-managed shutdown (chosen)** — add a no-op `DatabaseBackend.close()` API, implement backend-specific cleanup, and centralize invocation inside `BackendRegistry.clear()` and backend replacement in `register()`.
+
+**Decision**: Added explicit close hooks and made registry operations call them best-effort.
+- `DatabaseBackend.close()` now exists as a safe default no-op.
+- `MSSQLBackend` / `PostgresBackend` close cached DB connections explicitly.
+- `AccessODBCBackend` closes cached ODBC connection and cancels TTL timers.
+- `AccessCOMBackend` delegates to internal ODBC close and releases COM references/timers without calling `Quit()` or closing user-owned Access databases.
+- `BackendRegistry.clear()` and same-name replacement in `register()` now invoke `close()` before discarding instances.
+
+**What this rules out**: Depending on Python GC timing as the primary backend lifecycle mechanism during config reloads. Would revisit only if a backend cannot safely support idempotent `close()`.
+
+**Relevant files**: `src/db_inspector_mcp/backends/base.py`, `src/db_inspector_mcp/backends/registry.py`, `src/db_inspector_mcp/backends/mssql.py`, `src/db_inspector_mcp/backends/postgres.py`, `src/db_inspector_mcp/backends/access_odbc.py`, `src/db_inspector_mcp/backends/access_com.py`, `tests/test_backends.py`, `tests/test_config.py`.
+
+---
+
 ## 2026-03-05 — Improved data access documentation
 
 **Trigger**: Data access requires explicit opt-in, but the `.env.example` comments and README described the feature mechanically (what the flags do) without helping users understand the broader context (how data flows through AI providers and what that means for regulated environments).
@@ -383,6 +426,8 @@ Additional fixes in this change:
 
 ## 2026-02-26 — Hot-reload `.env` files via mtime check
 
+> **⚠ Partially superseded** (2026-03-05): Backend re-init no longer relies on GC for cleanup. `BackendRegistry.clear()` now calls each backend's explicit `close()` hook before discarding references. See "Explicit backend shutdown on registry replacement" above.
+
 **Trigger**: When running the MCP server globally (user-level `mcp.json`), changing per-project data-access permissions in `.env` required restarting the server. This was friction for users toggling `DB_MCP_ALLOW_DATA_ACCESS` or `DB_MCP_ALLOW_PREVIEW` across different projects.
 
 **Options explored**:
@@ -628,6 +673,8 @@ Also removed the CTE example from `db_count_query_results` docstring (CTEs don't
 ---
 
 ## 2026-02-17 — Safe test teardown: never close a user's Access session
+
+> **⚠ Partially superseded** (2026-03-05): The `_safe_quit_test_access()` path-check approach was replaced by `DispatchEx` which creates an isolated Access instance, eliminating the attach-to-user risk entirely. See "Isolated Access instance for integration tests via DispatchEx" above.
 
 **Trigger**: Integration tests for the Access COM backend called `backend._app.Quit()` in their `finally` blocks for cleanup. If a test ran while the user had Access open with a database, and the backend attached to the user's instance via `GetObject` (instead of creating a new one), the teardown would quit the user's Access session — closing their work in progress.
 

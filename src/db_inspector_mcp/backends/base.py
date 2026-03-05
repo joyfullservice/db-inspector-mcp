@@ -21,6 +21,15 @@ class DatabaseBackend(ABC):
         """
         self.connection_string = connection_string
         self.query_timeout_seconds = query_timeout_seconds
+
+    def close(self) -> None:
+        """Release backend resources (connections, timers, handles).
+
+        Backends override this when they keep long-lived resources. The default
+        implementation is a no-op so callers can always invoke ``close()``
+        safely during cleanup paths.
+        """
+        return None
     
     # -------------------------------------------------------------------------
     # Row sanitization helpers

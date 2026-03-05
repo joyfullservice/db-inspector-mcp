@@ -5,7 +5,7 @@ import re
 from typing import Any
 
 
-# SQL keywords that indicate write operations
+# SQL keywords that indicate write/DDL/procedural execution operations.
 _WRITE_KEYWORDS = [
     "INSERT",
     "UPDATE",
@@ -14,10 +14,36 @@ _WRITE_KEYWORDS = [
     "ALTER",
     "DROP",
     "TRUNCATE",
+    "MERGE",
     "EXEC",
     "EXECUTE",
     "CALL",
 ]
+
+# Extra write-capable patterns that keyword scanning alone may miss.
+_WRITE_PATTERNS = [
+    # SQL Server / PostgreSQL table-creation form:
+    # SELECT ... INTO new_table FROM ...
+    re.compile(r"\bSELECT\b[\s\S]*\bINTO\b", re.IGNORECASE),
+]
+
+
+def _strip_sql_comments_and_literals(sql: str) -> str:
+    """Remove comments and quoted literals from SQL text."""
+    cleaned = sql
+
+    # Remove single-line comments (-- ...)
+    cleaned = re.sub(r"--.*", "", cleaned)
+
+    # Remove multi-line comments (/* ... */)
+    cleaned = re.sub(r"/\*.*?\*/", "", cleaned, flags=re.DOTALL)
+
+    # Remove string literals (single and double quoted). This is intentionally
+    # conservative and optimized for guardrail checks, not full SQL parsing.
+    cleaned = re.sub(r"'(?:''|[^'])*'", "''", cleaned)
+    cleaned = re.sub(r'"(?:""|[^"])*"', '""', cleaned)
+
+    return cleaned
 
 
 def validate_readonly_sql(sql: str) -> None:
@@ -33,29 +59,32 @@ def validate_readonly_sql(sql: str) -> None:
     Raises:
         ValueError: If write operations are detected in the SQL
     """
-    # Normalize SQL: remove comments and string literals to avoid false positives
-    sql_upper = sql.upper()
-    
-    # Remove single-line comments (-- ...)
-    sql_upper = re.sub(r"--.*", "", sql_upper)
-    
-    # Remove multi-line comments (/* ... */)
-    sql_upper = re.sub(r"/\*.*?\*/", "", sql_upper, flags=re.DOTALL)
-    
-    # Remove string literals (both single and double quotes)
-    # This is a simplified approach - may not handle all edge cases
-    sql_upper = re.sub(r"'[^']*'", "", sql_upper)
-    sql_upper = re.sub(r'"[^"]*"', "", sql_upper)
-    
-    # Check for write keywords with word boundaries
+    sql_clean = _strip_sql_comments_and_literals(sql)
+    sql_upper = sql_clean.upper()
+
+    # Check for write keywords with word boundaries.
     for keyword in _WRITE_KEYWORDS:
-        # Use word boundaries to match whole words only
         pattern = r"\b" + re.escape(keyword) + r"\b"
         if re.search(pattern, sql_upper):
             raise ValueError(
                 f"Write operation detected: '{keyword}' is not allowed. "
                 "This tool only supports read-only operations (SELECT queries)."
             )
+
+    # Check for additional write-capable query forms.
+    for pattern in _WRITE_PATTERNS:
+        if pattern.search(sql_upper):
+            raise ValueError(
+                "Write operation detected: 'SELECT ... INTO' is not allowed. "
+                "This tool only supports read-only operations (SELECT queries)."
+            )
+
+    # Guardrail: tools are designed for read-only SELECT-style queries.
+    if not re.match(r"^\s*(SELECT|WITH)\b", sql_upper):
+        raise ValueError(
+            "Only read-only SELECT queries are allowed. "
+            "This tool does not accept non-SELECT statements."
+        )
 
 
 def check_data_access_permission(

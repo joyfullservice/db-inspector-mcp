@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -489,6 +489,34 @@ class TestEnvHotReload:
             config = load_config()
             mock_reset.assert_called_once()
             assert config["DB_MCP_ENABLE_LOGGING"] is True
+
+    def test_hot_reload_backend_change_clears_registry(self, tmp_path, monkeypatch):
+        """Backend env changes trigger registry.clear() during hot-reload."""
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "DB_MCP_DATABASE=sqlserver\n"
+            "DB_MCP_CONNECTION_STRING=conn1\n"
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("DB_MCP_PROJECT_DIR", raising=False)
+
+        # Initial load establishes baseline env snapshot and mtimes.
+        load_config()
+
+        original_mtime = env_file.stat().st_mtime
+        env_file.write_text(
+            "DB_MCP_DATABASE=postgres\n"
+            "DB_MCP_CONNECTION_STRING=conn2\n"
+        )
+        os.utime(str(env_file), (original_mtime + 1, original_mtime + 1))
+
+        mock_registry = MagicMock()
+        with patch("db_inspector_mcp.config.get_registry", return_value=mock_registry), \
+             patch("db_inspector_mcp.config.initialize_backends"), \
+             patch("db_inspector_mcp.main._verify_readonly"):
+            load_config()
+
+        mock_registry.clear.assert_called_once()
 
     def test_db_tool_calls_load_config(self, tmp_path, monkeypatch):
         """A tool decorated with @db_tool calls load_config() before

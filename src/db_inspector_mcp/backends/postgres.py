@@ -43,6 +43,15 @@ class PostgresBackend(DatabaseBackend):
             with self._connection.cursor() as cursor:
                 cursor.execute(f"SET statement_timeout = {self.query_timeout_seconds * 1000}")
         return self._connection
+
+    def close(self) -> None:
+        """Close the cached connection, if any."""
+        if self._connection is not None:
+            try:
+                self._connection.close()
+            except Exception:
+                pass
+            self._connection = None
     
     def _execute_query(self, sql: str, fetch: bool = True) -> Any:
         """
@@ -97,8 +106,9 @@ class PostgresBackend(DatabaseBackend):
     
     def sum_query_column(self, query: str, column: str) -> float | None:
         """Compute SUM of a column from query results."""
-        # Use double quotes for column name to handle case sensitivity
-        wrapped_query = f'SELECT SUM("{column}") as sum_val FROM ({query}) AS subquery'
+        # Use double quotes for column name and escape embedded quotes.
+        safe_column = column.replace('"', '""')
+        wrapped_query = f'SELECT SUM("{safe_column}") as sum_val FROM ({query}) AS subquery'
         cursor = self._execute_query(wrapped_query)
         result = cursor.fetchone()
         sum_val = result["sum_val"] if result else None

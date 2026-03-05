@@ -24,7 +24,7 @@ pip install -e ".[dev]"
 ### 2. Run Tests
 
 ```bash
-# Run all tests
+# Run default test suite (Access integration tests are opt-in)
 pytest
 
 # Run with coverage
@@ -33,8 +33,12 @@ pytest --cov=db_inspector_mcp --cov-report=html
 # Run specific test file
 pytest tests/test_backends.py -v
 
-# Skip integration tests (require Access installed)
+# Skip integration tests even when Access is installed
 pytest -m "not integration"
+
+# Access integration tests run automatically when Access is detected.
+# To force them off: DB_MCP_RUN_ACCESS_INTEGRATION=false pytest
+# To force them on:  DB_MCP_RUN_ACCESS_INTEGRATION=true  pytest
 ```
 
 ## Usage Logging for Improvement Analysis
@@ -220,13 +224,20 @@ The production code follows an ownership principle: we never call `CloseCurrentD
 - Calling `Quit()` on `backend._app` could close the user's work-in-progress
 - Even `CloseCurrentDatabase()` would disrupt a user who opened the database in a special way (e.g., bypassing startup code with Shift)
 
-**Use `_safe_quit_test_access()` for all integration test cleanup.** This helper verifies that the Access instance has the test's temporary database open before calling `Quit()`. If the instance has a different database (i.e., it's the user's session), the COM reference is released without quitting:
+**Current integration-test safety model:**
 
 ```python
-finally:
-    # Only quit Access if it has our temp test database open.
-    # Never close a user's Access session.
-    _safe_quit_test_access(backend._app, temp_access_db)
+# Integration tests auto-run when Access is detected via registry check.
+# Override with DB_MCP_RUN_ACCESS_INTEGRATION=true/false if needed.
+
+# The fixture creates its own Access instance via Dispatch().
+app = win32com.client.Dispatch("Access.Application")
+
+# The fixture owns this instance and calls app.Quit() in teardown.
+# CloseCurrentDatabase() is guarded — only closes the temp test DB.
+
+# _release_test_backend() only cancels the TTL timer and releases the
+# COM reference — it never calls Quit() or CloseCurrentDatabase().
 ```
 
 **Do NOT:**
@@ -238,14 +249,17 @@ finally:
 
 Releases are published to [PyPI](https://pypi.org/project/db-inspector-mcp/) automatically via GitHub Actions when you create a GitHub Release. End users install with `uvx db-inspector-mcp`.
 
+CI runs on push/PR and validates tests (excluding Access integration tests), package build, and package metadata checks.
+
 ### Release checklist
 
 1. **Update the version number** in both places (they must match):
    - `pyproject.toml` — the `version` field
    - `src/db_inspector_mcp/__init__.py` — the `__version__` string
 
-2. **Verify the build locally:**
+2. **Verify quality gates locally:**
    ```bash
+   python -m pytest tests -v -m "not integration"
    python -m build
    twine check dist/*
    ```
@@ -258,8 +272,9 @@ Releases are published to [PyPI](https://pypi.org/project/db-inspector-mcp/) aut
    - Write release notes summarizing what changed
    - Click **Publish release**
 
-5. **Verify the publish workflow:**
-   - Go to Actions tab → check that the "Publish to PyPI" workflow completed successfully
+5. **Verify the release workflows:**
+   - Go to Actions tab → check that the CI workflow passed for the release commit/tag
+   - Check that "Publish to PyPI" completed successfully (tests + build + `twine check` run before publish)
    - Visit `https://pypi.org/project/db-inspector-mcp/` to confirm the new version appears
 
 6. **Test the published package:**

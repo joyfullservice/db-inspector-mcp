@@ -40,11 +40,46 @@ def test_validate_readonly_sql_rejects_create():
         validate_readonly_sql("CREATE TABLE test (id INT)")
 
 
+def test_validate_readonly_sql_rejects_merge():
+    """Test that MERGE is rejected."""
+    with pytest.raises(ValueError, match="MERGE"):
+        validate_readonly_sql("MERGE INTO users AS t USING incoming AS s ON t.id = s.id")
+
+
+def test_validate_readonly_sql_rejects_select_into():
+    """Test that SELECT INTO is rejected because it creates tables."""
+    with pytest.raises(ValueError, match="SELECT \\.\\.\\. INTO"):
+        validate_readonly_sql("SELECT * INTO users_copy FROM users")
+
+
+def test_validate_readonly_sql_rejects_non_select_statements():
+    """Test that non-SELECT statements are rejected even if not in deny list."""
+    with pytest.raises(ValueError, match="Only read-only SELECT queries are allowed"):
+        validate_readonly_sql("SHOW TABLES")
+
+
+def test_validate_readonly_sql_allows_cte_select():
+    """Test that CTE queries are allowed."""
+    validate_readonly_sql(
+        """
+        WITH active_users AS (
+            SELECT id, name FROM users WHERE active = 1
+        )
+        SELECT * FROM active_users
+        """
+    )
+
+
 def test_validate_readonly_sql_handles_comments():
     """Test that comments don't cause false positives."""
     # Should not raise error even though "INSERT" appears in comment
     validate_readonly_sql("SELECT * FROM users -- INSERT is not allowed")
     validate_readonly_sql("SELECT * FROM users /* INSERT test */")
+
+
+def test_validate_readonly_sql_handles_literals():
+    """Test that write-like keywords in string literals don't trigger false positives."""
+    validate_readonly_sql("SELECT 'DROP TABLE users' AS text_val")
 
 
 def test_check_data_access_permission_allows_metadata_tools():

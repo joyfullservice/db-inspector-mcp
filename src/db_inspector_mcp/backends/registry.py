@@ -27,6 +27,13 @@ class BackendRegistry:
         if not isinstance(backend, DatabaseBackend):
             raise TypeError("backend must be an instance of DatabaseBackend")
         
+        existing = self._backends.get(name)
+        if existing is not None and existing is not backend:
+            try:
+                existing.close()
+            except Exception:
+                pass
+
         self._backends[name] = backend
         if set_as_default or self._default_name is None:
             self._default_name = name
@@ -107,6 +114,11 @@ class BackendRegistry:
         backends need to be re-initialized from updated environment
         variables.
         """
+        for backend in self._backends.values():
+            try:
+                backend.close()
+            except Exception:
+                pass
         self._backends.clear()
         self._default_name = None
 

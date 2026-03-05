@@ -164,6 +164,11 @@ class AccessODBCBackend(DatabaseBackend):
                 # TTL == 0 → close immediately (connect-per-request mode)
                 self._discard_connection()
 
+    def close(self) -> None:
+        """Cancel timers and close any cached ODBC connection."""
+        with self._conn_lock:
+            self._discard_connection()
+
     @contextmanager
     def _connection(self):
         """
@@ -244,7 +249,8 @@ class AccessODBCBackend(DatabaseBackend):
     def sum_query_column(self, query: str, column: str) -> float | None:
         """Compute SUM of a column from query results."""
         cte, core = split_cte_prefix(query)
-        wrapped_query = f"{cte}SELECT SUM([{column}]) AS sum_val FROM ({core}) AS subquery"
+        safe_column = column.replace("]", "]]")
+        wrapped_query = f"{cte}SELECT SUM([{safe_column}]) AS sum_val FROM ({core}) AS subquery"
         with self._connection() as conn:
             cursor = conn.cursor()
             try:

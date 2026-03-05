@@ -108,6 +108,38 @@ def _file_uri_to_path(uri: str) -> Path | None:
     return Path(raw_path)
 
 
+def _resolve_query_column_name(
+    backend, query: str, column: str,
+) -> str:
+    """Resolve a requested output column name safely against query metadata."""
+    if not isinstance(column, str) or not column.strip():
+        raise ValueError("Column name must be a non-empty string.")
+
+    requested = column.strip()
+    columns = backend.get_query_columns(query)
+    available = [str(col.get("name", "")) for col in columns if col.get("name")]
+
+    # Prefer exact match first.
+    if requested in available:
+        return requested
+
+    # Fall back to case-insensitive matching. Reject ambiguous matches.
+    lower_matches = [name for name in available if name.lower() == requested.lower()]
+    if len(lower_matches) == 1:
+        return lower_matches[0]
+    if len(lower_matches) > 1:
+        raise ValueError(
+            f"Column '{column}' is ambiguous (multiple case-insensitive matches). "
+            f"Use the exact column name from db_get_query_columns()."
+        )
+
+    preview = ", ".join(available[:10]) if available else "(none)"
+    more = f" ... (+{len(available) - 10} more)" if len(available) > 10 else ""
+    raise ValueError(
+        f"Column '{column}' was not found in query output columns: {preview}{more}"
+    )
+
+
 
 # ---------------------------------------------------------------------------
 # Access SQL error hints
@@ -504,7 +536,8 @@ def db_sum_query_column(query: str, column: str, database: str | None = None) ->
     backend = registry.get(database)
     
     try:
-        sum_val = backend.sum_query_column(query, column)
+        resolved_column = _resolve_query_column_name(backend, query, column)
+        sum_val = backend.sum_query_column(query, resolved_column)
         return {"sum": sum_val}
     except ValueError as e:
         # Re-raise ValueError from registry (includes available backends)

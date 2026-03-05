@@ -27,7 +27,8 @@ def mock_backend():
     backend = MagicMock()
     backend.count_query_results.return_value = 100
     backend.get_query_columns.return_value = [
-        {"name": "id", "type": "int", "nullable": False}
+        {"name": "id", "type": "int", "nullable": False},
+        {"name": "amount", "type": "decimal", "nullable": True},
     ]
     backend.sum_query_column.return_value = 1234.56
     backend.measure_query.return_value = {
@@ -69,13 +70,28 @@ def test_db_get_query_columns(mock_registry):
     """Test db_get_query_columns tool."""
     result = db_get_query_columns("SELECT * FROM users")
     assert "columns" in result
-    assert len(result["columns"]) == 1
+    assert len(result["columns"]) >= 1
 
 
 def test_db_sum_query_column(mock_registry):
     """Test db_sum_query_column tool."""
     result = db_sum_query_column("SELECT amount FROM transactions", "amount")
     assert result["sum"] == 1234.56
+
+
+def test_db_sum_query_column_rejects_unknown_column(mock_registry):
+    """Test db_sum_query_column rejects columns not present in query output."""
+    with pytest.raises(ValueError, match="was not found"):
+        db_sum_query_column("SELECT amount FROM transactions", "nonexistent")
+
+
+def test_db_sum_query_column_rejects_malicious_column_name(mock_registry):
+    """Test db_sum_query_column rejects injection-like column values."""
+    with pytest.raises(ValueError, match="was not found"):
+        db_sum_query_column(
+            "SELECT amount FROM transactions",
+            'amount"; DROP TABLE users; --',
+        )
 
 
 def test_db_measure_query(mock_registry):
@@ -125,6 +141,9 @@ def test_tools_reject_write_operations(mock_registry):
     """Test that tools reject write operations."""
     with pytest.raises(ValueError, match="INSERT"):
         db_count_query_results("INSERT INTO users VALUES (1)")
+
+    with pytest.raises(ValueError, match="SELECT \\.\\.\\. INTO"):
+        db_count_query_results("SELECT * INTO users_copy FROM users")
 
 
 @pytest.mark.anyio

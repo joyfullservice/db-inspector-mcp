@@ -267,6 +267,18 @@ class AccessCOMBackend(DatabaseBackend):
             self._release_app()
             self._close_timer = None
 
+    def close(self) -> None:
+        """Release cached COM/ODBC resources without touching user sessions."""
+        try:
+            self._odbc_backend.close()
+        except Exception:
+            pass
+
+        with self._com_lock:
+            self._cancel_close_timer()
+            self._release_app()
+            self._close_timer = None
+
     # ------------------------------------------------------------------
     # Path / Application helpers
     # ------------------------------------------------------------------
@@ -859,7 +871,8 @@ class AccessCOMBackend(DatabaseBackend):
 
     def _dao_sum_query_column(self, query: str, column: str) -> float | None:
         cte, core = split_cte_prefix(query)
-        wrapped = f"{cte}SELECT SUM([{column}]) AS sum_val FROM ({core}) AS subquery"
+        safe_column = column.replace("]", "]]")
+        wrapped = f"{cte}SELECT SUM([{safe_column}]) AS sum_val FROM ({core}) AS subquery"
         _, rows = self._dao_execute(wrapped, max_rows=1)
         if rows and rows[0][0] is not None:
             return rows[0][0]

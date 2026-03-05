@@ -10,6 +10,26 @@ from unittest.mock import MagicMock, patch, call
 import pyodbc
 import pytest
 
+def _access_is_installed() -> bool:
+    """Check if Microsoft Access is installed via registry (no launch)."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import winreg
+        winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, "Access.Application")
+        return True
+    except (OSError, ImportError):
+        return False
+
+
+_env_override = os.getenv("DB_MCP_RUN_ACCESS_INTEGRATION", "").lower()
+if _env_override == "true":
+    _RUN_ACCESS_INTEGRATION = True
+elif _env_override == "false":
+    _RUN_ACCESS_INTEGRATION = False
+else:
+    _RUN_ACCESS_INTEGRATION = _access_is_installed()
+
 
 @contextmanager
 def _suppress_com_seh():
@@ -33,6 +53,7 @@ from db_inspector_mcp.backends.access_odbc import AccessODBCBackend
 from db_inspector_mcp.backends.base import DatabaseBackend
 from db_inspector_mcp.backends.mssql import MSSQLBackend
 from db_inspector_mcp.backends.postgres import PostgresBackend
+from db_inspector_mcp.backends.registry import BackendRegistry
 
 
 def test_backend_is_abstract():
@@ -82,6 +103,38 @@ def test_access_odbc_backend_initialization():
     backend = AccessODBCBackend(conn_str, 30)
     assert backend.connection_string == conn_str
     assert backend.query_timeout_seconds == 30
+
+
+def test_registry_clear_closes_registered_backends():
+    """Clearing the registry should call close() on all backend instances."""
+    registry = BackendRegistry()
+    backend1 = MSSQLBackend("conn1", 30)
+    backend2 = PostgresBackend("conn2", 30)
+    backend1.close = MagicMock()
+    backend2.close = MagicMock()
+
+    registry.register("one", backend1, set_as_default=True)
+    registry.register("two", backend2)
+    registry.clear()
+
+    backend1.close.assert_called_once()
+    backend2.close.assert_called_once()
+    assert registry.list_backends() == []
+    assert registry.get_default_name() is None
+
+
+def test_registry_register_replacement_closes_previous_backend():
+    """Registering a backend with an existing name closes the old instance."""
+    registry = BackendRegistry()
+    old_backend = MSSQLBackend("conn1", 30)
+    new_backend = PostgresBackend("conn2", 30)
+    old_backend.close = MagicMock()
+
+    registry.register("default", old_backend, set_as_default=True)
+    registry.register("default", new_backend, set_as_default=True)
+
+    old_backend.close.assert_called_once()
+    assert registry.get("default") is new_backend
 
 
 def test_access_odbc_ttl_defaults():
@@ -263,13 +316,23 @@ def test_access_com_no_ownership_tracking():
         assert not hasattr(backend, '_db')
 
 
-def test_access_com_no_close_method():
-    """Test that COM backend does not have a close() method that quits Access."""
+def test_access_com_close_releases_references_without_quit():
+    """Test that close() releases references and never calls Access.Quit()."""
     connection_string = "Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\test.accdb;"
     with patch('db_inspector_mcp.backends.access_com.win32com.client'):
         backend = AccessCOMBackend(connection_string, 30)
-        # close() should not be defined on the backend
-        assert not hasattr(backend, 'close')
+        backend._odbc_backend.close = MagicMock()
+        backend._app = MagicMock()
+        backend._close_timer = MagicMock()
+
+        app_ref = backend._app
+        timer_ref = backend._close_timer
+        backend.close()
+
+        backend._odbc_backend.close.assert_called_once()
+        timer_ref.cancel.assert_called_once()
+        app_ref.Quit.assert_not_called()
+        assert backend._app is None
 
 
 def test_access_com_backend_without_pywin32():
@@ -949,11 +1012,44 @@ def test_ensure_current_db_noop_when_already_open():
 # Fixtures use module scope so Access is launched once and quit once for the
 # entire module.  Individual tests create fresh AccessCOMBackend instances
 # that attach to the running Access via ROT scan.
+#
+# SAFETY: Tests must NEVER close a user's open database.  The fixture uses
+# DispatchEx to create an isolated Access process — Dispatch() can attach
+# to a user's running instance, and Quit() on that would close their work.
+# _release_test_backend() only releases the COM reference and cancels the
+# TTL timer; it never calls Quit() or CloseCurrentDatabase().
 # =============================================================================
+
+
+def _paths_match(path1: str | None, path2: str | None) -> bool:
+    """Case-insensitive normalized path comparison."""
+    if not path1 or not path2:
+        return False
+    try:
+        return os.path.normcase(os.path.abspath(path1)) == os.path.normcase(os.path.abspath(path2))
+    except Exception:
+        return path1.lower() == path2.lower()
+
+
+def _get_current_db_path(app) -> str | None:
+    """Get CurrentDb path from an Access app, if any."""
+    try:
+        current_db = app.CurrentDb()
+        if current_db is None:
+            return None
+        return str(current_db.Name)
+    except Exception:
+        return None
+
 
 @pytest.fixture(scope="module")
 def access_app():
-    """Module-scoped Access Application — launched once, quit after all tests."""
+    """Module-scoped isolated Access Application for integration tests.
+
+    Uses DispatchEx to guarantee a new, dedicated COM server process —
+    Dispatch() can attach to an already-running user instance, and calling
+    Quit() on that would close the user's work.
+    """
     if not COM_AVAILABLE:
         pytest.skip("pywin32 not available")
     if sys.platform != "win32":
@@ -962,7 +1058,11 @@ def access_app():
     import ctypes
     import win32com.client
 
-    app = win32com.client.Dispatch("Access.Application")
+    app = win32com.client.DispatchEx("Access.Application")
+    try:
+        app.UserControl = False
+    except Exception:
+        pass
     try:
         ctypes.windll.user32.ShowWindow(app.hWndAccessApp(), 5)  # SW_SHOW
     except Exception:
@@ -970,11 +1070,15 @@ def access_app():
 
     yield app
 
-    with _suppress_com_seh():
-        try:
-            app.Quit()
-        except Exception:
-            pass
+    # Disable faulthandler permanently before quit — stale COM proxies will
+    # trigger RPC_E_DISCONNECTED (0x80010108) during Python's GC shutdown,
+    # long after this block exits.  Leaving faulthandler off prevents the
+    # harmless "Windows fatal exception" traceback at process exit.
+    faulthandler.disable()
+    try:
+        app.Quit()
+    except Exception:
+        pass
 
 
 @pytest.fixture(scope="module")
@@ -1031,10 +1135,12 @@ def temp_access_db(access_app):
 
     yield db_path
 
-    # Teardown: close the database and delete the file
+    # Teardown: only close CurrentDb when it is our test DB.
     with _suppress_com_seh():
         try:
-            app.CloseCurrentDatabase()
+            current_db = _get_current_db_path(app)
+            if _paths_match(current_db, db_path):
+                app.CloseCurrentDatabase()
         except Exception:
             pass
 
@@ -1050,7 +1156,12 @@ def temp_access_db(access_app):
 
 
 def _release_test_backend(backend) -> None:
-    """Cancel the TTL timer and release the backend's COM reference."""
+    """Cancel the TTL timer and release the backend's COM reference.
+
+    SAFETY: Never calls Quit() or CloseCurrentDatabase() — only releases
+    the in-process COM pointer so the backend no longer holds a reference
+    to the Access instance.  The fixture owns the instance lifecycle.
+    """
     if backend._close_timer is not None:
         backend._close_timer.cancel()
     with _suppress_com_seh():
@@ -1060,6 +1171,10 @@ def _release_test_backend(backend) -> None:
 @pytest.mark.integration
 @pytest.mark.skipif(not COM_AVAILABLE, reason="Access COM not available")
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows only")
+@pytest.mark.skipif(
+    not _RUN_ACCESS_INTEGRATION,
+    reason="Access not installed (or DB_MCP_RUN_ACCESS_INTEGRATION=false)",
+)
 def test_access_com_getobject_existing_database(temp_access_db):
     """Test that a backend attaches to an already-open database via GetObject."""
     backend = AccessCOMBackend(temp_access_db, 30)
@@ -1084,6 +1199,10 @@ def test_access_com_getobject_existing_database(temp_access_db):
 @pytest.mark.integration
 @pytest.mark.skipif(not COM_AVAILABLE, reason="Access COM not available")
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows only")
+@pytest.mark.skipif(
+    not _RUN_ACCESS_INTEGRATION,
+    reason="Access not installed (or DB_MCP_RUN_ACCESS_INTEGRATION=false)",
+)
 def test_access_com_backend_connects_and_queries(temp_access_db):
     """Test that a fresh backend can connect and query the database."""
     backend = AccessCOMBackend(temp_access_db, 30)
@@ -1099,6 +1218,10 @@ def test_access_com_backend_connects_and_queries(temp_access_db):
 @pytest.mark.integration
 @pytest.mark.skipif(not COM_AVAILABLE, reason="Access COM not available")
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows only")
+@pytest.mark.skipif(
+    not _RUN_ACCESS_INTEGRATION,
+    reason="Access not installed (or DB_MCP_RUN_ACCESS_INTEGRATION=false)",
+)
 def test_access_com_no_lock_between_operations(temp_access_db):
     """Test that no .laccdb lock file persists between COM operations."""
     import time
