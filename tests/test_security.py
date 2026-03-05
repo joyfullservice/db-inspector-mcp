@@ -78,3 +78,73 @@ def test_get_permission_error_message():
     msg = get_permission_error_message("db_preview")
     assert "DB_MCP_ALLOW_DATA_ACCESS" in msg or "DB_MCP_ALLOW_PREVIEW" in msg
 
+
+# ---------------------------------------------------------------------------
+# Per-connection data access overrides
+# ---------------------------------------------------------------------------
+
+def test_per_connection_allow_overrides_global_deny(monkeypatch):
+    """Per-connection ALLOW_DATA_ACCESS=true overrides global false."""
+    monkeypatch.setenv("DB_MCP_LEGACY_ALLOW_DATA_ACCESS", "true")
+    config = {"DB_MCP_ALLOW_DATA_ACCESS": "false", "DB_MCP_ALLOW_PREVIEW": "false"}
+    assert check_data_access_permission("db_preview", config, database="legacy") is True
+
+
+def test_per_connection_deny_overrides_global_allow(monkeypatch):
+    """Per-connection ALLOW_DATA_ACCESS=false overrides global true."""
+    monkeypatch.setenv("DB_MCP_PROD_ALLOW_DATA_ACCESS", "false")
+    config = {"DB_MCP_ALLOW_DATA_ACCESS": "true"}
+    assert check_data_access_permission("db_preview", config, database="prod") is False
+
+
+def test_per_connection_allow_preview_overrides_global_deny(monkeypatch):
+    """Per-connection ALLOW_PREVIEW=true overrides global false."""
+    monkeypatch.setenv("DB_MCP_LEGACY_ALLOW_PREVIEW", "true")
+    config = {"DB_MCP_ALLOW_DATA_ACCESS": "false", "DB_MCP_ALLOW_PREVIEW": "false"}
+    assert check_data_access_permission("db_preview", config, database="legacy") is True
+
+
+def test_per_connection_data_access_takes_priority_over_preview(monkeypatch):
+    """Per-connection ALLOW_DATA_ACCESS is checked before ALLOW_PREVIEW."""
+    monkeypatch.setenv("DB_MCP_DEV_ALLOW_DATA_ACCESS", "false")
+    monkeypatch.setenv("DB_MCP_DEV_ALLOW_PREVIEW", "true")
+    config = {"DB_MCP_ALLOW_DATA_ACCESS": "false"}
+    assert check_data_access_permission("db_preview", config, database="dev") is False
+
+
+def test_per_connection_falls_back_to_global(monkeypatch):
+    """Without per-connection vars, global setting is used."""
+    monkeypatch.delenv("DB_MCP_NEW_ALLOW_DATA_ACCESS", raising=False)
+    monkeypatch.delenv("DB_MCP_NEW_ALLOW_PREVIEW", raising=False)
+    config = {"DB_MCP_ALLOW_DATA_ACCESS": "true"}
+    assert check_data_access_permission("db_preview", config, database="new") is True
+
+
+def test_per_connection_falls_back_to_global_deny(monkeypatch):
+    """Without per-connection vars, global deny is honoured."""
+    monkeypatch.delenv("DB_MCP_NEW_ALLOW_DATA_ACCESS", raising=False)
+    monkeypatch.delenv("DB_MCP_NEW_ALLOW_PREVIEW", raising=False)
+    config = {"DB_MCP_ALLOW_DATA_ACCESS": "false", "DB_MCP_ALLOW_PREVIEW": "false"}
+    assert check_data_access_permission("db_preview", config, database="new") is False
+
+
+def test_per_connection_metadata_tools_always_allowed(monkeypatch):
+    """Metadata tools are allowed regardless of per-connection settings."""
+    monkeypatch.setenv("DB_MCP_PROD_ALLOW_DATA_ACCESS", "false")
+    config = {"DB_MCP_ALLOW_DATA_ACCESS": "false"}
+    assert check_data_access_permission("db_explain", config, database="prod") is True
+
+
+def test_per_connection_error_message_includes_connection_name():
+    """Error message mentions per-connection env var when database is given."""
+    msg = get_permission_error_message("db_preview", database="legacy")
+    assert "DB_MCP_LEGACY_ALLOW_DATA_ACCESS" in msg
+    assert "legacy" in msg
+
+
+def test_per_connection_error_message_without_database():
+    """Error message is unchanged when no database is provided."""
+    msg = get_permission_error_message("db_preview")
+    assert "DB_MCP_ALLOW_DATA_ACCESS" in msg
+    assert "DB_MCP_ALLOW_PREVIEW" in msg
+

@@ -594,19 +594,27 @@ def initialize_backends() -> BackendRegistry:
     return registry
 
 
-def check_data_access(tool_name: str) -> None:
+def check_data_access(tool_name: str, database: str | None = None) -> None:
     """
     Check if a tool has data access permission.
+
+    When *database* is ``None`` the default connection name is resolved from
+    the registry so that per-connection env vars (e.g.
+    ``DB_MCP_DEFAULT_ALLOW_DATA_ACCESS``) are still evaluated.
     
     Args:
         tool_name: Name of the tool being called
+        database: Optional connection name for per-connection lookup
         
     Raises:
         PermissionError: If data access is not authorized
     """
     config = load_config()
-    if not check_data_access_permission(tool_name, config):
-        error_msg = get_permission_error_message(tool_name)
+    if database is None:
+        registry = get_registry()
+        database = registry.get_default_name()
+    if not check_data_access_permission(tool_name, config, database=database):
+        error_msg = get_permission_error_message(tool_name, database=database)
         raise PermissionError(error_msg)
 
 

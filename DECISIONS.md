@@ -79,6 +79,23 @@ contradictory guidance.
 
 ---
 
+## 2026-03-05 — Per-connection data access permissions
+
+**Trigger**: Data access flags (`DB_MCP_ALLOW_DATA_ACCESS`, `DB_MCP_ALLOW_PREVIEW`) applied globally to all connections. In multi-database configurations (e.g. migration from Access to SQL Server) users needed to allow data preview on a legacy connection while keeping it disabled on others.
+
+**Options explored**:
+- **Keep global-only** — simplest, but forces all-or-nothing for multi-database setups. Users with a dev and prod connection cannot selectively enable preview.
+- **Store permissions in the `BackendRegistry` or config dict** — would require a new data structure for per-connection config and changes to `initialize_backends()`. More coupling between connection setup and permission logic.
+- **Per-connection env vars via `os.getenv()` at check time** — follows the existing `DB_MCP_<NAME>_*` naming convention (`_DATABASE`, `_CONNECTION_STRING`). No new data structures; the permission check reads `DB_MCP_{NAME}_ALLOW_DATA_ACCESS` directly from the environment on each tool call, falling back to the global value when absent.
+
+**Decision**: Per-connection env vars checked at call time. `check_data_access_permission()` accepts an optional `database` name. When provided, it looks up `DB_MCP_{NAME}_ALLOW_DATA_ACCESS` (and `_ALLOW_PREVIEW` for `db_preview`) via `os.getenv()`. If the per-connection var exists, its value is authoritative (can grant *or* deny). If absent, the global flags are used as fallback. This matches the naming convention already established for `_DATABASE` and `_CONNECTION_STRING`, and inherits hot-reload behaviour for free (env vars are re-read after `.env` mtime changes).
+
+**What this rules out**: Storing per-connection permissions in a structured config object. Would revisit if the number of per-connection settings grows beyond 2–3 and the `os.getenv()` lookups become unwieldy.
+
+**Relevant files**: `security.py`, `config.py`, `tools.py`, `.env.example`.
+
+---
+
 ## 2026-03-05 — Environment variable naming conventions (DB_MCP_ prefix, _DATABASE suffix)
 
 **Trigger**: Needed a naming convention for environment variables that avoids collisions with other database tools while remaining clear to users.

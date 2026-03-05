@@ -609,7 +609,7 @@ def db_preview(query: str, max_rows: int = 100, database: str | None = None) -> 
         Each row is a dict mapping column names to values.
     """
     validate_readonly_sql(query)
-    check_data_access("db_preview")  # Check permission
+    check_data_access("db_preview", database=database)
     registry = get_registry()
     backend = registry.get(database)
     
@@ -752,7 +752,9 @@ def db_compare_queries(
     validate_readonly_sql(sql2)
     
     if compare_samples:
-        check_data_access("db_preview")  # Sample comparison requires data access
+        check_data_access("db_preview", database=database1)
+        effective_db2 = database2 if database2 is not None else database1
+        check_data_access("db_preview", database=effective_db2)
     
     registry = get_registry()
     backend1 = registry.get(database1)
