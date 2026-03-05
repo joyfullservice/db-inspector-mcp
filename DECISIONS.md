@@ -1,10 +1,118 @@
-# log-decision
+<!-- BEGIN HEADER -->
+# Decision Log
 
-> This file is a reverse-chronological journal of architectural and strategic
-> decisions made during development. It is maintained by AI agents at the end
-> of each working session and intended to be consumed by both humans and AI
-> agents for future context. Agents should read this file before beginning
-> work on any module referenced here. Newest entries are at the top.
+A reverse-chronological journal of architectural and strategic decisions.
+Maintained by AI coding agents (and human developers) at the end of working
+sessions. Each entry captures what was decided, what alternatives were
+considered, and why — so future contributors never revisit dead ends or lose
+context on trade-offs already evaluated.
+
+Agents: read this file before working on any module referenced here.
+
+### When to log
+
+Log decisions that constrain future design, involved genuine alternatives,
+or would be non-obvious to a future contributor. A good litmus test: does
+the "What this rules out" section have something meaningful to say?
+
+Do NOT log: bug fixes with obvious solutions, test-only refactors,
+documentation updates, or minor config tweaks that don't affect
+architecture.
+
+### Entry format
+
+Insert new entries directly below this header, newest first. Do not modify
+or reorder existing entries except to add supersession notes (see below).
+If a session produced multiple independent decisions, create a separate
+entry for each.
+
+**Year-end summaries:** When the log rolls into a new calendar year, add
+a summary entry titled "Summary of [previous year] decisions" that
+briefly describes each decision from that year in one line. This gives
+agents scanning forward a checkpoint before older entries.
+
+```
+---
+
+## YYYY-MM-DD — [Short descriptive title]
+
+**Trigger**: What problem, requirement, or situation prompted this work.
+
+**Options explored**:
+- For each option, name the approach, its strengths, and why it was or
+  wasn't chosen. Include options that were tried and reverted.
+
+**Decision**: What was chosen and the core trade-off.
+
+**What this rules out**: Future directions now constrained or foreclosed.
+What would trigger revisiting this decision.
+
+**Relevant files**: Key files created or modified.
+```
+
+### Guidelines
+
+- Focus on **why**, not what. The diff shows what changed; this log
+  explains the reasoning.
+- Capture rejected alternatives with equal care. Future agents need to
+  know what was already tried.
+- Be specific — name libraries, files, config choices, error messages.
+- Aim for 10–50 lines per entry. Reference document, not narrative.
+- Plain language. No jargon, no editorializing, no padding.
+
+### Superseded entries
+
+When a new decision invalidates, corrects, or replaces guidance in an older
+entry, add a blockquote annotation to the affected older entry — do not
+rewrite or delete its original text. Place the note immediately after the
+entry's heading or after the paragraph containing the superseded claim.
+
+> **⚠ Superseded** (YYYY-MM-DD): [Brief explanation of what changed and
+> why.] See "[title of newer entry]" above.
+
+Use **⚠ Partially superseded** when only specific claims are affected, and
+**⚠ Superseded** when the entire entry's premise or decision has been
+overturned. Always scan older entries for claims that conflict with the new
+decision — agents reading the log linearly will otherwise encounter
+contradictory guidance.
+<!-- END HEADER -->
+
+---
+
+## 2026-03-05 — Validate Win32 API arguments before ctypes calls
+
+**Trigger**: The full test suite crashed with a fatal Windows stack overflow (exit code `-1073741571`) in `test_create_fresh_instance_opens_on_genuinely_new`. The crash was not a test-only issue — it exposed a production-code fragility in `_set_access_visible()`.
+
+**Root cause**: `_set_access_visible(app)` called `app.hWndAccessApp()` and passed the result directly to `ctypes.windll.user32.ShowWindow(hwnd, SW_SHOW)`. When `hWndAccessApp()` returned a non-integer (a `MagicMock` in tests, but could be `None` or a COM error object in production with a partially-initialized instance), `ctypes` attempted C-level type coercion. On a `MagicMock`, this triggered infinite recursion through `__getattr__` → `_get_child_mock` → `__init__` → `_mock_add_spec` on the C stack. The existing `except Exception` safety net could not catch this because the overflow occurred in the C stack (inside `ctypes` marshalling), not at the Python level where `RecursionError` would be raised. The process was killed by Windows before Python could intervene.
+
+**Options explored**:
+- **Fix the test mock setup only** — add `mock_app.hWndAccessApp.return_value = 0` so ctypes gets an integer. Fixes the test but leaves production code vulnerable to the same crash if COM returns a non-integer.
+- **Validate the hwnd before passing to ctypes (chosen)** — add `if not isinstance(hwnd, int): return` before the `ctypes` call. Cheap, defensive, and makes the function safe regardless of what the COM layer returns.
+
+**Decision**: Added `isinstance(hwnd, int)` guard in `_set_access_visible()`. This establishes a pattern: always validate types before passing values to `ctypes` Win32 API calls. The `except Exception` pattern is not sufficient for ctypes — invalid argument types can cause C-level crashes that Python cannot catch.
+
+Also fixed a stale test (`test_init_fails_if_env_exists` → `test_init_skips_env_if_exists`) where `run_init()` had been updated to warn-and-continue when `.env` exists but the test still expected `SystemExit`.
+
+**What this rules out**: Nothing. The `isinstance` check is strictly additive safety. If a future scenario needs to handle non-integer HWNDs (unlikely — `hWndAccessApp` always returns an integer on a live COM object), the guard can be extended. The broader lesson: any function that bridges Python objects to C APIs via `ctypes` should validate argument types before the call, not rely on exception handling after.
+
+**Relevant files**: `src/db_inspector_mcp/backends/access_com.py` (`_set_access_visible`), `tests/test_init.py`
+
+---
+
+## 2026-03-05 — Sync-guard tests for dual-maintained version and .env.example
+
+**Trigger**: The project maintains version in two places (`pyproject.toml` `[project].version` and `__init__.py` `__version__`) and `.env.example` in two places (repo root and `src/db_inspector_mcp/.env.example` for wheel packaging). The PyPI publishing decision (2026-02-27) explicitly noted "Version must be maintained in two places until a single-source-of-truth approach is adopted." Without automated guards, these pairs can silently drift.
+
+**Options explored**:
+- **Single-source version via `importlib.metadata`** — `__version__ = importlib.metadata.version("db-inspector-mcp")` in `__init__.py`, removing the hardcoded string. Eliminates duplication but requires the package to be installed (breaks `python -c "from db_inspector_mcp import __version__"` in bare checkouts) and adds a runtime import. Deferred as a larger change.
+- **`setuptools-scm`** — derives version from git tags. Requires additional build dependency and changes the release workflow. Overkill for current project size. Deferred.
+- **Simple pytest assertion (chosen)** — `test_init_version_matches_pyproject` reads `pyproject.toml`, extracts `[project].version`, and asserts it equals `__version__`. Catches drift in CI with zero runtime cost. The existing `test_content_matches_root_file` in `test_init.py` already guards `.env.example` sync.
+
+**Decision**: Added `tests/test_version.py` with a single test that parses the version from `pyproject.toml` and asserts equality with `db_inspector_mcp.__version__`. This is the minimal guard — any version bump that updates one file but not the other will fail CI. The `.env.example` sync was already covered by the existing `test_content_matches_root_file` test.
+
+**What this rules out**: Nothing. The `importlib.metadata` or `setuptools-scm` approaches remain available as future improvements. The trigger to adopt one would be: frequent version-bump mistakes despite the test guard, or a move to automated release versioning.
+
+**Relevant files**: `tests/test_version.py` (new), `src/db_inspector_mcp/__init__.py`, `pyproject.toml`
 
 ---
 
@@ -373,6 +481,8 @@ After these changes, startup for projects without a `.env` file loads only: stdl
 Critical design choice: the global `~/.cursor/mcp.json` entry contains **only the command** (`{"command": "db-inspector-mcp"}`), with no `env` overrides. This is because `mcp.json` env values become process-level environment variables that take precedence over `.env` files (which are loaded with `override=False` via python-dotenv). Putting settings like `DB_MCP_ALLOW_DATA_ACCESS` in the global config would prevent per-project `.env` customization.
 
 Template loading uses a two-strategy approach: first tries `Path(__file__).parent.parent.parent / ".env.example"` (works for editable installs where source is directly linked), then falls back to `importlib.resources.files("db_inspector_mcp").joinpath(".env.example")` (for wheel installs with package-data). No duplicate file is maintained.
+
+> **⚠ Partially superseded** (2026-02-27): This entry originally rejected maintaining a duplicate template file and stated "No duplicate file is maintained." The later PyPI packaging decision intentionally adopted `src/db_inspector_mcp/.env.example` as a package-bundled mirror of root `.env.example` so wheel installs can load it reliably via `importlib.resources`. See "PyPI publishing and uvx as primary distribution" entry above.
 
 **What this rules out**: The `init` command currently targets Cursor only (writes to `~/.cursor/mcp.json`). Supporting other MCP clients (Claude Desktop, VS Code Copilot) would require additional registration logic or a `--client` flag. The `importlib.resources` fallback for wheel installs depends on `[tool.setuptools.package-data]` correctly bundling `.env.example` — this needs verification when publishing to PyPI (the `package-data` path `"../../.env.example"` relative to the package dir is fragile for non-editable installs).
 

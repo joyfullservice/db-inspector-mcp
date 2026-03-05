@@ -99,6 +99,8 @@ def _set_access_visible(app) -> None:
     SW_SHOW = 5
     try:
         hwnd = app.hWndAccessApp()
+        if not isinstance(hwnd, int):
+            return
         ctypes.windll.user32.ShowWindow(hwnd, SW_SHOW)
     except Exception:
         pass  # Best effort — Access may already be visible

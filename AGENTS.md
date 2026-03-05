@@ -14,12 +14,7 @@ Relevant when working on:
 
 ## After Making Architectural Decisions
 
-Append a new entry to the top of [DECISIONS.md](DECISIONS.md) documenting:
-- **Trigger**: What prompted the decision
-- **Options explored**: Alternatives considered with trade-offs
-- **Decision**: What was chosen and why
-- **What this rules out**: What becomes harder or impossible
-- **Relevant files**: Which files were changed
+Append a new entry to the top of [DECISIONS.md](DECISIONS.md) following the format and guidelines in its header.
 
 ## Running Tests
 

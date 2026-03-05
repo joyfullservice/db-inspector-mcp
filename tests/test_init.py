@@ -237,8 +237,8 @@ class TestRunInit:
         mcp_data = json.loads(mcp_json.read_text())
         assert "db-inspector-mcp" in mcp_data["mcpServers"]
 
-    def test_init_fails_if_env_exists(self, tmp_path, monkeypatch):
-        """Init exits with error when .env exists and --force is not used."""
+    def test_init_skips_env_if_exists(self, tmp_path, monkeypatch):
+        """Init preserves existing .env and still registers the MCP server."""
         (tmp_path / ".env").write_text("existing")
         mcp_json = tmp_path / "cursor_home" / ".cursor" / "mcp.json"
         monkeypatch.setattr(
@@ -246,8 +246,10 @@ class TestRunInit:
             lambda: mcp_json,
         )
 
-        with pytest.raises(SystemExit):
-            run_init(["--dir", str(tmp_path)])
+        run_init(["--dir", str(tmp_path)])
+
+        assert (tmp_path / ".env").read_text() == "existing"
+        assert mcp_json.exists()
 
     def test_init_force_overwrites(self, tmp_path, monkeypatch):
         """Init with --force overwrites existing .env."""
