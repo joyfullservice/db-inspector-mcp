@@ -46,7 +46,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
   "mcpServers": {
     "db-inspector-mcp": {
       "command": "uvx",
-      "args": ["db-inspector-mcp"]
+      "args": ["--upgrade", "db-inspector-mcp"]
     }
   }
 }
@@ -56,7 +56,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 **4. Restart Cursor** to load the MCP server.
 
-That's it. `uvx` will automatically download, cache, and run the latest version of the package from [PyPI](https://pypi.org/project/db-inspector-mcp/).
+That's it. The `--upgrade` flag ensures `uvx` always pulls the latest version from [PyPI](https://pypi.org/project/db-inspector-mcp/) instead of using a cached copy.
 
 ### Development Install (Editable)
 
@@ -147,7 +147,7 @@ This creates a `.env` file from the configuration template and registers the MCP
   "mcpServers": {
     "db-inspector-mcp": {
       "command": "uvx",
-      "args": ["db-inspector-mcp"]
+      "args": ["--upgrade", "db-inspector-mcp"]
     }
   }
 }
@@ -402,7 +402,7 @@ Store non-sensitive settings that can be shared with your team:
   "mcpServers": {
     "db-inspector-mcp": {
       "command": "uvx",
-      "args": ["db-inspector-mcp"],
+      "args": ["--upgrade", "db-inspector-mcp"],
       "env": {
         "DB_MCP_QUERY_TIMEOUT_SECONDS": "30",
         "DB_MCP_ALLOW_DATA_ACCESS": "false",
@@ -499,7 +499,7 @@ Add to `.cursor/mcp.json`:
   "mcpServers": {
     "db-inspector-mcp": {
       "command": "uvx",
-      "args": ["db-inspector-mcp"],
+      "args": ["--upgrade", "db-inspector-mcp"],
       "env": {
         "DB_MCP_QUERY_TIMEOUT_SECONDS": "30",
         "DB_MCP_ALLOW_DATA_ACCESS": "false",
@@ -526,7 +526,7 @@ For migration scenarios where you need to compare Access and SQL Server:
   "mcpServers": {
     "db-inspector-mcp": {
       "command": "uvx",
-      "args": ["db-inspector-mcp"],
+      "args": ["--upgrade", "db-inspector-mcp"],
       "env": {
         "DB_MCP_QUERY_TIMEOUT_SECONDS": "30",
         "DB_MCP_ALLOW_DATA_ACCESS": "true",
@@ -579,7 +579,7 @@ If the automatic workspace detection doesn't work in your environment, set `DB_M
   "mcpServers": {
     "db-inspector-mcp": {
       "command": "uvx",
-      "args": ["db-inspector-mcp"],
+      "args": ["--upgrade", "db-inspector-mcp"],
       "env": {
         "DB_MCP_PROJECT_DIR": "C:\\Users\\me\\projects\\my-project",
         "DB_MCP_QUERY_TIMEOUT_SECONDS": "30",
@@ -599,7 +599,7 @@ Add to your Claude Code MCP configuration (similar format):
   "mcpServers": {
     "db-inspector-mcp": {
       "command": "uvx",
-      "args": ["db-inspector-mcp"],
+      "args": ["--upgrade", "db-inspector-mcp"],
       "env": {
         "DB_MCP_QUERY_TIMEOUT_SECONDS": "30",
         "DB_MCP_ALLOW_DATA_ACCESS": "false"

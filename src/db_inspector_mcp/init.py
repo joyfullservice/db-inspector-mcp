@@ -14,7 +14,7 @@ from pathlib import Path
 # etc.) are never shadowed.
 MCP_JSON_SERVER_ENTRY = {
     "command": "uvx",
-    "args": ["db-inspector-mcp"],
+    "args": ["--upgrade", "db-inspector-mcp"],
 }
 
 MCP_JSON_TEMPLATE = json.dumps(
