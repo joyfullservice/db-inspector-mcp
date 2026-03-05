@@ -9,8 +9,8 @@ import pytest
 
 from db_inspector_mcp.init import (
     MCP_JSON_SERVER_ENTRY,
-    _get_global_mcp_json_path,
     _register_global_mcp,
+    _register_in_config,
     _write_env_file,
     is_globally_registered,
     load_env_example,
@@ -79,18 +79,14 @@ class TestWriteEnvFile:
         assert "old content" not in content
 
 
-class TestRegisterGlobalMcp:
-    """Tests for _register_global_mcp."""
+class TestRegisterInConfig:
+    """Tests for _register_in_config (single-file registration)."""
 
-    def test_creates_new_file(self, tmp_path, monkeypatch):
-        """Creates ~/.cursor/mcp.json if it doesn't exist."""
+    def test_creates_new_file(self, tmp_path):
+        """Creates config file if it doesn't exist."""
         mcp_json = tmp_path / ".cursor" / "mcp.json"
-        monkeypatch.setattr(
-            "db_inspector_mcp.init._get_global_mcp_json_path",
-            lambda: mcp_json,
-        )
 
-        result = _register_global_mcp(quiet=True)
+        result = _register_in_config(mcp_json, quiet=True)
         assert result == mcp_json
         assert mcp_json.exists()
 
@@ -98,8 +94,8 @@ class TestRegisterGlobalMcp:
         assert "db-inspector-mcp" in data["mcpServers"]
         assert data["mcpServers"]["db-inspector-mcp"] == MCP_JSON_SERVER_ENTRY
 
-    def test_adds_to_existing_file(self, tmp_path, monkeypatch):
-        """Adds db-inspector-mcp entry to existing mcp.json without clobbering."""
+    def test_adds_to_existing_file(self, tmp_path):
+        """Adds db-inspector-mcp entry to existing config without clobbering."""
         mcp_json = tmp_path / ".cursor" / "mcp.json"
         mcp_json.parent.mkdir(parents=True)
         existing = {
@@ -109,18 +105,13 @@ class TestRegisterGlobalMcp:
         }
         mcp_json.write_text(json.dumps(existing))
 
-        monkeypatch.setattr(
-            "db_inspector_mcp.init._get_global_mcp_json_path",
-            lambda: mcp_json,
-        )
-
-        _register_global_mcp(quiet=True)
+        _register_in_config(mcp_json, quiet=True)
         data = json.loads(mcp_json.read_text())
         assert "other-server" in data["mcpServers"]
         assert "db-inspector-mcp" in data["mcpServers"]
 
-    def test_skips_if_already_registered(self, tmp_path, monkeypatch):
-        """Does not modify mcp.json if db-inspector-mcp is already registered."""
+    def test_skips_if_already_registered(self, tmp_path):
+        """Does not modify config if db-inspector-mcp is already registered."""
         mcp_json = tmp_path / ".cursor" / "mcp.json"
         mcp_json.parent.mkdir(parents=True)
         existing = {
@@ -130,87 +121,113 @@ class TestRegisterGlobalMcp:
         }
         mcp_json.write_text(json.dumps(existing))
 
-        monkeypatch.setattr(
-            "db_inspector_mcp.init._get_global_mcp_json_path",
-            lambda: mcp_json,
-        )
-
-        _register_global_mcp(quiet=True)
+        _register_in_config(mcp_json, quiet=True)
         data = json.loads(mcp_json.read_text())
-        # Should preserve the existing entry, not overwrite
         assert data["mcpServers"]["db-inspector-mcp"]["custom"] is True
 
-    def test_handles_corrupt_json(self, tmp_path, monkeypatch):
-        """Handles corrupt/empty mcp.json gracefully."""
+    def test_handles_corrupt_json(self, tmp_path):
+        """Handles corrupt/empty config gracefully."""
         mcp_json = tmp_path / ".cursor" / "mcp.json"
         mcp_json.parent.mkdir(parents=True)
         mcp_json.write_text("not valid json {{{")
 
-        monkeypatch.setattr(
-            "db_inspector_mcp.init._get_global_mcp_json_path",
-            lambda: mcp_json,
-        )
-
-        _register_global_mcp(quiet=True)
+        _register_in_config(mcp_json, quiet=True)
         data = json.loads(mcp_json.read_text())
         assert "db-inspector-mcp" in data["mcpServers"]
 
-    def test_no_env_overrides_in_entry(self, tmp_path, monkeypatch):
-        """Global mcp.json entry must NOT contain env overrides."""
-        mcp_json = tmp_path / ".cursor" / "mcp.json"
-        monkeypatch.setattr(
-            "db_inspector_mcp.init._get_global_mcp_json_path",
-            lambda: mcp_json,
-        )
+    def test_no_env_overrides_in_entry(self, tmp_path):
+        """Config entry must NOT contain env overrides."""
+        mcp_json = tmp_path / "mcp.json"
 
-        _register_global_mcp(quiet=True)
+        _register_in_config(mcp_json, quiet=True)
         data = json.loads(mcp_json.read_text())
         entry = data["mcpServers"]["db-inspector-mcp"]
         assert "env" not in entry
 
 
+class TestRegisterGlobalMcp:
+    """Tests for _register_global_mcp (registers in all known clients)."""
+
+    def test_registers_in_both_clients(self, tmp_path, monkeypatch):
+        """Registers in both Cursor and Claude Code config files."""
+        cursor_json = tmp_path / ".cursor" / "mcp.json"
+        claude_json = tmp_path / ".claude.json"
+        monkeypatch.setattr(
+            "db_inspector_mcp.init._MCP_CLIENT_CONFIGS",
+            [("Cursor", cursor_json), ("Claude Code", claude_json)],
+        )
+
+        _register_global_mcp(quiet=True)
+
+        for path in [cursor_json, claude_json]:
+            assert path.exists()
+            data = json.loads(path.read_text())
+            assert "db-inspector-mcp" in data["mcpServers"]
+
+
 class TestIsGloballyRegistered:
     """Tests for is_globally_registered."""
 
-    def test_true_when_registered(self, tmp_path, monkeypatch):
-        """Returns True when db-inspector-mcp is in global mcp.json."""
-        mcp_json = tmp_path / ".cursor" / "mcp.json"
-        mcp_json.parent.mkdir(parents=True)
-        mcp_json.write_text(json.dumps({
+    def test_true_when_registered_in_cursor(self, tmp_path, monkeypatch):
+        """Returns True when db-inspector-mcp is in Cursor config."""
+        cursor_json = tmp_path / ".cursor" / "mcp.json"
+        cursor_json.parent.mkdir(parents=True)
+        cursor_json.write_text(json.dumps({
+            "mcpServers": {"db-inspector-mcp": {"command": "db-inspector-mcp"}}
+        }))
+        claude_json = tmp_path / ".claude.json"
+        monkeypatch.setattr(
+            "db_inspector_mcp.init._MCP_CLIENT_CONFIGS",
+            [("Cursor", cursor_json), ("Claude Code", claude_json)],
+        )
+        assert is_globally_registered() is True
+
+    def test_true_when_registered_in_claude(self, tmp_path, monkeypatch):
+        """Returns True when db-inspector-mcp is in Claude Code config."""
+        cursor_json = tmp_path / ".cursor" / "mcp.json"
+        claude_json = tmp_path / ".claude.json"
+        claude_json.write_text(json.dumps({
             "mcpServers": {"db-inspector-mcp": {"command": "db-inspector-mcp"}}
         }))
         monkeypatch.setattr(
-            "db_inspector_mcp.init._get_global_mcp_json_path", lambda: mcp_json,
+            "db_inspector_mcp.init._MCP_CLIENT_CONFIGS",
+            [("Cursor", cursor_json), ("Claude Code", claude_json)],
         )
         assert is_globally_registered() is True
 
     def test_false_when_not_registered(self, tmp_path, monkeypatch):
-        """Returns False when db-inspector-mcp is not in global mcp.json."""
-        mcp_json = tmp_path / ".cursor" / "mcp.json"
-        mcp_json.parent.mkdir(parents=True)
-        mcp_json.write_text(json.dumps({
+        """Returns False when db-inspector-mcp is not in any config."""
+        cursor_json = tmp_path / ".cursor" / "mcp.json"
+        cursor_json.parent.mkdir(parents=True)
+        cursor_json.write_text(json.dumps({
             "mcpServers": {"other-server": {"command": "other-cmd"}}
         }))
+        claude_json = tmp_path / ".claude.json"
         monkeypatch.setattr(
-            "db_inspector_mcp.init._get_global_mcp_json_path", lambda: mcp_json,
+            "db_inspector_mcp.init._MCP_CLIENT_CONFIGS",
+            [("Cursor", cursor_json), ("Claude Code", claude_json)],
         )
         assert is_globally_registered() is False
 
-    def test_false_when_file_missing(self, tmp_path, monkeypatch):
-        """Returns False when global mcp.json does not exist."""
-        mcp_json = tmp_path / ".cursor" / "mcp.json"
+    def test_false_when_files_missing(self, tmp_path, monkeypatch):
+        """Returns False when no config files exist."""
         monkeypatch.setattr(
-            "db_inspector_mcp.init._get_global_mcp_json_path", lambda: mcp_json,
+            "db_inspector_mcp.init._MCP_CLIENT_CONFIGS",
+            [
+                ("Cursor", tmp_path / ".cursor" / "mcp.json"),
+                ("Claude Code", tmp_path / ".claude.json"),
+            ],
         )
         assert is_globally_registered() is False
 
     def test_false_when_corrupt_json(self, tmp_path, monkeypatch):
-        """Returns False when global mcp.json contains invalid JSON."""
-        mcp_json = tmp_path / ".cursor" / "mcp.json"
-        mcp_json.parent.mkdir(parents=True)
-        mcp_json.write_text("not valid json {{{")
+        """Returns False when config contains invalid JSON."""
+        cursor_json = tmp_path / ".cursor" / "mcp.json"
+        cursor_json.parent.mkdir(parents=True)
+        cursor_json.write_text("not valid json {{{")
         monkeypatch.setattr(
-            "db_inspector_mcp.init._get_global_mcp_json_path", lambda: mcp_json,
+            "db_inspector_mcp.init._MCP_CLIENT_CONFIGS",
+            [("Cursor", cursor_json)],
         )
         assert is_globally_registered() is False
 
@@ -219,45 +236,50 @@ class TestRunInit:
     """Tests for the full run_init CLI command."""
 
     def test_full_init(self, tmp_path, monkeypatch):
-        """Full init creates .env and registers in global mcp.json."""
-        mcp_json = tmp_path / "cursor_home" / ".cursor" / "mcp.json"
+        """Full init creates .env and registers in all client configs."""
+        cursor_json = tmp_path / "cursor_home" / ".cursor" / "mcp.json"
+        claude_json = tmp_path / "cursor_home" / ".claude.json"
         monkeypatch.setattr(
-            "db_inspector_mcp.init._get_global_mcp_json_path",
-            lambda: mcp_json,
+            "db_inspector_mcp.init._MCP_CLIENT_CONFIGS",
+            [("Cursor", cursor_json), ("Claude Code", claude_json)],
         )
 
         run_init(["--dir", str(tmp_path)])
 
         assert (tmp_path / ".env").exists()
-        assert mcp_json.exists()
+        assert cursor_json.exists()
+        assert claude_json.exists()
 
         env_content = (tmp_path / ".env").read_text()
         assert "DB_MCP_DATABASE" in env_content
 
-        mcp_data = json.loads(mcp_json.read_text())
-        assert "db-inspector-mcp" in mcp_data["mcpServers"]
+        for path in [cursor_json, claude_json]:
+            data = json.loads(path.read_text())
+            assert "db-inspector-mcp" in data["mcpServers"]
 
     def test_init_skips_env_if_exists(self, tmp_path, monkeypatch):
         """Init preserves existing .env and still registers the MCP server."""
         (tmp_path / ".env").write_text("existing")
-        mcp_json = tmp_path / "cursor_home" / ".cursor" / "mcp.json"
+        cursor_json = tmp_path / "cursor_home" / ".cursor" / "mcp.json"
+        claude_json = tmp_path / "cursor_home" / ".claude.json"
         monkeypatch.setattr(
-            "db_inspector_mcp.init._get_global_mcp_json_path",
-            lambda: mcp_json,
+            "db_inspector_mcp.init._MCP_CLIENT_CONFIGS",
+            [("Cursor", cursor_json), ("Claude Code", claude_json)],
         )
 
         run_init(["--dir", str(tmp_path)])
 
         assert (tmp_path / ".env").read_text() == "existing"
-        assert mcp_json.exists()
+        assert cursor_json.exists()
+        assert claude_json.exists()
 
     def test_init_force_overwrites(self, tmp_path, monkeypatch):
         """Init with --force overwrites existing .env."""
         (tmp_path / ".env").write_text("old")
-        mcp_json = tmp_path / "cursor_home" / ".cursor" / "mcp.json"
+        cursor_json = tmp_path / "cursor_home" / ".cursor" / "mcp.json"
         monkeypatch.setattr(
-            "db_inspector_mcp.init._get_global_mcp_json_path",
-            lambda: mcp_json,
+            "db_inspector_mcp.init._MCP_CLIENT_CONFIGS",
+            [("Cursor", cursor_json)],
         )
 
         run_init(["--dir", str(tmp_path), "--force"])

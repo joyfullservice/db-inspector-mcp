@@ -66,15 +66,14 @@ def _write_env_file(target_dir: Path, *, force: bool) -> Path:
     return env_path
 
 
-def _get_global_mcp_json_path() -> Path:
-    """Return the path to the user-level Cursor mcp.json."""
-    home = Path.home()
-    return home / ".cursor" / "mcp.json"
+_MCP_CLIENT_CONFIGS = [
+    ("Cursor", Path.home() / ".cursor" / "mcp.json"),
+    ("Claude Code", Path.home() / ".claude.json"),
+]
 
 
-def is_globally_registered() -> bool:
-    """Check whether db-inspector-mcp is already in the global mcp.json."""
-    mcp_json_path = _get_global_mcp_json_path()
+def _is_registered_in(mcp_json_path: Path) -> bool:
+    """Check whether db-inspector-mcp is registered in a config file."""
     if not mcp_json_path.exists():
         return False
     try:
@@ -84,15 +83,19 @@ def is_globally_registered() -> bool:
         return False
 
 
-def _register_global_mcp(*, quiet: bool = False) -> Path:
-    """Add db-inspector-mcp to the global ``~/.cursor/mcp.json``.
+def is_globally_registered() -> bool:
+    """Check whether db-inspector-mcp is in any global MCP config."""
+    return any(_is_registered_in(path) for _, path in _MCP_CLIENT_CONFIGS)
+
+
+def _register_in_config(mcp_json_path: Path, *, quiet: bool = False) -> Path:
+    """Add db-inspector-mcp to a global MCP config file.
 
     Creates the file (and parent directories) if it doesn't exist.
     Skips if the server entry is already present.
 
-    Returns the path to the mcp.json file.
+    Returns the path to the config file.
     """
-    mcp_json_path = _get_global_mcp_json_path()
     mcp_json_path.parent.mkdir(parents=True, exist_ok=True)
 
     if mcp_json_path.exists():
@@ -114,6 +117,12 @@ def _register_global_mcp(*, quiet: bool = False) -> Path:
     if not quiet:
         print(f"  Registered in {mcp_json_path}")
     return mcp_json_path
+
+
+def _register_global_mcp(*, quiet: bool = False) -> None:
+    """Register db-inspector-mcp in all known MCP client configs."""
+    for _name, path in _MCP_CLIENT_CONFIGS:
+        _register_in_config(path, quiet=quiet)
 
 
 def run_init(argv: list[str] | None = None) -> None:
@@ -150,13 +159,13 @@ def run_init(argv: list[str] | None = None) -> None:
         env_path = _write_env_file(target_dir, force=args.force)
         print(f"  Created {env_path}")
 
-    # 2. Register in global ~/.cursor/mcp.json
+    # 2. Register in global MCP client configs
     _register_global_mcp()
 
     # 3. Next steps
     print()
     print("Next steps:")
     print(f"  1. Edit {env_path} with your database connection details")
-    print("  2. Restart Cursor to load the MCP server")
+    print("  2. Restart your MCP client (Cursor, Claude Code, etc.) to load the server")
     print()
     print("For configuration help, see: https://github.com/joyfullservice/db-inspector-mcp#configuration")

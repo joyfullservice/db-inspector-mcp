@@ -288,14 +288,15 @@ def setup_db_inspector() -> str:
     else:
         next_step = 3
         steps.append(
-            "2. If `.cursor/mcp.json` does not exist in the project, create it "
-            "with:\n\n"
+            "2. Add the MCP server to your client config. "
+            "For Cursor, create `.cursor/mcp.json`; for Claude Code, create "
+            "`.mcp.json` in the project root:\n\n"
             f"```json\n{MCP_JSON_TEMPLATE}\n```\n\n"
         )
 
     steps.append(
         f"{next_step}. Tell the user to edit `.env` with their database "
-        "connection details and restart Cursor."
+        "connection details and restart their MCP client (Cursor, Claude Code, etc.)."
     )
 
     return "Set up db-inspector-mcp for this project:\n\n" + "".join(steps)

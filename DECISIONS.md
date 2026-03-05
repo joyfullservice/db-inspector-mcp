@@ -79,6 +79,24 @@ contradictory guidance.
 
 ---
 
+## 2026-03-05 — Environment variable naming conventions (DB_MCP_ prefix, _DATABASE suffix)
+
+**Trigger**: Needed a naming convention for environment variables that avoids collisions with other database tools while remaining clear to users.
+
+**Options explored**:
+- **No prefix** (`DATABASE`, `CONNECTION_STRING`) — collides with common variables like `DB_HOST`, `DB_NAME` that already exist in many projects' `.env` files.
+- **`DB_MCP_` prefix** — scoped to this tool, avoids collisions, allows coexistence with other database configurations.
+- **`_BACKEND` suffix** (`DB_MCP_BACKEND`, `DB_MCP_<name>_BACKEND`) — technically accurate (the code uses backend classes internally) but confusing to users who think of themselves as configuring a *database connection*, not a backend component.
+- **`_DATABASE` suffix** (`DB_MCP_DATABASE`, `DB_MCP_<name>_DATABASE`) — clearer user-facing semantics.
+
+**Decision**: Use `DB_MCP_` prefix on all environment variables, and `_DATABASE` suffix (not `_BACKEND`) for the database type selector. This avoids collisions with other tools and reads naturally to users.
+
+**What this rules out**: Shorter variable names without the prefix. Would revisit if the MCP ecosystem adopted a standard env-var namespace convention.
+
+**Relevant files**: `config.py`, `.env.example`, `README.md`.
+
+---
+
 ## 2026-03-05 — Validate Win32 API arguments before ctypes calls
 
 **Trigger**: The full test suite crashed with a fatal Windows stack overflow (exit code `-1073741571`) in `test_create_fresh_instance_opens_on_genuinely_new`. The crash was not a test-only issue — it exposed a production-code fragility in `_set_access_visible()`.
