@@ -200,16 +200,16 @@ _ACCESS_ERROR_HINTS: list[tuple[re.Pattern[str], str | None, str]] = [
             "Call db_sql_help('udfs') for details."
         ),
     ),
-    # "too few parameters" → may be an unresolved VBA UDF
+    # "too few parameters" → usually a misspelled column name
     (
         re.compile(r"too few parameters", re.IGNORECASE),
         None,
         (
-            "The ODBC driver could not resolve all identifiers in the query. "
-            "If the query calls VBA functions or Access domain functions "
-            "(DLookup, DCount, Nz on columns, etc.), use the access_com backend "
-            "(DB_MCP_DATABASE=access_com) which can resolve them. "
-            "Call db_sql_help('udfs') for details."
+            "Access treats unrecognized identifiers as query parameters. "
+            "The most common cause is a misspelled or non-existent column name. "
+            "Verify column names with db_get_query_columns() or db_list_tables(). "
+            "Less commonly, the query may reference a VBA function that requires "
+            "the access_com backend (DB_MCP_DATABASE=access_com)."
         ),
     ),
 ]
