@@ -1063,8 +1063,8 @@ def test_create_fresh_instance_reuses_existing_with_our_db():
         backend._close_timer.cancel()
 
 
-def test_create_fresh_instance_refuses_different_db():
-    """EnsureDispatch returning an instance with a DIFFERENT DB raises RuntimeError."""
+def test_create_fresh_instance_falls_back_to_dispatch_ex_for_different_db():
+    """EnsureDispatch returning an instance with a DIFFERENT DB falls back to DispatchEx."""
     connection_string = "Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\test.accdb;"
 
     mock_app = MagicMock()
@@ -1072,15 +1072,45 @@ def test_create_fresh_instance_refuses_different_db():
     mock_other_db.Name = "C:\\Users\\someone\\other.accdb"
     mock_app.CurrentDb.return_value = mock_other_db
 
-    with patch('db_inspector_mcp.backends.access_com.win32com.client'), \
+    mock_isolated_app = MagicMock()
+
+    with patch('db_inspector_mcp.backends.access_com.win32com.client') as mock_win32com, \
          patch('db_inspector_mcp.backends.access_com.gencache') as mock_gencache:
         mock_gencache.EnsureDispatch.return_value = mock_app
+        mock_win32com.DispatchEx.return_value = mock_isolated_app
         backend = AccessCOMBackend(connection_string, 30)
+        result = backend._create_fresh_instance()
 
-        with pytest.raises(RuntimeError, match="existing instance"):
-            backend._create_fresh_instance()
-
+    assert result is mock_isolated_app
     mock_app.OpenCurrentDatabase.assert_not_called()
+    mock_win32com.DispatchEx.assert_called_once_with("Access.Application")
+    mock_isolated_app.OpenCurrentDatabase.assert_called_once_with("C:\\test.accdb", False)
+    assert backend._we_created_app
+
+    if backend._close_timer is not None:
+        backend._close_timer.cancel()
+
+
+def test_create_fresh_instance_dispatch_ex_with_password():
+    """DispatchEx fallback passes password to OpenCurrentDatabase."""
+    connection_string = "Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\test.accdb;"
+
+    mock_app = MagicMock()
+    mock_other_db = MagicMock()
+    mock_other_db.Name = "C:\\other.accdb"
+    mock_app.CurrentDb.return_value = mock_other_db
+
+    mock_isolated_app = MagicMock()
+
+    with patch('db_inspector_mcp.backends.access_com.win32com.client') as mock_win32com, \
+         patch('db_inspector_mcp.backends.access_com.gencache') as mock_gencache:
+        mock_gencache.EnsureDispatch.return_value = mock_app
+        mock_win32com.DispatchEx.return_value = mock_isolated_app
+        backend = AccessCOMBackend(connection_string, 30)
+        result = backend._create_fresh_instance(password="secret123")
+
+    assert result is mock_isolated_app
+    mock_isolated_app.OpenCurrentDatabase.assert_called_once_with("C:\\test.accdb", False, "secret123")
 
     if backend._close_timer is not None:
         backend._close_timer.cancel()

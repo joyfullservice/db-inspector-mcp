@@ -522,8 +522,8 @@ class AccessCOMBackend(DatabaseBackend):
         instance instead of a fresh one.  If the returned app already
         has a database open:
         - If it's OUR database → reuse it (no ``OpenCurrentDatabase``).
-        - If it's a DIFFERENT database → do NOT touch it.  Raise so the
-          caller knows we couldn't safely create an isolated instance.
+        - If it's a DIFFERENT database → fall back to ``DispatchEx`` to
+          create a guaranteed-isolated Access process.
 
         ``OpenCurrentDatabase`` is only called on genuinely fresh
         instances (no database open), preserving the user's Shift-bypass
@@ -546,13 +546,14 @@ class AccessCOMBackend(DatabaseBackend):
                     file=sys.stderr,
                 )
                 return app
-            # Got someone else's instance — don't touch it
-            raise RuntimeError(
-                f"Cannot create a new Access instance for '{db_name}': "
-                f"EnsureDispatch returned an existing instance with "
-                f"'{os.path.basename(existing_db.Name)}' open. "
-                f"Please open '{db_name}' manually in Access."
+            # Got someone else's instance — create an isolated process
+            other_name = os.path.basename(existing_db.Name)
+            print(
+                f"[{db_name}] EnsureDispatch returned instance with "
+                f"'{other_name}' open — launching isolated instance via DispatchEx",
+                file=sys.stderr,
             )
+            return self._create_isolated_instance(password)
 
         # Genuinely fresh instance — safe to open our database
         _set_access_visible(app)
@@ -564,6 +565,30 @@ class AccessCOMBackend(DatabaseBackend):
         self._we_created_app = True
         print(
             f"[{db_name}] Created new Access instance",
+            file=sys.stderr,
+        )
+        return app
+
+    def _create_isolated_instance(self, password: str = "") -> Any:
+        """Create a guaranteed-isolated Access process via ``DispatchEx``.
+
+        Unlike ``EnsureDispatch``, ``DispatchEx`` always spawns a new
+        COM server process that is completely independent of any existing
+        Access instance.  ``UserControl = True`` so the user sees and
+        controls this Access window (unlike the test fixture which uses
+        ``False``).
+        """
+        db_name = os.path.basename(self._db_path)
+        app = win32com.client.DispatchEx("Access.Application")
+        _set_access_visible(app)
+        app.UserControl = True
+        if password:
+            app.OpenCurrentDatabase(self._db_path, False, password)
+        else:
+            app.OpenCurrentDatabase(self._db_path, False)
+        self._we_created_app = True
+        print(
+            f"[{db_name}] Created isolated Access instance via DispatchEx",
             file=sys.stderr,
         )
         return app

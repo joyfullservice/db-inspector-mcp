@@ -79,6 +79,23 @@ contradictory guidance.
 
 ---
 
+## 2026-03-24 — DispatchEx fallback for COM instance conflicts
+
+**Trigger**: Production logs showed 4 occurrences where `EnsureDispatch("Access.Application")` returned an existing instance with a different database open. The previous behavior raised a `RuntimeError` telling the user to open the database manually — a poor experience that left the agent unable to proceed.
+
+**Options explored**:
+- **Raise `RuntimeError`** (status quo from 2026-02-28) — safe but forces the user to manually open Access with the correct database. The agent cannot recover.
+- **Call `OpenCurrentDatabase` on the existing instance** — would close the user's other database. Unacceptable.
+- **`DispatchEx("Access.Application")` (chosen)** — always creates a new, isolated COM server process. Already proven safe for integration tests (see 2026-03-05 decision). Use `UserControl = True` (unlike tests which use `False`) so the user sees and controls the second Access window.
+
+**Decision**: When `EnsureDispatch` returns an instance with a different database, fall back to `_create_isolated_instance()` which uses `DispatchEx`. The new instance gets `Visible = True`, `UserControl = True`, and opens our database via `OpenCurrentDatabase`. The user's existing Access instance is never touched.
+
+**What this rules out**: The `RuntimeError` path for COM instance conflicts is eliminated. The server now transparently handles multi-database scenarios by spawning isolated instances. Would revisit only if `DispatchEx` proves unreliable on specific Access/Windows configurations.
+
+**Relevant files**: `src/db_inspector_mcp/backends/access_com.py`, `tests/test_backends.py`
+
+---
+
 ## 2026-03-24 — DAO query timeout via disposable worker threads
 
 **Trigger**: Production logs showed a DAO query blocking for 636 seconds (10.6 minutes) on a complex 8-way JOIN, with the Python process consuming high CPU even after the MCP tool was disabled in Cursor. The `_dao_execute()` method had no timeout enforcement — `db.OpenRecordset(sql)` blocks the calling thread in native COM/RPC code with no way to interrupt it.
@@ -335,6 +352,8 @@ Key implementation choices:
 1. **Replace `GetObject(file_path)` with `_find_existing_instance()`** in `_acquire_for_open_db()`. The ROT scan is read-only — no moniker activation, no risk of closing databases. Both password and non-password paths now use the same safe acquisition.
 2. **Add `_create_fresh_instance()` helper** that checks whether `EnsureDispatch` returned a fresh instance or reused an existing one. If the returned instance already has our database open, reuse it (no `OpenCurrentDatabase`). If it has a *different* database, raise `RuntimeError` instead of closing the user's database. Only call `OpenCurrentDatabase` on genuinely fresh instances (no database open).
 3. **Guard `_ensure_current_db()` with `_we_created_app` flag** — only allow `OpenCurrentDatabase` when we created the instance. If the instance belongs to the user and the database doesn't match, raise `RuntimeError`.
+
+> **⚠ Partially superseded** (2026-03-24): The `RuntimeError` for "EnsureDispatch returned a different database" was replaced by a `DispatchEx` fallback that creates an isolated Access instance. The user's existing instance is still never touched. See "DispatchEx fallback for COM instance conflicts" above.
 
 **What this rules out**: The server can no longer automatically open a database in an Access instance that already has a different database open. This is the correct trade-off — silently closing someone's database is never acceptable.
 
