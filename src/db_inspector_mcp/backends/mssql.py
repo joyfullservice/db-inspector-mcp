@@ -40,6 +40,7 @@ class MSSQLBackend(DatabaseBackend):
                 self.connection_string,
                 timeout=self.query_timeout_seconds
             )
+            self._connection.timeout = self.query_timeout_seconds
         return self._connection
 
     def close(self) -> None:

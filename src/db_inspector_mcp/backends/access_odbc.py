@@ -116,10 +116,12 @@ class AccessODBCBackend(DatabaseBackend):
 
     def _open_connection(self) -> pyodbc.Connection:
         """Create a new ODBC connection (internal, no locking)."""
-        return pyodbc.connect(
+        conn = pyodbc.connect(
             self.connection_string,
             timeout=self.query_timeout_seconds,
         )
+        conn.timeout = self.query_timeout_seconds
+        return conn
 
     def _discard_connection(self) -> None:
         """Close and discard the cached connection (must hold _conn_lock)."""

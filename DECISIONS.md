@@ -79,6 +79,22 @@ contradictory guidance.
 
 ---
 
+## 2026-03-25 — Fix ODBC query execution timeout (was only setting login timeout)
+
+**Trigger**: Agent queries running for several minutes without timing out despite `DB_MCP_QUERY_TIMEOUT_SECONDS=30`. Logs showed no timeout errors — queries simply ran indefinitely.
+
+**Options explored**:
+- **`pyodbc.connect(timeout=N)`** (status quo) — this only sets the *login/connection* timeout (how long to wait for the initial connection to the server). Once connected, queries have no time limit. This is a pyodbc API distinction: `connect(timeout=)` maps to `SQL_ATTR_LOGIN_TIMEOUT`, not `SQL_ATTR_QUERY_TIMEOUT`.
+- **`connection.timeout = N`** (chosen) — sets `SQL_ATTR_QUERY_TIMEOUT` on the connection object after creation. All cursors created from the connection inherit this timeout, which causes the ODBC driver to cancel queries that exceed the limit. This is the correct pyodbc mechanism for query execution timeouts.
+
+**Decision**: Set `connection.timeout = self.query_timeout_seconds` immediately after `pyodbc.connect()` in both `AccessODBCBackend._open_connection()` and `MSSQLBackend._get_connection()`. The `connect(timeout=)` parameter is kept for login timeout (both are useful). PostgreSQL was already correct (uses `SET statement_timeout`). Access COM DAO queries were already correct (uses `thread.join(timeout=)`).
+
+**What this rules out**: Nothing new — this is a bug fix. Would revisit if specific ODBC drivers don't honor `SQL_ATTR_QUERY_TIMEOUT` (the Jet/ACE driver may silently ignore it for some operations, but the DAO timeout in `access_com.py` covers that path).
+
+**Relevant files**: `src/db_inspector_mcp/backends/access_odbc.py`, `src/db_inspector_mcp/backends/mssql.py`, `tests/test_backends.py`
+
+---
+
 ## 2026-03-25 — Lazy connection in db_list_databases
 
 **Trigger**: With three Access COM databases configured, calling `db_list_databases` opened all three COM Application instances (~2.3s cold start each) before the user had expressed any intent to query them. The eager `get_object_counts()` call on every registered backend was introduced to front-load connection warmup (see 2026-02-12 entry), but real-world multi-database configurations showed the cost outweighs the benefit — most sessions only interact with one or two of the configured databases.

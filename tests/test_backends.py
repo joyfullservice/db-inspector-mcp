@@ -294,6 +294,45 @@ def test_access_odbc_connection_closed_on_non_pyodbc_error():
         backend._close_timer.cancel()
 
 
+def test_access_odbc_sets_query_execution_timeout():
+    """Verify connection.timeout (query execution) is set, not just login timeout."""
+    backend = AccessODBCBackend("test_connection_string", 45)
+
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_conn.cursor.return_value = mock_cursor
+    mock_cursor.fetchone.return_value = (1,)
+
+    with patch('db_inspector_mcp.backends.access_odbc.pyodbc') as mock_pyodbc:
+        mock_pyodbc.connect.return_value = mock_conn
+
+        backend.count_query_results("SELECT 1")
+
+        mock_pyodbc.connect.assert_called_once_with(
+            backend.connection_string, timeout=45
+        )
+        assert mock_conn.timeout == 45
+
+    if backend._close_timer is not None:
+        backend._close_timer.cancel()
+
+
+def test_mssql_sets_query_execution_timeout():
+    """Verify connection.timeout (query execution) is set, not just login timeout."""
+    backend = MSSQLBackend("test_connection_string", 45)
+
+    mock_conn = MagicMock()
+    with patch('db_inspector_mcp.backends.mssql.pyodbc') as mock_pyodbc:
+        mock_pyodbc.connect.return_value = mock_conn
+
+        conn = backend._get_connection()
+
+        mock_pyodbc.connect.assert_called_once_with(
+            "test_connection_string", timeout=45
+        )
+        assert mock_conn.timeout == 45
+
+
 def test_access_com_backend_initialization():
     """Test that Access COM backend can be initialized."""
     connection_string = "Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\test.accdb;"
@@ -1319,6 +1358,26 @@ def temp_access_db(access_app):
 
         db.CreateQueryDef("TestQuery", "SELECT * FROM TestTable WHERE Amount > 150")
 
+        # SlowJoinTable — 128 rows for cross-join timeout tests.
+        # A 3-way cartesian join (128^3 = ~2M rows) is slow enough to
+        # exceed a 2-second DAO timeout when iterated row-by-row.
+        slow_tbl = db.CreateTableDef("SlowJoinTable")
+        fld_slow_id = slow_tbl.CreateField("ID", dbLong)
+        fld_slow_id.Attributes = dbAutoIncrField
+        slow_tbl.Fields.Append(fld_slow_id)
+        fld_pad = slow_tbl.CreateField("Pad", dbText, 10)
+        slow_tbl.Fields.Append(fld_pad)
+        db.TableDefs.Append(slow_tbl)
+
+        app.DoCmd.SetWarnings(False)
+        app.DoCmd.RunSQL("INSERT INTO SlowJoinTable (Pad) VALUES ('x')")
+        for _ in range(7):  # 1 → 2 → 4 → … → 128
+            app.DoCmd.RunSQL(
+                "INSERT INTO SlowJoinTable (Pad) SELECT Pad FROM SlowJoinTable"
+            )
+        app.DoCmd.SetWarnings(True)
+
+        del fld_slow_id, fld_pad, slow_tbl
         del fld_id, fld_name, fld_amount, tbl, db
 
     except Exception as e:
@@ -1431,6 +1490,35 @@ def test_access_com_no_lock_between_operations(temp_access_db):
                 "Lock file (.laccdb) should not persist between operations"
     finally:
         _release_test_backend(backend)
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not COM_AVAILABLE, reason="Access COM not available")
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows only")
+@pytest.mark.skipif(
+    not _RUN_ACCESS_INTEGRATION,
+    reason="Access not installed (or DB_MCP_RUN_ACCESS_INTEGRATION=false)",
+)
+def test_access_com_dao_timeout_on_slow_query(temp_access_db):
+    """DAO timeout fires on a real cross-join query that exceeds the limit.
+
+    SlowJoinTable has 128 rows.  A 3-way cartesian join produces ~2 million
+    rows that DAO must iterate one-by-one, which easily exceeds a 2-second
+    timeout.
+    """
+    backend = AccessCOMBackend(temp_access_db, query_timeout_seconds=2)
+
+    try:
+        with pytest.raises(TimeoutError, match="exceeded.*timeout"):
+            backend._dao_execute(
+                "SELECT a.ID FROM SlowJoinTable AS a, "
+                "SlowJoinTable AS b, SlowJoinTable AS c"
+            )
+    finally:
+        worker = backend._active_worker
+        _release_test_backend(backend)
+        if worker is not None:
+            worker.join(timeout=5)
 
 
 def _access_has_db_open(backend, db_path):
