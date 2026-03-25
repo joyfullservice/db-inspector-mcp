@@ -38,6 +38,10 @@ class AccessODBCBackend(DatabaseBackend):
     def sql_dialect(self) -> str:
         """Return 'access' as the SQL dialect."""
         return "access"
+
+    @property
+    def is_connected(self) -> bool:
+        return self._conn is not None
     
     def __init__(
         self,

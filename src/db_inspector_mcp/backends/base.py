@@ -22,6 +22,16 @@ class DatabaseBackend(ABC):
         self.connection_string = connection_string
         self.query_timeout_seconds = query_timeout_seconds
 
+    @property
+    def is_connected(self) -> bool:
+        """Whether this backend currently holds an active connection.
+
+        Used by ``db_list_databases`` to avoid opening fresh connections just
+        to retrieve object counts.  Backends override this to reflect their
+        actual connection state.  The default is ``False``.
+        """
+        return False
+
     def close(self) -> None:
         """Release backend resources (connections, timers, handles).
 

@@ -17,6 +17,10 @@ class MSSQLBackend(DatabaseBackend):
     def sql_dialect(self) -> str:
         """Return 'mssql' as the SQL dialect."""
         return "mssql"
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connection is not None
     
     def __init__(self, connection_string: str, query_timeout_seconds: int = 30):
         """

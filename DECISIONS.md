@@ -79,6 +79,26 @@ contradictory guidance.
 
 ---
 
+## 2026-03-25 — Lazy connection in db_list_databases
+
+**Trigger**: With three Access COM databases configured, calling `db_list_databases` opened all three COM Application instances (~2.3s cold start each) before the user had expressed any intent to query them. The eager `get_object_counts()` call on every registered backend was introduced to front-load connection warmup (see 2026-02-12 entry), but real-world multi-database configurations showed the cost outweighs the benefit — most sessions only interact with one or two of the configured databases.
+
+**Options explored**:
+- **Status quo (eager counts)** — every backend gets `get_object_counts()` called in `db_list_databases`, opening connections. Works well for single-database setups but scales poorly with multiple heavyweight backends.
+- **Per-backend opt-in for eager counts** — let each backend decide whether it is "cheap" to connect. Over-engineered; the distinction is fragile and backend-dependent.
+- **Skip counts for disconnected backends (chosen)** — add `is_connected` property to `DatabaseBackend` base class. `db_list_databases` only calls `get_object_counts()` when `is_connected` is `True`. Disconnected backends return empty `object_counts` and `"status": "not_connected"`. Connections are established on the first actual query, so subsequent `db_list_databases` calls include counts for backends that have been used.
+
+**Decisions**:
+1. `is_connected` property added to `DatabaseBackend` (default `False`). Each concrete backend overrides: Access COM checks `self._app is not None`, Access ODBC checks `self._conn is not None`, MSSQL and Postgres check `self._connection is not None`.
+2. `db_list_databases` response includes a new `status` field (`"connected"` or `"not_connected"`) per database. `object_counts` is only populated for connected backends; not-connected backends return an empty dict. This lets agents distinguish "no counts available yet" from "zero objects."
+3. Server instructions and tool docstring updated to reflect that counts are only available for already-connected backends.
+
+**What this rules out**: The "front-load Application startup" strategy from the 2026-02-12 entry for Access COM `get_object_counts`. Would revisit if agents demonstrate they need object counts before any queries (unlikely — agents proceed to `db_list_tables`/`db_list_views` which establish the connection).
+
+**Relevant files**: `src/db_inspector_mcp/backends/base.py`, `src/db_inspector_mcp/backends/access_com.py`, `src/db_inspector_mcp/backends/access_odbc.py`, `src/db_inspector_mcp/backends/mssql.py`, `src/db_inspector_mcp/backends/postgres.py`, `src/db_inspector_mcp/tools.py`
+
+---
+
 ## 2026-03-24 — DispatchEx fallback for COM instance conflicts
 
 **Trigger**: Production logs showed 4 occurrences where `EnsureDispatch("Access.Application")` returned an existing instance with a different database open. The previous behavior raised a `RuntimeError` telling the user to open the database manually — a poor experience that left the agent unable to proceed.
@@ -915,6 +935,8 @@ Both paths set `UserControl = True` and make newly created instances visible. Th
 - **Always auto-start Access for counts** — rejected: cold start is ~2.3s, too expensive for a discovery call.
 - **Add summary guidance text in responses** — rejected: makes responses non-deterministic, which is problematic for multi-agent pipelines. Tool descriptions are the right place for behavioral guidance.
 - **Always acquire Application for Access COM counts** — `get_object_counts()` goes through `_get_access_app()` and MSysObjects `GROUP BY Type` for a full inventory (tables, linked_tables, queries, forms, reports, macros, modules). Initially a two-tier approach was implemented (standalone DAO when Application not running) but real-world usage logs showed: (a) standalone DAO cold start was ~500ms per database, not the 20ms from warm benchmarks; (b) agents always follow `db_list_databases` with `list_tables`/`list_views` which need the Application anyway; (c) without full counts, agents can't reason about object types they haven't seen (e.g., forms). Front-loading the Application startup in `get_object_counts` is a net win for session performance.
+
+> **⚠ Partially superseded** (2026-03-25): The "always acquire Application" strategy for `get_object_counts` is no longer invoked eagerly. `db_list_databases` now skips `get_object_counts()` for backends that are not already connected. See "Lazy connection in db_list_databases" above.
 - **Filtering via `name_filter`** — add an optional case-insensitive substring filter to `list_tables`/`list_views` so agents can search without dumping everything.
 
 **Decisions**:

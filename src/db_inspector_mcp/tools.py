@@ -200,6 +200,17 @@ _ACCESS_ERROR_HINTS: list[tuple[re.Pattern[str], str | None, str]] = [
             "Call db_sql_help('udfs') for details."
         ),
     ),
+    # -3810 "placed in a state ... prevents it from being opened or locked"
+    (
+        re.compile(r"prevents it from being opened or locked", re.IGNORECASE),
+        None,
+        (
+            "The database is locked in exclusive mode, most likely because "
+            "objects are being modified in Access design view (tables, queries, "
+            "forms, or reports). Close any open design views in Access and "
+            "reopen the database, then retry."
+        ),
+    ),
     # "too few parameters" → usually a misspelled column name
     (
         re.compile(r"too few parameters", re.IGNORECASE),
@@ -252,7 +263,8 @@ mcp = FastMCP(
         "1. **Always call db_list_databases() first** — it discovers available databases, their SQL "
         "dialects, and object counts. It also initializes backend connections when needed.\n"
         "2. Check the 'dialect' field ('access', 'mssql', 'postgres') — each has different SQL syntax.\n"
-        "3. Check 'object_counts' in the response. For large databases (>200 tables/views), "
+        "3. Check 'object_counts' in the response (only populated for already-connected backends). "
+        "For large databases (>200 tables/views), "
         "use the name_filter parameter on db_list_tables()/db_list_views() to search "
         "instead of listing everything.\n"
         "4. Use db_list_tables() and db_list_views() to explore schemas.\n"
@@ -1130,9 +1142,10 @@ async def db_list_databases(ctx: Context) -> dict[str, Any]:
         # Returns: {
         #   "databases": [
         #     {"name": "legacy", "dialect": "access", "is_default": true,
+        #      "status": "connected",
         #      "object_counts": {"tables": 333, "queries": 55, "forms": 1, ...}},
         #     {"name": "new", "dialect": "mssql", "is_default": false,
-        #      "object_counts": {"tables": 45, "views": 12, "stored_procedures": 200, ...}}
+        #      "status": "not_connected", "object_counts": {}}
         #   ],
         #   "default": "legacy"
         # }
@@ -1145,12 +1158,19 @@ async def db_list_databases(ctx: Context) -> dict[str, Any]:
     
     Returns:
         Dictionary with "databases" key containing list of database metadata.
-        Each database entry has "name", "dialect", "is_default", and "object_counts" fields.
+        Each database entry has "name", "dialect", "is_default", "status", and
+        "object_counts" fields.
+        
+        status is "connected" (backend already has a live connection) or
+        "not_connected" (backend is configured but no connection has been opened yet).
+        object_counts is only populated for connected backends; not_connected backends
+        return an empty dict.  Calling any query tool on a database will establish
+        the connection, so subsequent db_list_databases calls will include counts.
+        
         object_counts keys vary by dialect (e.g. Access includes "queries", "forms";
         MSSQL includes "stored_procedures", "triggers"). Values are integer counts,
         or null if the count could not be determined. Keys are omitted entirely
-        for object types the backend cannot measure (e.g. Access forms are only
-        counted when the Application is running).
+        for object types the backend cannot measure.
         Also includes "default" key with the default database name.
     """
     # Lazy-init: if backends were not configured at startup (e.g. user-level
@@ -1165,14 +1185,19 @@ async def db_list_databases(ctx: Context) -> dict[str, Any]:
     databases = []
     for name in backend_names:
         backend = registry.get(name)
-        try:
-            object_counts = backend.get_object_counts()
-        except Exception:
+        connected = backend.is_connected
+        if connected:
+            try:
+                object_counts = backend.get_object_counts()
+            except Exception:
+                object_counts = {}
+        else:
             object_counts = {}
         databases.append({
             "name": name,
             "dialect": backend.sql_dialect,
             "is_default": name == default_name,
+            "status": "connected" if connected else "not_connected",
             "object_counts": object_counts,
         })
     

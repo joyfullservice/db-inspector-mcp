@@ -130,6 +130,10 @@ class AccessCOMBackend(DatabaseBackend):
     def sql_dialect(self) -> str:
         """Return 'access' as the SQL dialect."""
         return "access"
+
+    @property
+    def is_connected(self) -> bool:
+        return self._app is not None
     
     def __init__(
         self,
@@ -1157,16 +1161,11 @@ class AccessCOMBackend(DatabaseBackend):
     def get_object_counts(self) -> dict[str, int | None]:
         """Return full object counts via MSysObjects through the Application.
 
-        Always acquires the Application (via GetObject probe or
-        EnsureDispatch) so agents get a complete inventory including
-        forms, reports, macros, and modules.  The Application reference
-        is cached, so subsequent tool calls (list_tables, list_views,
-        query execution) benefit from the warm connection.
-
-        db_list_databases is a one-time orientation call, and the agent
-        almost always follows up with list_tables/list_views which need
-        the Application anyway, so front-loading the startup cost here
-        is a net win for overall session performance.
+        Acquires the Application (via GetObject probe or EnsureDispatch)
+        to provide a complete inventory including forms, reports, macros,
+        and modules.  The caller (``db_list_databases``) only invokes this
+        method when ``is_connected`` is already True, so it never forces a
+        cold Application startup just for discovery.
         """
         return self._counts_via_msysobjects()
 

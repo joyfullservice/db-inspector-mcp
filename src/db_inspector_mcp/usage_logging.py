@@ -215,9 +215,12 @@ def _write_log_entry(entry: dict[str, Any]) -> None:
     if _log_handler is None:
         return
     
-    # Add timestamp if not present
+    # Add timestamp and version if not present
     if "timestamp" not in entry:
         entry["timestamp"] = datetime.now(timezone.utc).isoformat()
+    if "version" not in entry:
+        from . import __version__
+        entry["version"] = __version__
     
     try:
         # Format as JSON line
@@ -356,7 +359,22 @@ def _extract_error_pattern(error: str) -> str:
     
     if "too few parameters" in error_lower:
         return "too_few_parameters"
-    
+
+    if "prevents it from being opened or locked" in error_lower:
+        return "database_exclusive_lock"
+
+    if "file already in use" in error_lower:
+        return "file_in_use"
+
+    if "cannot find the input table or query" in error_lower:
+        return "table_not_found"
+
+    if "join on memo" in error_lower or "join on ole" in error_lower:
+        return "join_unsupported_type"
+
+    if "join expression not supported" in error_lower:
+        return "join_not_supported"
+
     if "permission" in error_lower or "access denied" in error_lower:
         return "permission_denied"
     

@@ -151,12 +151,14 @@ async def test_db_list_databases_includes_dialect():
     """Test that db_list_databases includes dialect information."""
     with patch("db_inspector_mcp.tools.get_registry") as mock_get_registry, \
          patch("db_inspector_mcp.tools._ensure_backends_initialized"):
-        # Create mock backends with sql_dialect property
         mock_access_backend = MagicMock()
         mock_access_backend.sql_dialect = "access"
+        mock_access_backend.is_connected = True
+        mock_access_backend.get_object_counts.return_value = {"tables": 10}
         
         mock_mssql_backend = MagicMock()
         mock_mssql_backend.sql_dialect = "mssql"
+        mock_mssql_backend.is_connected = False
         
         registry = MagicMock()
         registry.list_backends.return_value = ["legacy", "new"]
@@ -172,15 +174,21 @@ async def test_db_list_databases_includes_dialect():
         assert "databases" in result
         assert len(result["databases"]) == 2
         
-        # Check first database (Access)
+        # Connected backend gets object counts and status
         legacy_db = next(db for db in result["databases"] if db["name"] == "legacy")
         assert legacy_db["dialect"] == "access"
         assert legacy_db["is_default"] is True
+        assert legacy_db["status"] == "connected"
+        assert legacy_db["object_counts"] == {"tables": 10}
+        mock_access_backend.get_object_counts.assert_called_once()
         
-        # Check second database (MSSQL)
+        # Not-connected backend skips object counts
         new_db = next(db for db in result["databases"] if db["name"] == "new")
         assert new_db["dialect"] == "mssql"
         assert new_db["is_default"] is False
+        assert new_db["status"] == "not_connected"
+        assert new_db["object_counts"] == {}
+        mock_mssql_backend.get_object_counts.assert_not_called()
 
 
 def test_db_sql_help_access_joins():
