@@ -4,6 +4,7 @@ import faulthandler
 import os
 import sys
 import tempfile
+import time
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch, call
 
@@ -578,6 +579,10 @@ def _make_com_backend_with_currentdb(mock_current_db):
     """Create an AccessCOMBackend wired to use the given mock CurrentDb.
 
     Returns (backend, mock_app).  Caller must cancel backend._close_timer.
+
+    The helper also patches ``_find_existing_instance`` so that worker
+    threads spawned by ``_run_dao_with_timeout`` can find the mock app
+    without a real Running Object Table.
     """
     connection_string = "Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\test.accdb;"
 
@@ -594,6 +599,9 @@ def _make_com_backend_with_currentdb(mock_current_db):
 
     # Pre-set the app so _get_access_app uses it directly
     backend._app = mock_app
+    # Mock _find_existing_instance so worker threads in _run_dao_with_timeout
+    # can locate the mock app without a real ROT.
+    backend._find_existing_instance = lambda: mock_app
     return backend, mock_app
 
 
@@ -872,6 +880,159 @@ def test_access_com_dao_fallback_measure_query():
 
     if backend._close_timer is not None:
         backend._close_timer.cancel()
+
+
+# =============================================================================
+# DAO timeout tests
+# =============================================================================
+
+
+def test_access_com_dao_timeout_after_open_recordset():
+    """DAO raises TimeoutError when OpenRecordset exceeds the timeout.
+
+    The worker thread blocks in OpenRecordset longer than the timeout,
+    so the main thread's join() expires and raises TimeoutError.
+    """
+    mock_current_db = MagicMock()
+    mock_current_db.Name = "C:\\test.accdb"
+
+    rs = _make_dao_recordset([("ID", 4)], [[1]])
+
+    def slow_open_recordset(*args, **kwargs):
+        time.sleep(0.5)
+        return rs
+
+    mock_current_db.OpenRecordset.side_effect = slow_open_recordset
+
+    backend, _ = _make_com_backend_with_currentdb(mock_current_db)
+    backend.query_timeout_seconds = 0.15
+
+    with pytest.raises(TimeoutError, match="exceeded.*timeout"):
+        backend._dao_execute("SELECT * FROM BigTable")
+
+    # Worker is still blocked — recordset hasn't been closed yet
+    # (the worker thread will eventually close it when it completes)
+
+    if backend._close_timer is not None:
+        backend._close_timer.cancel()
+
+    # Allow the worker thread to finish so it doesn't leak into other tests
+    if backend._active_worker is not None:
+        backend._active_worker.join(timeout=2)
+
+
+def test_access_com_dao_timeout_during_row_iteration():
+    """DAO raises TimeoutError when row iteration exceeds the timeout.
+
+    The worker thread blocks during slow row reads, and the main
+    thread's join() expires.
+    """
+    mock_current_db = MagicMock()
+    mock_current_db.Name = "C:\\test.accdb"
+
+    many_rows = [[i] for i in range(1000)]
+    rs = _make_dao_recordset([("ID", 4)], many_rows)
+
+    original_move_next = rs.MoveNext
+
+    def slow_move_next():
+        time.sleep(0.02)
+        original_move_next()
+
+    rs.MoveNext = slow_move_next
+    mock_current_db.OpenRecordset.return_value = rs
+
+    backend, _ = _make_com_backend_with_currentdb(mock_current_db)
+    backend.query_timeout_seconds = 0.15
+
+    with pytest.raises(TimeoutError, match="exceeded.*timeout"):
+        backend._dao_execute("SELECT * FROM BigTable")
+
+    if backend._close_timer is not None:
+        backend._close_timer.cancel()
+
+    if backend._active_worker is not None:
+        backend._active_worker.join(timeout=2)
+
+
+def test_access_com_dao_no_timeout_on_fast_query():
+    """DAO completes normally when query finishes within the timeout."""
+    mock_current_db = MagicMock()
+    mock_current_db.Name = "C:\\test.accdb"
+
+    rs = _make_dao_recordset([("ID", 4), ("Name", 10)], [[1, "Alice"], [2, "Bob"]])
+    mock_current_db.OpenRecordset.return_value = rs
+
+    backend, _ = _make_com_backend_with_currentdb(mock_current_db)
+    backend.query_timeout_seconds = 10
+
+    col_names, rows = backend._dao_execute("SELECT * FROM TestTable")
+    assert col_names == ["ID", "Name"]
+    assert len(rows) == 2
+    assert rows[0] == [1, "Alice"]
+
+    rs.Close.assert_called_once()
+
+    if backend._close_timer is not None:
+        backend._close_timer.cancel()
+
+
+def test_access_com_dao_get_query_columns_timeout():
+    """_dao_get_query_columns raises TimeoutError on slow OpenRecordset."""
+    mock_current_db = MagicMock()
+    mock_current_db.Name = "C:\\test.accdb"
+
+    rs = _make_dao_recordset([("ID", 4)], [[1]])
+
+    def slow_open_recordset(*args, **kwargs):
+        time.sleep(0.5)
+        return rs
+
+    mock_current_db.OpenRecordset.side_effect = slow_open_recordset
+
+    backend, _ = _make_com_backend_with_currentdb(mock_current_db)
+    backend.query_timeout_seconds = 0.15
+
+    with pytest.raises(TimeoutError, match="exceeded.*timeout"):
+        backend._dao_get_query_columns("SELECT * FROM BigTable")
+
+    if backend._close_timer is not None:
+        backend._close_timer.cancel()
+
+    if backend._active_worker is not None:
+        backend._active_worker.join(timeout=2)
+
+
+def test_access_com_dao_active_worker_guard():
+    """Concurrent DAO calls are refused when a previous worker is still blocked."""
+    mock_current_db = MagicMock()
+    mock_current_db.Name = "C:\\test.accdb"
+
+    def slow_open_recordset(*args, **kwargs):
+        time.sleep(2.0)
+        return _make_dao_recordset([("ID", 4)], [[1]])
+
+    mock_current_db.OpenRecordset.side_effect = slow_open_recordset
+
+    backend, _ = _make_com_backend_with_currentdb(mock_current_db)
+    backend.query_timeout_seconds = 0.1
+
+    # First call times out, leaving _active_worker alive
+    with pytest.raises(TimeoutError):
+        backend._dao_execute("SELECT * FROM BigTable")
+
+    assert backend._active_worker is not None
+    assert backend._active_worker.is_alive()
+
+    # Second call should be refused immediately
+    with pytest.raises(RuntimeError, match="previous DAO query is still running"):
+        backend._dao_execute("SELECT 1")
+
+    if backend._close_timer is not None:
+        backend._close_timer.cancel()
+
+    if backend._active_worker is not None:
+        backend._active_worker.join(timeout=3)
 
 
 # =============================================================================

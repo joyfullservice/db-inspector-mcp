@@ -79,6 +79,41 @@ contradictory guidance.
 
 ---
 
+## 2026-03-24 — DAO query timeout via disposable worker threads
+
+**Trigger**: Production logs showed a DAO query blocking for 636 seconds (10.6 minutes) on a complex 8-way JOIN, with the Python process consuming high CPU even after the MCP tool was disabled in Cursor. The `_dao_execute()` method had no timeout enforcement — `db.OpenRecordset(sql)` blocks the calling thread in native COM/RPC code with no way to interrupt it.
+
+**Options explored**:
+
+- **Post-call deadline checks** — check `time.time() > deadline` after `OpenRecordset` returns and during row iteration. Implemented and reverted: pointless because the hang occurs *inside* the blocking COM call, not after it returns. The check only fires once the query has already completed.
+- **`CoCancelCall(threadId, 0)`** — Windows COM API for cancelling an in-progress RPC call. Requires server-side cooperation (`ICancelMethodCalls`). Jet/ACE almost certainly does not implement this. Rejected as unreliable.
+- **Prefer ODBC over DAO via `.env` option** — reduce DAO surface area to gain ODBC's `connection.timeout` capability. Investigated and found that `pyodbc`'s `connection.timeout` only applies to *connection* establishment for local Jet/ACE, not query execution. Would also lose VBA UDF support. Rejected.
+- **Kill the Access process on timeout** — start a `threading.Timer` that terminates `MSACCESS.EXE` by PID. Guaranteed to unblock but destructive: user loses unsaved work and must restart Access. Rejected in favor of a non-destructive approach.
+- **Disposable worker thread with `thread.join(timeout)` (chosen)** — run the blocking DAO call in a daemon worker thread that creates its own COM apartment. Main thread waits with a timeout. If timeout expires, main thread returns `TimeoutError` immediately; the worker thread stays blocked but completes naturally. Access is never killed.
+
+**Decision**: Worker thread approach. `_run_dao_with_timeout(dao_fn)` spawns a daemon thread that calls `pythoncom.CoInitialize()`, finds the running Access instance via ROT (`_find_existing_instance()`, ~10ms), gets `CurrentDb()`, and executes the DAO closure. The main thread calls `thread.join(timeout=query_timeout_seconds)`. No COM proxy sharing or marshaling needed — each thread creates independent proxies to the same Access process. An `_active_worker` guard refuses concurrent DAO calls while a previous worker is still blocked, with a clear error message for the agent.
+
+**What this rules out**: True cancellation of in-flight DAO queries. The Jet engine will continue running the query until it completes (or Access is closed). Leaked worker threads are daemon threads and die with the process. If true cancellation becomes essential, the only viable path would be killing the Access process — revisit if users report Access becoming unresponsive during abandoned queries.
+
+**Relevant files**:
+- `src/db_inspector_mcp/backends/access_com.py` — `_run_dao_with_timeout()`, refactored `_dao_execute()` and `_dao_get_query_columns()`
+- `tests/test_backends.py` — updated timeout tests, new `test_access_com_dao_active_worker_guard`
+
+---
+
+## 2026-03-24 — Graceful shutdown via atexit and signal handlers
+
+**Trigger**: Users reported the Python MCP process continuing to run at high CPU after disabling the tool in Cursor. `main()` called `mcp.run(transport="stdio")` with no cleanup hooks — ODBC connections, COM references, and TTL timers were never released.
+
+**Decision**: Added `atexit.register(_cleanup)` and `signal.signal(SIGTERM/SIGINT, _signal_handler)` in `main()`. The `_cleanup()` function calls `get_registry().clear()`, which calls `backend.close()` on all backends — releasing ODBC connections, COM Application references, and cancelling TTL timers. The signal handler calls `_cleanup()` then `sys.exit(0)` so the process exits instead of hanging when the stdio pipe breaks.
+
+**What this rules out**: Nothing. If `mcp.run()` gains its own shutdown hooks in the future, the `atexit` handler is idempotent (`registry.clear()` is safe to call twice).
+
+**Relevant files**:
+- `src/db_inspector_mcp/main.py` — `_cleanup()`, `atexit.register`, signal handlers
+
+---
+
 ## 2026-03-05 — Append minimal starter block when .env already exists
 
 **Trigger**: When a user runs `db-inspector-mcp init` in a project that already has a `.env` file (e.g., for Django, Node, etc.), the command said "already exists" and provided no guidance on what `DB_MCP_*` variables to add. The `--force` flag would overwrite their entire file.
@@ -405,6 +440,8 @@ Key design details:
 
 - **CurrentDb requirement**: VBA modules are compiled into the Application's CurrentDb project.  `DBEngine.OpenDatabase()` cannot resolve them.  A dedicated `_dao_currentdb()` context manager guarantees `CurrentDb()` by calling `_ensure_current_db(app)` before yielding the DAO Database.
 - **CurrentDb lifecycle**: The yielded DAO Database is owned by the Application — callers must NOT call `.Close()` on it.  Only Recordsets opened from it are explicitly closed (in `_dao_execute`'s `try/finally`).  The COM proxy goes out of scope when the context manager exits.
+
+> **⚠ Partially superseded** (2026-03-24): `_dao_execute()` and `_dao_get_query_columns()` no longer use the `_dao_currentdb()` context manager directly. They delegate to `_run_dao_with_timeout()`, which runs the DAO work in a disposable worker thread with its own COM apartment to enforce query timeouts. The `_dao_currentdb()` context manager is still used by other methods (e.g., `list_tables`, `list_views`). See "DAO query timeout via disposable worker threads" above.
 - **Error detection heuristic**: `_UDF_ERROR_PATTERNS` matches "undefined function" (explicit) and "too few parameters" (ODBC treats unrecognised function calls as parameter placeholders).  Non-matching errors propagate without retry.
 - **DAO field types**: `_DAO_FIELD_TYPES` maps DAO `Field.Type` integer codes to human-readable names for `get_query_columns` output.
 

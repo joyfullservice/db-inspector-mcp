@@ -168,6 +168,9 @@ class AccessCOMBackend(DatabaseBackend):
             if connection_ttl_seconds is not None
             else _DEFAULT_APP_TTL_SECONDS
         )
+
+        # Worker thread for DAO query timeout enforcement
+        self._active_worker: threading.Thread | None = None
     
     def _extract_db_path(self, connection_string: str) -> str:
         """Extract database path from connection string."""
@@ -694,6 +697,105 @@ class AccessCOMBackend(DatabaseBackend):
         finally:
             self._schedule_app_close()
 
+    # ------------------------------------------------------------------
+    # DAO timeout enforcement via worker thread
+    # ------------------------------------------------------------------
+
+    def _run_dao_with_timeout(self, dao_fn) -> Any:
+        """Run *dao_fn(db)* in a disposable worker thread with timeout.
+
+        The worker creates its own COM apartment and obtains a fresh proxy
+        to the running Access instance via the Running Object Table.  The
+        main thread waits with ``thread.join(timeout)`` and raises
+        ``TimeoutError`` immediately if the timeout expires.  Access is
+        never killed — the worker thread completes naturally (or is cleaned
+        up on process exit as a daemon thread).
+
+        Args:
+            dao_fn: callable(db) -> result.  *db* is a DAO Database
+                (CurrentDb).  The callable must NOT close the Database.
+                Recordsets opened inside should be closed in a ``finally``.
+
+        Returns:
+            Whatever *dao_fn* returned.
+
+        Raises:
+            TimeoutError: if the worker does not finish within
+                ``self.query_timeout_seconds``.
+            RuntimeError: if a previous worker is still blocked, or if the
+                Access instance cannot be found from the worker thread.
+        """
+        if self._active_worker is not None and self._active_worker.is_alive():
+            raise RuntimeError(
+                "A previous DAO query is still running in Access. "
+                "Wait for it to complete or restart Access to cancel it."
+            )
+
+        with self._com_lock:
+            self._cancel_close_timer()
+
+        app = self._get_access_app()
+        try:
+            self._ensure_current_db(app)
+        except Exception as first_err:
+            if self._is_com_disconnected(first_err):
+                logger.info(
+                    "COM disconnected during _run_dao_with_timeout setup — retrying"
+                )
+                self._app = None
+                self._we_created_app = False
+                app = self._get_access_app()
+                self._ensure_current_db(app)
+            else:
+                raise
+
+        result_box: dict[str, Any] = {}
+
+        def worker():
+            try:
+                pythoncom.CoInitialize()
+                try:
+                    worker_app = self._find_existing_instance()
+                    if worker_app is None:
+                        raise RuntimeError(
+                            "Cannot find Access instance from worker thread. "
+                            "The Access application may have been closed."
+                        )
+                    db = worker_app.CurrentDb()
+                    if db is None:
+                        raise RuntimeError(
+                            "CurrentDb is not available in the worker thread. "
+                            "Ensure the database is open in Access."
+                        )
+                    result_box["result"] = dao_fn(db)
+                finally:
+                    pythoncom.CoUninitialize()
+            except Exception as exc:
+                result_box["error"] = exc
+
+        thread = threading.Thread(target=worker, daemon=True)
+        self._active_worker = thread
+        thread.start()
+        thread.join(timeout=self.query_timeout_seconds)
+
+        self._schedule_app_close()
+
+        if thread.is_alive():
+            raise TimeoutError(
+                f"DAO query exceeded {self.query_timeout_seconds}s timeout. "
+                f"The query is still running in Access — no data was lost. "
+                f"Consider simplifying JOINs, adding filters, or using TOP "
+                f"to limit results. "
+                f"If Access appears unresponsive, close and reopen the database."
+            )
+
+        self._active_worker = None
+
+        if "error" in result_box:
+            raise result_box["error"]
+
+        return result_box["result"]
+
     def _dao_execute(
         self, sql: str, max_rows: int | None = None,
     ) -> tuple[list[str], list[list[Any]]]:
@@ -701,9 +803,12 @@ class AccessCOMBackend(DatabaseBackend):
 
         Each value is passed through ``_sanitize_value`` so the result is
         JSON-safe.  The Recordset is always closed in a ``finally`` block.
+
+        Runs in a worker thread with timeout enforcement — see
+        ``_run_dao_with_timeout`` for details.
         """
-        dbOpenSnapshot = 4
-        with self._dao_currentdb() as db:
+        def dao_fn(db):
+            dbOpenSnapshot = 4
             rs = db.OpenRecordset(sql, dbOpenSnapshot)
             try:
                 field_count = rs.Fields.Count
@@ -720,6 +825,8 @@ class AccessCOMBackend(DatabaseBackend):
                 return col_names, rows
             finally:
                 rs.Close()
+
+        return self._run_dao_with_timeout(dao_fn)
 
     def call_vba_function(self, function_name: str, *args) -> Any:
         """
@@ -848,11 +955,15 @@ class AccessCOMBackend(DatabaseBackend):
         return rows[0][0] if rows else 0
 
     def _dao_get_query_columns(self, query: str) -> list[dict[str, Any]]:
-        # Use TOP 1 instead of TOP 0 — Jet/DAO doesn't support TOP 0.
-        # We only read field metadata, not row data, so 1 row is fine.
+        """Get column metadata via DAO.  Uses TOP 1 (Jet doesn't support TOP 0).
+
+        Runs in a worker thread with timeout enforcement — see
+        ``_run_dao_with_timeout`` for details.
+        """
         wrapped = inject_top_clause(query, 1)
-        dbOpenSnapshot = 4
-        with self._dao_currentdb() as db:
+
+        def dao_fn(db):
+            dbOpenSnapshot = 4
             rs = db.OpenRecordset(wrapped, dbOpenSnapshot)
             try:
                 columns: list[dict[str, Any]] = []
@@ -868,6 +979,8 @@ class AccessCOMBackend(DatabaseBackend):
                 return columns
             finally:
                 rs.Close()
+
+        return self._run_dao_with_timeout(dao_fn)
 
     def _dao_sum_query_column(self, query: str, column: str) -> float | None:
         cte, core = split_cte_prefix(query)

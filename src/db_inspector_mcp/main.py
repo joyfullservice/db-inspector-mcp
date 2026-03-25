@@ -1,5 +1,7 @@
 """Main entry point for db-inspector-mcp MCP server."""
 
+import atexit
+import signal
 import sys
 
 from .backends.registry import get_registry
@@ -63,6 +65,19 @@ def _verify_readonly(config: dict, registry) -> None:
             print(f"Warning: Could not verify read-only status for '{backend_name}': {e}", file=sys.stderr)
 
 
+def _cleanup() -> None:
+    """Release all backend resources (ODBC connections, COM references, timers).
+
+    Registered via ``atexit`` and called from signal handlers so that
+    the process can exit cleanly when Cursor closes the stdio pipe or
+    sends SIGTERM/SIGINT.
+    """
+    try:
+        get_registry().clear()
+    except Exception:
+        pass
+
+
 def main() -> None:
     """Main entry point for the MCP server."""
     if _handle_subcommand():
@@ -70,6 +85,19 @@ def main() -> None:
 
     from . import __version__
     print(f"db-inspector-mcp v{__version__}", file=sys.stderr)
+
+    # Ensure backends are cleaned up on exit — covers normal exit,
+    # unhandled exceptions, and broken-pipe scenarios.
+    atexit.register(_cleanup)
+
+    # Handle SIGTERM/SIGINT so the process exits instead of hanging
+    # when Cursor kills the stdio pipe.
+    def _signal_handler(signum, frame):
+        _cleanup()
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _signal_handler)
+    signal.signal(signal.SIGINT, _signal_handler)
 
     # Load configuration (automatically loads .env files from project root)
     # Environment variables from MCP server env section take precedence
