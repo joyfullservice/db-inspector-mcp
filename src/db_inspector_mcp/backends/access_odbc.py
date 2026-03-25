@@ -225,9 +225,9 @@ class AccessODBCBackend(DatabaseBackend):
                 cursor.close()
     
     def get_query_columns(self, query: str) -> list[dict[str, Any]]:
-        """Get column metadata using TOP 0 to get metadata without fetching data."""
+        """Get column metadata using TOP 1 (Access does not support TOP 0)."""
         cte, core = split_cte_prefix(query)
-        wrapped_query = f"{cte}SELECT TOP 0 * FROM ({core}) AS subquery"
+        wrapped_query = f"{cte}SELECT TOP 1 * FROM ({core}) AS subquery"
         with self._connection() as conn:
             cursor = conn.cursor()
             try:
