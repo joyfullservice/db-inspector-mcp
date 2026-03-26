@@ -39,6 +39,26 @@ venv\Scripts\python.exe -m pytest          # Windows
 ./venv/bin/python -m pytest                # macOS/Linux
 ```
 
+## Usage Logs
+
+When `DB_MCP_ENABLE_LOGGING=true` is set in a client project's `.env`, all MCP tool calls are logged to a JSON Lines file.
+
+**Log file location (default — uvx / pip install):**
+```
+~/.db-inspector-mcp/logs/usage.jsonl
+```
+
+**Log file location (development / editable install):**
+```
+logs/usage.jsonl          ← relative to this project root
+```
+
+**Override:** Set `DB_MCP_LOG_DIR` to use a custom directory.
+
+Each line in `usage.jsonl` is a JSON object with fields like `timestamp`, `event`, `tool`, `database`, `dialect`, `parameters`, `success`, `error`, `error_pattern`, and `execution_time_ms`.
+
+See [CONTRIBUTING.md § Usage Logging](CONTRIBUTING.md#usage-logging-for-improvement-analysis) for log format details, error pattern categories, and rotation settings.
+
 ## Project Conventions
 
 - See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, testing, and code style

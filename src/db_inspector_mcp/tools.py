@@ -302,7 +302,14 @@ mcp = FastMCP(
         "- db_count_query_results(query) wraps your query in SELECT COUNT(*) FROM (query)\n"
         "- db_sum_query_column(query, column) wraps your query to sum the specified column\n"
         "- db_get_query_columns(query) executes your query with 0 rows to get metadata\n"
-        "Pass your base SELECT query; the tool handles aggregation."
+        "Pass your base SELECT query; the tool handles aggregation.\n\n"
+        "**Usage logs:**\n"
+        "When DB_MCP_ENABLE_LOGGING=true is set in the project .env, all tool calls are "
+        "logged to a JSON Lines file. The default location is "
+        "`~/.db-inspector-mcp/logs/usage.jsonl` (i.e. in the user's home directory). "
+        "Override with DB_MCP_LOG_DIR. Each line is a JSON object with fields: "
+        "timestamp, event, tool, database, dialect, parameters, success, error, error_pattern, "
+        "execution_time_ms."
     )
 )
 
