@@ -79,19 +79,38 @@ contradictory guidance.
 
 ---
 
-## 2026-03-25 — Fix ODBC query execution timeout (was only setting login timeout)
+## 2026-03-25 — Query execution timeout for all backends
 
-**Trigger**: Agent queries running for several minutes without timing out despite `DB_MCP_QUERY_TIMEOUT_SECONDS=30`. Logs showed no timeout errors — queries simply ran indefinitely.
+**Trigger**: Agent queries running for several minutes without timing out despite `DB_MCP_QUERY_TIMEOUT_SECONDS=30`. Logs showed no timeout errors — queries simply ran indefinitely. The original `pyodbc.connect(timeout=N)` only set the login/connection timeout (`SQL_ATTR_LOGIN_TIMEOUT`), not the query execution timeout.
+
+**Access ODBC driver limitations discovered** (these drove the final design for Access):
+1. `connection.timeout = N` (`SQL_ATTR_QUERY_TIMEOUT`) — raises `HYC00 "Optional feature not implemented"`. Cannot be used.
+2. `pyodbc.Connection` has no `cancel()` attribute. Cannot interrupt from another thread via the connection object.
+3. `cursor.cancel()` (`SQLCancel`) — blocks indefinitely when called while `cursor.execute()` is active on a worker thread. Cannot interrupt a running query.
+4. `conn.close()` (`SQLDisconnect`) — blocks indefinitely while a worker thread has an active query. Cannot clean up after timeout.
+5. After abandoning a timed-out in-process connection, the orphaned worker thread holds Jet/ACE engine locks, causing subsequent `pyodbc.connect()` calls from the same process to hang.
+
+In-process threading approaches were tried iteratively (worker thread + `thread.join(timeout)`, `conn.cancel()`, `cursor.cancel()` in a daemon thread, connection timeout wrappers). Each solved one layer but exposed the next limitation. The fundamental issue: any in-process approach leaves an orphaned thread holding file locks that block both new connections and Access from closing.
 
 **Options explored**:
-- **`pyodbc.connect(timeout=N)`** (status quo) — this only sets the *login/connection* timeout (how long to wait for the initial connection to the server). Once connected, queries have no time limit. This is a pyodbc API distinction: `connect(timeout=)` maps to `SQL_ATTR_LOGIN_TIMEOUT`, not `SQL_ATTR_QUERY_TIMEOUT`.
-- **`connection.timeout = N`** (chosen) — sets `SQL_ATTR_QUERY_TIMEOUT` on the connection object after creation. All cursors created from the connection inherit this timeout, which causes the ODBC driver to cancel queries that exceed the limit. This is the correct pyodbc mechanism for query execution timeouts.
+- **`connection.timeout = N`** — works for MSSQL. Does not work for Access (driver limitation 1).
+- **Threading with `thread.join(timeout)`** — times out correctly, but cleanup fails. `conn.close()` blocks (limitation 4), `cursor.cancel()` blocks (limitation 3), and abandoning the connection leaves orphaned locks (limitation 5). The first timeout works, but subsequent queries hang.
+- **Process pool / long-running worker** — keeps a warm subprocess ready, reducing per-query startup overhead. Adds complexity for process lifecycle management. Premature optimization for current usage patterns.
+- **Subprocess per query** (chosen for Access) — each query spawns a short-lived child process. On timeout, `process.kill()` (Windows `TerminateProcess`) immediately terminates the child, releasing all OS resources including Jet/ACE file locks. No shared state, no orphaned threads, no blocked connections.
 
-**Decision**: Set `connection.timeout = self.query_timeout_seconds` immediately after `pyodbc.connect()` in both `AccessODBCBackend._open_connection()` and `MSSQLBackend._get_connection()`. The `connect(timeout=)` parameter is kept for login timeout (both are useful). PostgreSQL was already correct (uses `SET statement_timeout`). Access COM DAO queries were already correct (uses `thread.join(timeout=)`).
+**Decision**: Each backend now has query timeout coverage:
+- **MSSQL**: `connection.timeout = N` (ODBC driver-level, set after `pyodbc.connect()`).
+- **PostgreSQL**: `SET statement_timeout` (already correct, server-level).
+- **Access COM DAO**: `thread.join(timeout)` via `_run_dao_with_timeout` (already correct — DAO queries run in a dedicated COM apartment thread).
+- **Access ODBC**: Subprocess isolation via `_run_in_subprocess`. The 5 user-facing query methods (`count_query_results`, `get_query_columns`, `sum_query_column`, `measure_query`, `preview`) each spawn a child process (`python -m db_inspector_mcp.backends._odbc_worker`). The worker reads a JSON request from stdin, opens its own ODBC connection, executes the query, and writes a JSON response to stdout. The parent uses `subprocess.run(timeout=N)` — on expiry, the child is killed and `TimeoutError` is raised. The COM backend gets ODBC timeout for free because it delegates to `self._odbc_backend`.
 
-**What this rules out**: Nothing new — this is a bug fix. Would revisit if specific ODBC drivers don't honor `SQL_ATTR_QUERY_TIMEOUT` (the Jet/ACE driver may silently ignore it for some operations, but the DAO timeout in `access_com.py` covers that path).
+Schema introspection methods (`list_tables`, `list_views`, `get_object_counts`, `verify_readonly`) continue to use the TTL-cached in-process connection via `_connection()` because they run fast internal queries that don't need subprocess isolation. Setting `query_timeout_seconds=0` disables the timeout.
 
-**Relevant files**: `src/db_inspector_mcp/backends/access_odbc.py`, `src/db_inspector_mcp/backends/mssql.py`, `tests/test_backends.py`
+Trade-off: ~500ms overhead per Access ODBC query (Python startup + `pyodbc.connect`) compared to ~0.2ms for the previous cached connection. Acceptable for the MCP use case where correctness and recoverability matter more than sub-second latency.
+
+**What this rules out**: Using `SQL_ATTR_QUERY_TIMEOUT` or any form of in-process query cancellation for Access databases. If per-query latency becomes a problem, a persistent worker subprocess (stdin/stdout pipe) could be introduced, but this adds lifecycle management complexity. The current approach is simple and correct.
+
+**Relevant files**: `src/db_inspector_mcp/backends/_odbc_worker.py` (subprocess worker), `src/db_inspector_mcp/backends/access_odbc.py` (`_run_in_subprocess`), `src/db_inspector_mcp/backends/mssql.py` (`connection.timeout`), `tests/test_backends.py`
 
 ---
 

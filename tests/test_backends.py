@@ -1,7 +1,9 @@
 """Tests for database backends."""
 
 import faulthandler
+import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -164,16 +166,16 @@ def test_access_odbc_ttl_zero_connect_per_request():
     with patch('db_inspector_mcp.backends.access_odbc.pyodbc') as mock_pyodbc:
         mock_pyodbc.connect.return_value = mock_conn
 
-        result = backend.count_query_results("SELECT * FROM test")
+        with backend._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
 
-        # Connection opened
         mock_pyodbc.connect.assert_called_once_with(
             backend.connection_string, timeout=30
         )
-        # With TTL=0 the connection is closed immediately
+        # With TTL=0 the connection is closed immediately after use
         mock_conn.close.assert_called_once()
-        assert result == 42
-        # No cached connection left
         assert backend._conn is None
 
 
@@ -182,25 +184,20 @@ def test_access_odbc_connection_reused_within_ttl():
     backend = AccessODBCBackend("test_connection_string", 30, connection_ttl_seconds=60)
 
     mock_conn = MagicMock()
-    mock_cursor = MagicMock()
-    mock_conn.cursor.return_value = mock_cursor
-    mock_cursor.fetchone.return_value = (42,)
 
     with patch('db_inspector_mcp.backends.access_odbc.pyodbc') as mock_pyodbc:
         mock_pyodbc.connect.return_value = mock_conn
 
-        # First call — creates a fresh connection
-        backend.count_query_results("SELECT * FROM test")
+        with backend._connection() as conn:
+            assert conn is mock_conn
         assert mock_pyodbc.connect.call_count == 1
 
-        # Second call — should reuse the cached connection
-        backend.count_query_results("SELECT * FROM test")
+        with backend._connection() as conn:
+            assert conn is mock_conn
         assert mock_pyodbc.connect.call_count == 1  # still 1
 
-        # Connection should NOT be closed yet (TTL is 60 s)
         mock_conn.close.assert_not_called()
 
-    # Cleanup: cancel the pending timer so it doesn't fire during other tests
     if backend._close_timer is not None:
         backend._close_timer.cancel()
 
@@ -212,21 +209,16 @@ def test_access_odbc_connection_closed_after_ttl_expires():
     backend = AccessODBCBackend("test_connection_string", 30, connection_ttl_seconds=0.15)
 
     mock_conn = MagicMock()
-    mock_cursor = MagicMock()
-    mock_conn.cursor.return_value = mock_cursor
-    mock_cursor.fetchone.return_value = (42,)
 
     with patch('db_inspector_mcp.backends.access_odbc.pyodbc') as mock_pyodbc:
         mock_pyodbc.connect.return_value = mock_conn
 
-        backend.count_query_results("SELECT * FROM test")
-        # Connection is still open right after the call
+        with backend._connection() as conn:
+            assert conn is mock_conn
         mock_conn.close.assert_not_called()
 
-        # Wait for the TTL timer to fire
         _time.sleep(0.4)
 
-        # Timer should have closed the connection
         mock_conn.close.assert_called_once()
         assert backend._conn is None
 
@@ -235,36 +227,24 @@ def test_access_odbc_stale_connection_discarded_on_pyodbc_error():
     """If a pyodbc.Error is raised, the cached connection is discarded."""
     backend = AccessODBCBackend("test_connection_string", 30, connection_ttl_seconds=60)
 
-    good_conn = MagicMock()
-    good_cursor = MagicMock()
-    good_conn.cursor.return_value = good_cursor
-    good_cursor.fetchone.return_value = (42,)
-
-    bad_conn = MagicMock()
-    bad_cursor = MagicMock()
-    bad_conn.cursor.return_value = bad_cursor
-    bad_cursor.execute.side_effect = pyodbc.Error("HY000", "stale connection")
+    mock_conn = MagicMock()
 
     with patch('db_inspector_mcp.backends.access_odbc.pyodbc') as mock_pyodbc:
         mock_pyodbc.Error = pyodbc.Error
-        mock_pyodbc.connect.return_value = good_conn
+        mock_pyodbc.connect.return_value = mock_conn
 
-        # First call succeeds — connection is cached
-        result = backend.count_query_results("SELECT * FROM test")
-        assert result == 42
+        with backend._connection() as conn:
+            assert conn is mock_conn
         assert mock_pyodbc.connect.call_count == 1
 
-        # Simulate a stale connection: next cursor raises pyodbc.Error
-        good_conn.cursor.return_value = bad_cursor
-
+        # Simulate stale connection: raise pyodbc.Error inside the context
         with pytest.raises(pyodbc.Error):
-            backend.count_query_results("SELECT * FROM test")
+            with backend._connection() as conn:
+                raise pyodbc.Error("HY000", "stale connection")
 
-        # The stale connection should have been discarded
         assert backend._conn is None
-        good_conn.close.assert_called_once()
+        mock_conn.close.assert_called_once()
 
-    # Cleanup
     if backend._close_timer is not None:
         backend._close_timer.cancel()
 
@@ -274,47 +254,196 @@ def test_access_odbc_connection_closed_on_non_pyodbc_error():
     backend = AccessODBCBackend("test_connection_string", 30, connection_ttl_seconds=60)
 
     mock_conn = MagicMock()
-    mock_cursor = MagicMock()
-    mock_conn.cursor.return_value = mock_cursor
-    mock_cursor.execute.side_effect = ValueError("bad query")
 
     with patch('db_inspector_mcp.backends.access_odbc.pyodbc') as mock_pyodbc:
         mock_pyodbc.Error = pyodbc.Error
         mock_pyodbc.connect.return_value = mock_conn
 
+        # Non-pyodbc errors do not discard the connection — only pyodbc.Error does
         with pytest.raises(ValueError, match="bad query"):
-            backend.count_query_results("SELECT * FROM bad_table")
+            with backend._connection() as conn:
+                raise ValueError("bad query")
 
-        # Connection should still be cached (not discarded for non-pyodbc errors)
         assert backend._conn is mock_conn
         mock_conn.close.assert_not_called()
 
-    # Cleanup
     if backend._close_timer is not None:
         backend._close_timer.cancel()
 
 
-def test_access_odbc_sets_query_execution_timeout():
-    """Verify connection.timeout (query execution) is set, not just login timeout."""
+def test_access_odbc_does_not_set_query_execution_timeout():
+    """Access ODBC driver rejects SQL_ATTR_QUERY_TIMEOUT — we must not set it."""
     backend = AccessODBCBackend("test_connection_string", 45)
 
-    mock_conn = MagicMock()
-    mock_cursor = MagicMock()
-    mock_conn.cursor.return_value = mock_cursor
-    mock_cursor.fetchone.return_value = (1,)
+    mock_conn = MagicMock(spec=["cursor", "close", "timeout"])
+    del mock_conn.timeout
 
     with patch('db_inspector_mcp.backends.access_odbc.pyodbc') as mock_pyodbc:
         mock_pyodbc.connect.return_value = mock_conn
 
-        backend.count_query_results("SELECT 1")
+        with backend._connection() as conn:
+            pass
 
         mock_pyodbc.connect.assert_called_once_with(
             backend.connection_string, timeout=45
         )
-        assert mock_conn.timeout == 45
+        assert not hasattr(mock_conn, "timeout"), \
+            "connection.timeout must not be set — Access driver raises HYC00"
 
     if backend._close_timer is not None:
         backend._close_timer.cancel()
+
+
+def test_access_odbc_timeout_kills_subprocess():
+    """Subprocess is killed when query exceeds timeout.
+
+    subprocess.run raises TimeoutExpired, which _run_in_subprocess
+    catches and re-raises as TimeoutError.
+    """
+    backend = AccessODBCBackend("test_connection_string", query_timeout_seconds=2)
+
+    with patch('db_inspector_mcp.backends.access_odbc.subprocess') as mock_sp:
+        mock_sp.run.side_effect = subprocess.TimeoutExpired(
+            cmd=["python", "-m", "db_inspector_mcp.backends._odbc_worker"],
+            timeout=2,
+        )
+        mock_sp.TimeoutExpired = subprocess.TimeoutExpired
+
+        with pytest.raises(TimeoutError, match="exceeded.*timeout"):
+            backend.count_query_results("SELECT * FROM BigTable")
+
+
+def test_access_odbc_second_query_after_timeout():
+    """After a timeout, the next query works — no shared process state.
+
+    This is the key benefit of subprocess isolation: a timed-out query
+    cannot leave orphaned threads or Jet engine locks that block subsequent
+    queries.
+    """
+    backend = AccessODBCBackend("test_connection_string", query_timeout_seconds=2)
+
+    call_count = 0
+
+    def side_effect(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise subprocess.TimeoutExpired(cmd=["python"], timeout=2)
+        mock_proc = MagicMock()
+        mock_proc.stdout = json.dumps({"ok": 99}).encode()
+        mock_proc.stderr = b""
+        mock_proc.returncode = 0
+        return mock_proc
+
+    with patch('db_inspector_mcp.backends.access_odbc.subprocess') as mock_sp:
+        mock_sp.run.side_effect = side_effect
+        mock_sp.TimeoutExpired = subprocess.TimeoutExpired
+
+        with pytest.raises(TimeoutError):
+            backend.count_query_results("SELECT * FROM BigTable")
+
+        result = backend.count_query_results("SELECT COUNT(*) FROM test")
+        assert result == 99
+
+
+def test_access_odbc_subprocess_returns_result():
+    """Successful subprocess returns parsed JSON result."""
+    backend = AccessODBCBackend("test_connection_string", query_timeout_seconds=30)
+
+    mock_proc = MagicMock()
+    mock_proc.stdout = json.dumps({"ok": 42}).encode()
+    mock_proc.stderr = b""
+    mock_proc.returncode = 0
+
+    with patch('db_inspector_mcp.backends.access_odbc.subprocess') as mock_sp:
+        mock_sp.run.return_value = mock_proc
+        mock_sp.TimeoutExpired = subprocess.TimeoutExpired
+
+        result = backend.count_query_results("SELECT COUNT(*) FROM test")
+        assert result == 42
+
+
+def test_access_odbc_subprocess_error_response():
+    """Worker returning error JSON raises RuntimeError."""
+    backend = AccessODBCBackend("test_connection_string", query_timeout_seconds=30)
+
+    mock_proc = MagicMock()
+    mock_proc.stdout = json.dumps({
+        "error": "syntax error near SELECT",
+        "type": "pyodbc.ProgrammingError",
+    }).encode()
+    mock_proc.stderr = b""
+    mock_proc.returncode = 1
+
+    with patch('db_inspector_mcp.backends.access_odbc.subprocess') as mock_sp:
+        mock_sp.run.return_value = mock_proc
+        mock_sp.TimeoutExpired = subprocess.TimeoutExpired
+
+        with pytest.raises(RuntimeError, match="syntax error"):
+            backend.count_query_results("SELECT * FROM bad")
+
+
+def test_access_odbc_subprocess_crash():
+    """Worker process crash with no stdout raises RuntimeError."""
+    backend = AccessODBCBackend("test_connection_string", query_timeout_seconds=30)
+
+    mock_proc = MagicMock()
+    mock_proc.stdout = b""
+    mock_proc.stderr = b"Traceback: ImportError: No module named pyodbc"
+    mock_proc.returncode = 1
+
+    with patch('db_inspector_mcp.backends.access_odbc.subprocess') as mock_sp:
+        mock_sp.run.return_value = mock_proc
+        mock_sp.TimeoutExpired = subprocess.TimeoutExpired
+
+        with pytest.raises(RuntimeError, match="worker process failed"):
+            backend.count_query_results("SELECT 1")
+
+
+def test_access_odbc_timeout_disabled_when_zero():
+    """With query_timeout_seconds=0, subprocess runs without timeout."""
+    backend = AccessODBCBackend("test_connection_string", query_timeout_seconds=0)
+
+    mock_proc = MagicMock()
+    mock_proc.stdout = json.dumps({"ok": 42}).encode()
+    mock_proc.stderr = b""
+    mock_proc.returncode = 0
+
+    with patch('db_inspector_mcp.backends.access_odbc.subprocess') as mock_sp:
+        mock_sp.run.return_value = mock_proc
+        mock_sp.TimeoutExpired = subprocess.TimeoutExpired
+
+        result = backend.count_query_results("SELECT COUNT(*) FROM test")
+        assert result == 42
+
+        _, kwargs = mock_sp.run.call_args
+        assert kwargs.get("timeout") is None
+
+
+def test_access_odbc_subprocess_sends_correct_request():
+    """Verify the JSON request sent to the worker contains all fields."""
+    backend = AccessODBCBackend(
+        "Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\test.accdb;",
+        query_timeout_seconds=30,
+    )
+
+    mock_proc = MagicMock()
+    mock_proc.stdout = json.dumps({"ok": 7}).encode()
+    mock_proc.stderr = b""
+    mock_proc.returncode = 0
+
+    with patch('db_inspector_mcp.backends.access_odbc.subprocess') as mock_sp:
+        mock_sp.run.return_value = mock_proc
+        mock_sp.TimeoutExpired = subprocess.TimeoutExpired
+
+        backend.count_query_results("SELECT id FROM users")
+
+        args, kwargs = mock_sp.run.call_args
+        request = json.loads(kwargs["input"])
+        assert request["connection_string"] == backend.connection_string
+        assert request["operation"] == "count"
+        assert "SELECT COUNT(*)" in request["sql"]
+        assert kwargs["timeout"] == 30
 
 
 def test_mssql_sets_query_execution_timeout():
@@ -356,13 +485,14 @@ def test_access_com_no_ownership_tracking():
         assert not hasattr(backend, '_db')
 
 
-def test_access_com_close_releases_references_without_quit():
-    """Test that close() releases references and never calls Access.Quit()."""
+def test_access_com_close_does_not_quit_user_owned_instance():
+    """close() drops the reference but does NOT quit a user-owned instance."""
     connection_string = "Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\test.accdb;"
     with patch('db_inspector_mcp.backends.access_com.win32com.client'):
         backend = AccessCOMBackend(connection_string, 30)
         backend._odbc_backend.close = MagicMock()
         backend._app = MagicMock()
+        backend._we_created_app = False
         backend._close_timer = MagicMock()
 
         app_ref = backend._app
@@ -373,6 +503,24 @@ def test_access_com_close_releases_references_without_quit():
         timer_ref.cancel.assert_called_once()
         app_ref.Quit.assert_not_called()
         assert backend._app is None
+
+
+def test_access_com_close_quits_instance_we_created():
+    """close() calls Quit() on instances we created to prevent orphans."""
+    connection_string = "Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\test.accdb;"
+    with patch('db_inspector_mcp.backends.access_com.win32com.client'):
+        backend = AccessCOMBackend(connection_string, 30)
+        backend._odbc_backend.close = MagicMock()
+        backend._app = MagicMock()
+        backend._we_created_app = True
+        backend._close_timer = MagicMock()
+
+        app_ref = backend._app
+        backend.close()
+
+        app_ref.Quit.assert_called_once()
+        assert backend._app is None
+        assert backend._we_created_app is False
 
 
 def test_access_com_backend_without_pywin32():
@@ -1298,6 +1446,19 @@ def access_app():
     except Exception:
         pass
 
+    # Capture the Access process ID before yielding so we can force-kill
+    # it during teardown if Quit() fails (e.g. a DAO timeout test left an
+    # orphaned worker thread with a live Recordset).
+    _access_pid = None
+    try:
+        import ctypes.wintypes
+        hwnd = app.hWndAccessApp()
+        pid = ctypes.wintypes.DWORD()
+        ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        _access_pid = pid.value
+    except Exception:
+        pass
+
     yield app
 
     # Disable faulthandler permanently before quit — stale COM proxies will
@@ -1309,6 +1470,16 @@ def access_app():
         app.Quit()
     except Exception:
         pass
+
+    # If the process is still alive (e.g. blocked by a DAO worker thread),
+    # force-terminate it.  Safe because DispatchEx created a dedicated
+    # test-only instance.
+    if _access_pid is not None:
+        try:
+            import signal
+            os.kill(_access_pid, signal.SIGTERM)
+        except OSError:
+            pass  # Already exited
 
 
 @pytest.fixture(scope="module")

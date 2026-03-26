@@ -1,5 +1,6 @@
 """Microsoft Access backend implementation using COM automation."""
 
+import atexit
 import logging
 import os
 import re
@@ -175,6 +176,8 @@ class AccessCOMBackend(DatabaseBackend):
 
         # Worker thread for DAO query timeout enforcement
         self._active_worker: threading.Thread | None = None
+
+        atexit.register(self.close)
     
     def _extract_db_path(self, connection_string: str) -> str:
         """Extract database path from connection string."""
@@ -252,12 +255,21 @@ class AccessCOMBackend(DatabaseBackend):
     def _release_app(self) -> None:
         """Release the COM reference to the Access Application.
 
-        This allows Access to exit normally when the user closes it.
-        We never close the database or quit Access — that is the user's
-        responsibility.  Must hold ``_com_lock``.
+        If we created the instance (``_we_created_app``), quit Access so
+        it doesn't remain as an orphaned process.  For user-owned instances
+        we just drop the reference, allowing Access to stay open.
+        Must hold ``_com_lock``.
         """
         if self._app is not None:
-            logger.debug("COM Application TTL expired — releasing reference")
+            if self._we_created_app:
+                db_name = os.path.basename(self._db_path)
+                try:
+                    self._app.Quit()
+                    logger.debug("Quit Access instance we created for %s", db_name)
+                except Exception:
+                    logger.debug("Failed to quit Access instance for %s", db_name)
+            else:
+                logger.debug("Releasing reference to user-owned Access instance")
             self._app = None
             self._we_created_app = False
 

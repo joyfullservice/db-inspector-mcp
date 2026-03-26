@@ -1,11 +1,12 @@
 """Microsoft Access backend implementation using pyodbc."""
 
+import json
 import logging
 import os
 import re
+import subprocess
 import sys
 import threading
-import time
 from contextlib import contextmanager
 from typing import Any
 
@@ -115,13 +116,17 @@ class AccessODBCBackend(DatabaseBackend):
     # ------------------------------------------------------------------
 
     def _open_connection(self) -> pyodbc.Connection:
-        """Create a new ODBC connection (internal, no locking)."""
-        conn = pyodbc.connect(
+        """Create a new ODBC connection (internal, no locking).
+
+        Used by schema introspection methods (list_tables, list_views,
+        etc.) via the ``_connection()`` context manager.  User-facing
+        query methods run in a subprocess via ``_run_in_subprocess``
+        instead.
+        """
+        return pyodbc.connect(
             self.connection_string,
             timeout=self.query_timeout_seconds,
         )
-        conn.timeout = self.query_timeout_seconds
-        return conn
 
     def _discard_connection(self) -> None:
         """Close and discard the cached connection (must hold _conn_lock)."""
@@ -169,6 +174,74 @@ class AccessODBCBackend(DatabaseBackend):
             else:
                 # TTL == 0 → close immediately (connect-per-request mode)
                 self._discard_connection()
+
+    def _run_in_subprocess(
+        self, operation: str, sql: str, params: dict | None = None,
+    ) -> Any:
+        """Run a query operation in an isolated subprocess with timeout.
+
+        Each call spawns a short-lived child process that opens its own
+        ODBC connection, executes the query, and returns JSON on stdout.
+        On timeout ``process.kill()`` terminates the child immediately,
+        releasing all OS resources (including Jet/ACE file locks) — which
+        is impossible with in-process threads because the Access ODBC
+        driver does not support ``SQLCancel`` or ``SQL_ATTR_QUERY_TIMEOUT``.
+
+        Schema introspection methods (list_tables, list_views, etc.)
+        continue to use the TTL-cached in-process connection via
+        ``_connection()`` because they run fast internal queries.
+        """
+        request = {
+            "connection_string": self.connection_string,
+            "operation": operation,
+            "sql": sql,
+        }
+        if params:
+            request["params"] = params
+
+        timeout = (
+            self.query_timeout_seconds
+            if self.query_timeout_seconds > 0
+            else None
+        )
+
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-m", "db_inspector_mcp.backends._odbc_worker"],
+                input=json.dumps(request).encode(),
+                capture_output=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            raise TimeoutError(
+                f"ODBC query exceeded {self.query_timeout_seconds}s timeout. "
+                f"The query process has been terminated. "
+                f"Consider simplifying the query or increasing the timeout."
+            )
+
+        stdout = proc.stdout.decode(errors="replace").strip()
+        if not stdout:
+            stderr = proc.stderr.decode(errors="replace").strip()
+            raise RuntimeError(
+                f"ODBC worker process failed (exit code {proc.returncode}): "
+                f"{stderr}"
+            )
+
+        try:
+            response = json.loads(stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"ODBC worker returned invalid JSON: {stdout[:200]}"
+            ) from exc
+
+        if "error" in response:
+            error_type = response.get("type", "RuntimeError")
+            error_msg = response["error"]
+            if error_type == "TimeoutError":
+                raise TimeoutError(error_msg)
+            raise RuntimeError(f"[{error_type}] {error_msg}")
+
+        return response["ok"]
 
     def close(self) -> None:
         """Cancel timers and close any cached ODBC connection."""
@@ -220,93 +293,33 @@ class AccessODBCBackend(DatabaseBackend):
     def count_query_results(self, query: str) -> int:
         """Count row count by wrapping query in SELECT COUNT(*)."""
         cte, core = split_cte_prefix(query)
-        wrapped_query = f"{cte}SELECT COUNT(*) AS cnt FROM ({core}) AS subquery"
-        with self._connection() as conn:
-            cursor = conn.cursor()
-            try:
-                cursor.execute(wrapped_query)
-                result = cursor.fetchone()
-                return result[0] if result else 0
-            finally:
-                cursor.close()
-    
+        wrapped = f"{cte}SELECT COUNT(*) AS cnt FROM ({core}) AS subquery"
+        return self._run_in_subprocess("count", wrapped)
+
     def get_query_columns(self, query: str) -> list[dict[str, Any]]:
         """Get column metadata using TOP 1 (Access does not support TOP 0)."""
         cte, core = split_cte_prefix(query)
-        wrapped_query = f"{cte}SELECT TOP 1 * FROM ({core}) AS subquery"
-        with self._connection() as conn:
-            cursor = conn.cursor()
-            try:
-                cursor.execute(wrapped_query)
-                columns = []
-                for col in cursor.description:
-                    if col:
-                        columns.append({
-                            "name": col[0],
-                            "type": str(col[1]),
-                            "nullable": col[6] if len(col) > 6 else None,
-                            "precision": col[4] if len(col) > 4 and col[4] else None,
-                            "scale": col[5] if len(col) > 5 and col[5] else None,
-                        })
-                return columns
-            finally:
-                cursor.close()
-    
+        wrapped = f"{cte}SELECT TOP 1 * FROM ({core}) AS subquery"
+        return self._run_in_subprocess("columns", wrapped)
+
     def sum_query_column(self, query: str, column: str) -> float | None:
         """Compute SUM of a column from query results."""
         cte, core = split_cte_prefix(query)
         safe_column = column.replace("]", "]]")
-        wrapped_query = f"{cte}SELECT SUM([{safe_column}]) AS sum_val FROM ({core}) AS subquery"
-        with self._connection() as conn:
-            cursor = conn.cursor()
-            try:
-                cursor.execute(wrapped_query)
-                result = cursor.fetchone()
-                return result[0] if result and result[0] is not None else None
-            finally:
-                cursor.close()
-    
+        wrapped = f"{cte}SELECT SUM([{safe_column}]) AS sum_val FROM ({core}) AS subquery"
+        return self._run_in_subprocess("sum", wrapped)
+
     def measure_query(self, sql: str, max_rows: int) -> dict[str, Any]:
         """Measure query execution time and retrieve limited rows."""
         sql = inject_top_clause(sql, max_rows)
-        
-        with self._connection() as conn:
-            cursor = conn.cursor()
-            try:
-                start_time = time.time()
-                cursor.execute(sql)
-                rows = cursor.fetchall()
-                execution_time_ms = (time.time() - start_time) * 1000
-                
-                column_names = [col[0] for col in cursor.description] if cursor.description else []
-                result_rows = self._sanitize_rows(column_names, rows)
-                
-                row_count = len(result_rows)
-                hit_limit = row_count >= max_rows
-                
-                return {
-                    "execution_time_ms": round(execution_time_ms, 2),
-                    "row_count": row_count,
-                    "hit_limit": hit_limit,
-                }
-            finally:
-                cursor.close()
-    
+        return self._run_in_subprocess(
+            "measure", sql, params={"max_rows": max_rows},
+        )
+
     def preview(self, query: str, max_rows: int) -> list[dict[str, Any]]:
         """Sample N rows from a query result."""
         query = inject_top_clause(query, max_rows)
-        
-        with self._connection() as conn:
-            cursor = conn.cursor()
-            try:
-                cursor.execute(query)
-                rows = cursor.fetchall()
-                
-                column_names = [col[0] for col in cursor.description] if cursor.description else []
-                result = self._sanitize_rows(column_names, rows)
-                return result
-            finally:
-                cursor.close()
+        return self._run_in_subprocess("preview", query)
     
     def explain_query(self, query: str) -> str:
         """
