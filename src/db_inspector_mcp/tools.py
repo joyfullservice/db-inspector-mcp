@@ -223,6 +223,20 @@ _ACCESS_ERROR_HINTS: list[tuple[re.Pattern[str], str | None, str]] = [
             "the access_com backend (DB_MCP_DATABASE=access_com)."
         ),
     ),
+    # "ODBC--call failed" + DISTINCT + JOIN → Jet optimizer bug with ON conditions
+    (
+        re.compile(r"ODBC--call failed", re.IGNORECASE),
+        r"\bDISTINCT\b.*\bJOIN\b",
+        (
+            "When SELECT DISTINCT is used with a JOIN whose ON clause has multiple "
+            "conditions without parentheses, the Jet query optimizer may inject an "
+            "ORDER BY on the joined table's primary key, which SQL Server rejects "
+            "because that column is not in the SELECT list. Fix: parenthesize each "
+            "ON condition — ON (a.x = b.x) AND (a.y = b.y) instead of "
+            "ON a.x = b.x AND a.y = b.y. "
+            "Call db_sql_help('distinct') for details."
+        ),
+    ),
 ]
 
 
@@ -276,6 +290,7 @@ mcp = FastMCP(
         "**SQL Dialect Awareness:**\n"
         "Access SQL differs significantly from standard SQL. Key differences:\n"
         "- Multiple JOINs require parentheses: FROM ((A JOIN B ON ...) JOIN C ON ...)\n"
+        "- DISTINCT + multi-condition ON: parenthesize each condition — ON (a.x = b.x) AND (a.y = b.y)\n"
         "- Use IIF(cond, true, false) instead of CASE WHEN\n"
         "- Use % and _ for wildcards in LIKE (ANSI standard, not Access-native * and ?)\n"
         "- Use #2024-01-15# for dates, not quotes\n"
@@ -1351,7 +1366,18 @@ _SQL_HELP = {
                 "expressions. Both DISTINCT and GROUP BY produce identical "
                 "results. If you get a 'missing operator' error with DISTINCT, "
                 "the cause is almost certainly unparenthesized JOINs — see "
-                "db_sql_help('joins')."
+                "db_sql_help('joins').\n\n"
+                "**IMPORTANT — Jet optimizer bug with DISTINCT + multi-condition "
+                "ON clauses on linked ODBC tables:** When a query uses SELECT "
+                "DISTINCT with a JOIN whose ON clause has multiple conditions "
+                "without parentheses, the Jet query optimizer may inject an "
+                "ORDER BY on the joined table's primary key into the SQL it sends "
+                "to SQL Server. SQL Server rejects this with error #145: 'ORDER "
+                "BY items must appear in the select list if SELECT DISTINCT is "
+                "specified'. The fix is to parenthesize each ON condition: "
+                "ON (a.x = b.x) AND (a.y = b.y). Without parentheses, the bug "
+                "is triggered when the joined (right) table's alias appears on "
+                "the left side of the first ON comparison."
             ),
             "examples": [
                 {
@@ -1363,11 +1389,15 @@ _SQL_HELP = {
                     "sql": "SELECT p.category FROM products p WHERE p.category IS NOT NULL GROUP BY p.category"
                 },
                 {
-                    "description": "DISTINCT with multiple columns and JOINs",
-                    "sql": "SELECT DISTINCT o.status, c.region FROM (orders o INNER JOIN customers c ON o.customer_id = c.id)"
+                    "description": "DISTINCT with multi-condition ON — BROKEN (no parentheses)",
+                    "sql": "SELECT DISTINCT a.col1, a.col2 FROM tableA AS a INNER JOIN tableB AS b ON b.col1 = a.col1 AND b.col2 = a.col2"
+                },
+                {
+                    "description": "DISTINCT with multi-condition ON — FIXED (parenthesized)",
+                    "sql": "SELECT DISTINCT a.col1, a.col2 FROM tableA AS a INNER JOIN tableB AS b ON (b.col1 = a.col1) AND (b.col2 = a.col2)"
                 }
             ],
-            "pattern": "Both SELECT DISTINCT and GROUP BY work. If DISTINCT fails, check JOIN parentheses first."
+            "pattern": "Both SELECT DISTINCT and GROUP BY work. Always parenthesize each ON condition in multi-condition JOINs when using DISTINCT."
         },
         "aggregates": {
             "title": "Conditional Aggregation in Access SQL",
@@ -1432,7 +1462,7 @@ _SQL_HELP = {
                 "Row limit": "Use SELECT TOP N not LIMIT N",
                 "Logical ops": "Use And/Or not &&/||",
                 "Not equal": "Use <> not !=",
-                "DISTINCT": "Works fine — if you get errors, check JOIN parentheses first",
+                "DISTINCT": "Works fine — parenthesize each ON condition in multi-condition JOINs: ON (a.x = b.x) AND (a.y = b.y). See db_sql_help('distinct')",
                 "VBA UDFs": "Require access_com backend — call db_sql_help('udfs')"
             }
         }

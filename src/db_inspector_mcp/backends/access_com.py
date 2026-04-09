@@ -48,15 +48,20 @@ _MSYS_TYPE_MODULE = -32761
 _DEFAULT_APP_TTL_SECONDS = 5.0
 
 # ODBC error patterns that indicate the query should be retried via DAO.
-# Covers two categories:
+# Covers three categories:
 #  1. VBA UDFs / domain functions (DLookup, DCount, …) — ODBC can't resolve
 #     these; DAO CurrentDb has access to the compiled VBA project.
 #  2. System-table permission errors — ODBC cannot read MSysObjects and other
 #     system tables; DAO through the Application context can.
+#  3. Linked ODBC table connection failures — the pyodbc connection to the
+#     Access file cannot follow linked-table connections to remote servers;
+#     DAO through the Application context uses saved connection strings.
 _DAO_RETRY_PATTERNS = [
     re.compile(r"undefined function", re.IGNORECASE),
     re.compile(r"too few parameters", re.IGNORECASE),
     re.compile(r"no read permission", re.IGNORECASE),
+    re.compile(r"ODBC--connection to .+ failed", re.IGNORECASE),
+    re.compile(r"ODBC--call failed", re.IGNORECASE),
 ]
 
 # DAO Field.Type integer codes → human-readable type names.
