@@ -318,6 +318,31 @@ mcp = FastMCP(
         "- db_sum_query_column(query, column) wraps your query to sum the specified column\n"
         "- db_get_query_columns(query) executes your query with 0 rows to get metadata\n"
         "Pass your base SELECT query; the tool handles aggregation.\n\n"
+        "**Tool quick-reference (required parameters marked with *, optional with ?):**\n"
+        "- db_list_databases() — list configured databases, dialects, and status\n"
+        "- db_list_tables(database?, name_filter?) — list tables with row counts\n"
+        "- db_list_views(database?, name_filter?) — list views with SQL definitions\n"
+        "- db_preview(query*, database?, max_rows?) — sample rows from a SELECT query "
+        "(requires DB_MCP_ALLOW_DATA_ACCESS)\n"
+        "- db_count_query_results(query*, database?) — wraps query in COUNT(*); "
+        "returns {count: N}, NOT row data\n"
+        "- db_get_query_columns(query*, database?) — column metadata (names, types, "
+        "nullability) without fetching rows\n"
+        "- db_sum_query_column(query*, column*, database?) — wraps query to SUM a column\n"
+        "- db_compare_queries(sql1*, sql2*, database1?, database2?, compare_samples?) "
+        "— compare row counts, columns, and optionally sample data\n"
+        "- db_get_access_query_definition(name*, database?) — get saved Access query SQL\n"
+        "- db_sql_help(topic?, database?) — Access SQL syntax reference\n"
+        "- db_explain(query*, database?) — execution plan (not supported for Access)\n"
+        "- db_measure_query(query*, database?, max_rows?) — measure execution time\n"
+        "- db_check_readonly_status(database?) — verify connection is read-only\n\n"
+        "**Common mistakes to avoid:**\n"
+        "- db_count_query_results() returns only a count integer, NOT row data. "
+        "To see actual rows, use db_preview().\n"
+        "- db_preview() requires a query parameter (SQL SELECT string), not a table name.\n"
+        "- Before querying an unfamiliar table, call "
+        "db_get_query_columns('SELECT * FROM tablename') to discover column names. "
+        "Do NOT guess column names.\n\n"
         "**Usage logs:**\n"
         "When DB_MCP_ENABLE_LOGGING=true is set in the project .env, all tool calls are "
         "logged to a JSON Lines file. The default location is "
@@ -1359,7 +1384,7 @@ _SQL_HELP = {
             "pattern": "And, Or, Not, <> (not &&, ||, !=)"
         },
         "distinct": {
-            "title": "DISTINCT and GROUP BY in Access SQL",
+            "title": "DISTINCT, DISTINCTROW, and GROUP BY in Access SQL",
             "description": (
                 "SELECT DISTINCT works correctly in Access via ODBC, including "
                 "with table aliases, multiple columns, JOINs, NULLs, and "
@@ -1367,6 +1392,22 @@ _SQL_HELP = {
                 "results. If you get a 'missing operator' error with DISTINCT, "
                 "the cause is almost certainly unparenthesized JOINs — see "
                 "db_sql_help('joins').\n\n"
+                "**DISTINCTROW — Access-only keyword:** Access supports an "
+                "additional `SELECT DISTINCTROW` modifier that has no ANSI SQL "
+                "equivalent. The two keywords answer different questions:\n"
+                "- `DISTINCT` deduplicates by the **values in the select list** "
+                "(column-level uniqueness — the standard SQL behavior).\n"
+                "- `DISTINCTROW` deduplicates by the **underlying record identity** "
+                "of the joined source tables (row-level uniqueness). It only has "
+                "an effect when the query joins multiple tables and the select "
+                "list does not include columns from every table in the join.\n\n"
+                "DISTINCTROW is the **default** modifier emitted by the Access "
+                "query designer when a query contains joins, which is why so many "
+                "saved Access queries begin with `SELECT DISTINCTROW`. It is fully "
+                "valid SQL in Access (Jet/ACE) — do not rewrite existing "
+                "DISTINCTROW queries to DISTINCT unless you have verified that "
+                "the result set is identical, because they can return different "
+                "row counts on one-to-many joins.\n\n"
                 "**IMPORTANT — Jet optimizer bug with DISTINCT + multi-condition "
                 "ON clauses on linked ODBC tables:** When a query uses SELECT "
                 "DISTINCT with a JOIN whose ON clause has multiple conditions "
@@ -1389,6 +1430,14 @@ _SQL_HELP = {
                     "sql": "SELECT p.category FROM products p WHERE p.category IS NOT NULL GROUP BY p.category"
                 },
                 {
+                    "description": "DISTINCTROW — one row per matching underlying record (Access-only)",
+                    "sql": "SELECT DISTINCTROW c.CategoryName FROM Categories c INNER JOIN Products p ON p.CategoryID = c.CategoryID"
+                },
+                {
+                    "description": "DISTINCT vs DISTINCTROW on a 1-to-many join — different results. With one Category that has 5 Products, DISTINCT returns 1 row (unique CategoryName), but DISTINCTROW returns 5 rows (one per underlying Products record).",
+                    "sql": "-- DISTINCT: returns 1 row\nSELECT DISTINCT c.CategoryName FROM Categories c INNER JOIN Products p ON p.CategoryID = c.CategoryID;\n-- DISTINCTROW: returns 5 rows\nSELECT DISTINCTROW c.CategoryName FROM Categories c INNER JOIN Products p ON p.CategoryID = c.CategoryID;"
+                },
+                {
                     "description": "DISTINCT with multi-condition ON — BROKEN (no parentheses)",
                     "sql": "SELECT DISTINCT a.col1, a.col2 FROM tableA AS a INNER JOIN tableB AS b ON b.col1 = a.col1 AND b.col2 = a.col2"
                 },
@@ -1397,7 +1446,7 @@ _SQL_HELP = {
                     "sql": "SELECT DISTINCT a.col1, a.col2 FROM tableA AS a INNER JOIN tableB AS b ON (b.col1 = a.col1) AND (b.col2 = a.col2)"
                 }
             ],
-            "pattern": "Both SELECT DISTINCT and GROUP BY work. Always parenthesize each ON condition in multi-condition JOINs when using DISTINCT."
+            "pattern": "SELECT DISTINCT (column-level dedup, ANSI standard), SELECT DISTINCTROW (Access-only, row-level dedup across joined tables — the query designer's default), or GROUP BY all work. Always parenthesize each ON condition in multi-condition JOINs when using DISTINCT."
         },
         "aggregates": {
             "title": "Conditional Aggregation in Access SQL",
@@ -1462,7 +1511,7 @@ _SQL_HELP = {
                 "Row limit": "Use SELECT TOP N not LIMIT N",
                 "Logical ops": "Use And/Or not &&/||",
                 "Not equal": "Use <> not !=",
-                "DISTINCT": "Works fine — parenthesize each ON condition in multi-condition JOINs: ON (a.x = b.x) AND (a.y = b.y). See db_sql_help('distinct')",
+                "DISTINCT / DISTINCTROW": "DISTINCT works like ANSI (column-level dedup). DISTINCTROW is Access-only and dedupes by underlying record identity across JOINs — it is the query designer's default and is fully valid Access SQL. See db_sql_help('distinct')",
                 "VBA UDFs": "Require access_com backend — call db_sql_help('udfs')"
             }
         }

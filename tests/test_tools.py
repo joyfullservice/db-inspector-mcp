@@ -209,6 +209,39 @@ def test_db_sql_help_access_joins():
         assert "parentheses" in result["description"].lower()
 
 
+def test_db_sql_help_access_distinct_mentions_distinctrow():
+    """Regression: the Access 'distinct' help topic must mention DISTINCTROW.
+
+    DISTINCTROW is a valid Access-only SQL keyword (the query designer's
+    default modifier on multi-table queries). Earlier versions of this help
+    topic only documented DISTINCT, which gave readers the false impression
+    that DISTINCTROW was unsupported. Both the topic body and the 'all'
+    summary should reference it.
+    """
+    with patch("db_inspector_mcp.tools.get_registry") as mock_get_registry:
+        mock_backend = MagicMock()
+        mock_backend.sql_dialect = "access"
+
+        registry = MagicMock()
+        registry.get.return_value = mock_backend
+        mock_get_registry.return_value = registry
+
+        topic = db_sql_help("distinct")
+
+        assert topic["dialect"] == "access"
+        assert topic["topic"] == "distinct"
+        assert "DISTINCTROW" in topic["title"]
+        assert "DISTINCTROW" in topic["description"]
+        assert "DISTINCTROW" in topic["pattern"]
+        example_sqls = " ".join(ex["sql"] for ex in topic["examples"])
+        assert "DISTINCTROW" in example_sqls
+
+        summary = db_sql_help("all")
+        assert "DISTINCTROW" in " ".join(summary["summary"].keys()) or any(
+            "DISTINCTROW" in v for v in summary["summary"].values()
+        )
+
+
 def test_db_sql_help_access_all():
     """Test db_sql_help returns Access quick reference."""
     with patch("db_inspector_mcp.tools.get_registry") as mock_get_registry:

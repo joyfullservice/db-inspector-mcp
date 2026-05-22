@@ -79,6 +79,47 @@ contradictory guidance.
 
 ---
 
+## 2026-05-22 — Tool quick-reference in server instructions
+
+**Trigger**: Review of ~12 agent chat transcripts from the db-if-portal-sync
+project showed agents consistently wasting 2-5 tool calls trying to find MCP
+tool descriptor JSON files before making their first MCP call. Agents would
+Glob with workspace-relative paths (which don't resolve to the Cursor project
+metadata folder), fall back to Shell directory listings, and in the worst case
+guess tool names and parameters incorrectly. One session required explicit user
+intervention to name the correct tool (`vcs_run_vba`).
+
+**Options explored**:
+- **Symlink mcps/ into the git repo** — would make Glob work, but Cursor
+  manages the mcps/ folder and it's not clear this would survive across
+  machines or Cursor updates. Rejected.
+- **Consumer-project Cursor rule listing tool signatures** — works for one
+  project but requires duplication in every consumer. Used as a complement,
+  not the primary fix.
+- **Add tool signatures to FastMCP `instructions` string** — this text is
+  injected into every agent session's system prompt automatically. Agents
+  never need to discover or read descriptor files for the common case.
+
+**Decision**: Add a "Tool quick-reference" section and a "Common mistakes to
+avoid" section to the `instructions` parameter of both `FastMCP()` instances
+(db-inspector-mcp and msaccess-vcs-mcp). Each tool is listed with required
+parameters marked `*` and optional marked `?`, plus a one-line description.
+The mistakes section addresses the three most frequent errors observed:
+`db_count_query_results` vs `db_preview` confusion, `db_preview` needing a
+`query` not a `table`, and guessing column names instead of calling
+`db_get_query_columns` first.
+
+**What this rules out**: Keeping the instructions string minimal. The
+instructions are now ~40 lines longer. If the tool surface grows
+significantly, the reference card should be trimmed to high-frequency tools
+only. Revisit if total instructions exceed ~120 lines.
+
+**Relevant files**:
+- `src/db_inspector_mcp/tools.py` — `instructions` parameter on `FastMCP()`
+- `C:\Repos\msaccess-vcs-mcp\src\msaccess_vcs_mcp\tools.py` — same for VCS
+
+---
+
 ## 2026-03-25 — Query execution timeout for all backends
 
 **Trigger**: Agent queries running for several minutes without timing out despite `DB_MCP_QUERY_TIMEOUT_SECONDS=30`. Logs showed no timeout errors — queries simply ran indefinitely. The original `pyodbc.connect(timeout=N)` only set the login/connection timeout (`SQL_ATTR_LOGIN_TIMEOUT`), not the query execution timeout.
