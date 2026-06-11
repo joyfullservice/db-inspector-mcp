@@ -292,3 +292,143 @@ def test_db_sql_help_defaults_to_all():
         assert result["topic"] == "all"
         assert "summary" in result
 
+
+# ---------------------------------------------------------------------------
+# db_list_databases: empty -> explicit error, and never connects
+# ---------------------------------------------------------------------------
+
+@pytest.mark.anyio
+async def test_db_list_databases_empty_returns_error():
+    """An empty registry yields an explicit error, not a silent empty success."""
+    with patch("db_inspector_mcp.tools.get_registry") as mock_get_registry, \
+         patch("db_inspector_mcp.tools._ensure_backends_initialized"):
+        registry = MagicMock()
+        registry.list_backends.return_value = []
+        registry.get_default_name.return_value = None
+        mock_get_registry.return_value = registry
+
+        result = await db_list_databases(MagicMock())
+
+        assert result["databases"] == []
+        assert result["default"] is None
+        assert "error" in result
+        assert "No database backends" in result["error"]
+
+
+@pytest.mark.anyio
+async def test_db_list_databases_does_not_connect_disconnected_backend():
+    """db_list_databases must not open a connection for disconnected backends.
+
+    A single locked/slow backend would otherwise block discovery of every
+    database, which is the bug this guards against.
+    """
+    with patch("db_inspector_mcp.tools.get_registry") as mock_get_registry, \
+         patch("db_inspector_mcp.tools._ensure_backends_initialized"):
+        backend = MagicMock()
+        backend.sql_dialect = "access"
+        backend.is_connected = False
+        backend.get_object_counts.side_effect = AssertionError(
+            "db_list_databases must not connect to a disconnected backend"
+        )
+
+        registry = MagicMock()
+        registry.list_backends.return_value = ["sync"]
+        registry.get_default_name.return_value = "sync"
+        registry.get.return_value = backend
+        mock_get_registry.return_value = registry
+
+        result = await db_list_databases(MagicMock())
+
+        assert len(result["databases"]) == 1
+        assert result["databases"][0]["status"] == "not_connected"
+        assert result["databases"][0]["object_counts"] == {}
+        backend.get_object_counts.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Lazy backend initialization: retryable on failure, guard only on success
+# ---------------------------------------------------------------------------
+
+@pytest.mark.anyio
+async def test_lazy_init_retryable_when_no_env(tmp_path, monkeypatch):
+    """If no workspace root has a .env, the guard stays unset so a later call retries."""
+    import db_inspector_mcp.tools as tools_mod
+    monkeypatch.setattr(tools_mod, "_lazy_init_attempted", False)
+
+    registry = MagicMock()
+    registry.list_backends.return_value = []
+
+    root = MagicMock()
+    root.uri = (tmp_path / "no_env_dir").as_uri()
+
+    ctx = MagicMock()
+
+    async def fake_list_roots():
+        return MagicMock(roots=[root])
+
+    ctx.session.list_roots = fake_list_roots
+
+    with patch.object(tools_mod, "get_registry", return_value=registry):
+        await tools_mod._ensure_backends_initialized(ctx)
+
+    assert tools_mod._lazy_init_attempted is False
+
+
+@pytest.mark.anyio
+async def test_lazy_init_sets_guard_on_success(tmp_path, monkeypatch):
+    """A successful init commits the guard so we don't re-scan on every call."""
+    import db_inspector_mcp.tools as tools_mod
+    monkeypatch.setattr(tools_mod, "_lazy_init_attempted", False)
+    (tmp_path / ".env").write_text("DB_MCP_DATABASE=sqlserver\n")
+
+    registry = MagicMock()
+    registry.list_backends.return_value = []
+
+    new_registry = MagicMock()
+    new_registry.list_backends.return_value = ["default"]
+    new_registry.get_default_name.return_value = "default"
+
+    root = MagicMock()
+    root.uri = tmp_path.as_uri()
+
+    ctx = MagicMock()
+
+    async def fake_list_roots():
+        return MagicMock(roots=[root])
+
+    ctx.session.list_roots = fake_list_roots
+
+    with patch.object(tools_mod, "get_registry", return_value=registry), \
+         patch.object(tools_mod, "initialize_from_workspace", return_value=new_registry) as mock_init:
+        await tools_mod._ensure_backends_initialized(ctx)
+
+    mock_init.assert_called_once()
+    assert tools_mod._lazy_init_attempted is True
+
+
+@pytest.mark.anyio
+async def test_lazy_init_failure_is_retryable(tmp_path, monkeypatch):
+    """If initialization raises (e.g. locked backend), the guard stays unset."""
+    import db_inspector_mcp.tools as tools_mod
+    monkeypatch.setattr(tools_mod, "_lazy_init_attempted", False)
+    (tmp_path / ".env").write_text("DB_MCP_DATABASE=sqlserver\n")
+
+    registry = MagicMock()
+    registry.list_backends.return_value = []
+
+    root = MagicMock()
+    root.uri = tmp_path.as_uri()
+
+    ctx = MagicMock()
+
+    async def fake_list_roots():
+        return MagicMock(roots=[root])
+
+    ctx.session.list_roots = fake_list_roots
+
+    with patch.object(tools_mod, "get_registry", return_value=registry), \
+         patch.object(tools_mod, "initialize_from_workspace", side_effect=RuntimeError("locked")):
+        await tools_mod._ensure_backends_initialized(ctx)
+
+    assert tools_mod._lazy_init_attempted is False
+

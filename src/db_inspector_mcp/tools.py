@@ -48,22 +48,35 @@ _lazy_init_attempted = False
 
 
 async def _ensure_backends_initialized(ctx: Context) -> None:
-    """Lazily initialize backends from MCP workspace roots if not yet done."""
+    """Lazily initialize backends from MCP workspace roots if not yet done.
+
+    The module-level guard is committed only on success.  If initialization
+    fails, finds no usable workspace, or yields an empty registry, the guard
+    is left unset so a later call retries — e.g. after the user opens the
+    right workspace or releases a database lock — without a server restart.
+
+    Read-only verification is intentionally NOT performed here: it opens
+    connections and can block on a locked/slow backend.  ``db_list_databases``
+    must stay pure metadata.  Verification runs at startup (``main.py``) for
+    eagerly-configured backends, bounded by a per-backend timeout.
+    """
     global _lazy_init_attempted
     if _lazy_init_attempted:
         return
-    _lazy_init_attempted = True
 
     registry = get_registry()
     if registry.list_backends():
+        _lazy_init_attempted = True
         return  # Already initialised at startup
 
     try:
         roots_result = await ctx.session.list_roots()
     except Exception as exc:
+        # Transient (handshake/client issue) — leave guard unset to retry.
         print(f"Could not request workspace roots from client: {exc}", file=sys.stderr)
         return
 
+    found_env = False
     for root in roots_result.roots:
         workspace = _file_uri_to_path(str(root.uri))
         if workspace is None:
@@ -71,29 +84,48 @@ async def _ensure_backends_initialized(ctx: Context) -> None:
         env_path = workspace / ".env"
         if not env_path.exists():
             continue
+        found_env = True
         try:
             new_registry = initialize_from_workspace(workspace)
-            backends = new_registry.list_backends()
-            default_name = new_registry.get_default_name()
-            print(
-                f"Initialized {len(backends)} backend(s) from workspace root: "
-                f"{', '.join(backends)}",
-                file=sys.stderr,
-            )
-            if default_name:
-                print(f"Default backend: {default_name}", file=sys.stderr)
-
-            # Run read-only verification
-            from .main import _verify_readonly
-            _verify_readonly(get_config(), new_registry)
-            return
         except Exception as exc:
             print(f"Failed to initialize from {workspace}: {exc}", file=sys.stderr)
+            continue
 
-    print(
-        "No .env file found in any workspace root provided by the client.",
-        file=sys.stderr,
-    )
+        backends = new_registry.list_backends()
+        if not backends:
+            print(
+                f"Found {env_path} but no database backends could be configured "
+                f"(check DB_MCP_* variables).",
+                file=sys.stderr,
+            )
+            continue
+
+        default_name = new_registry.get_default_name()
+        print(
+            f"Initialized {len(backends)} backend(s) from workspace root: "
+            f"{', '.join(backends)}",
+            file=sys.stderr,
+        )
+        if default_name:
+            print(f"Default backend: {default_name}", file=sys.stderr)
+
+        # Success — commit the guard so we don't re-scan on every call.
+        _lazy_init_attempted = True
+        return
+
+    # No workspace yielded a usable registry.  Leave the guard unset so a
+    # future call can retry once the environment is fixed.
+    if found_env:
+        print(
+            "Found .env file(s) in workspace roots but no backends were "
+            "initialized — see errors above.",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "No .env file found in any workspace root provided by the client.",
+            file=sys.stderr,
+        )
 
 
 def _file_uri_to_path(uri: str) -> Path | None:
@@ -205,10 +237,11 @@ _ACCESS_ERROR_HINTS: list[tuple[re.Pattern[str], str | None, str]] = [
         re.compile(r"prevents it from being opened or locked", re.IGNORECASE),
         None,
         (
-            "The database is locked in exclusive mode, most likely because "
-            "objects are being modified in Access design view (tables, queries, "
-            "forms, or reports). Close any open design views in Access and "
-            "reopen the database, then retry."
+            "The database may be in exclusive mode (design view open in Access) "
+            "or blocked by an orphaned .laccdb sidecar left after Access crashed "
+            "— its presence does not guarantee Access is still running. Close "
+            "design views, confirm no MSACCESS process holds the file, delete a "
+            "stale .laccdb if safe, then retry."
         ),
     ),
     # "too few parameters" → usually a misspelled column name
@@ -1228,10 +1261,32 @@ async def db_list_databases(ctx: Context) -> dict[str, Any]:
     registry = get_registry()
     backend_names = registry.list_backends()
     default_name = registry.get_default_name()
-    
+
+    # No backends configured: return an explicit, actionable error instead of
+    # an empty list, which is indistinguishable from "succeeded with zero
+    # databases" and silently breaks every downstream tool.
+    if not backend_names:
+        return {
+            "databases": [],
+            "default": None,
+            "error": (
+                "No database backends are configured. This usually means the "
+                "project's .env (with DB_MCP_* variables) was not found for the "
+                "current workspace. Checklist: (1) ensure the workspace you "
+                "opened contains a .env with DB_MCP_DATABASE/DB_MCP_CONNECTION_STRING "
+                "or DB_MCP_<name>_DATABASE/_CONNECTION_STRING entries; (2) if the "
+                "MCP server is configured at the user level, set DB_MCP_PROJECT_DIR "
+                "to the project path; (3) restart the db-inspector-mcp server. "
+                "See the server log (stderr) for the specific reason."
+            ),
+        }
+
     databases = []
     for name in backend_names:
         backend = registry.get(name)
+        # IMPORTANT: only read counts for already-connected backends.
+        # db_list_databases must never open a connection — a single locked or
+        # slow backend would otherwise block discovery of all databases.
         connected = backend.is_connected
         if connected:
             try:

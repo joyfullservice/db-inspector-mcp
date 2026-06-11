@@ -18,10 +18,18 @@ from .sql_utils import inject_top_clause, split_cte_prefix
 logger = logging.getLogger(__name__)
 
 # Default TTL for cached connections (seconds).  After the last operation
-# finishes, the connection is held open for this long before being closed,
-# releasing the .laccdb lock.  A new call within the window reuses the
-# cached connection (~0.2 ms) instead of reconnecting (~220 ms).
+# finishes, the connection is held open for this long before being closed.
+# A new call within the window reuses the cached connection (~0.2 ms) instead
+# of reconnecting (~220 ms).
 _DEFAULT_CONN_TTL_SECONDS = 5.0
+
+# Maximum wall-clock time (seconds) to wait for a new ODBC connection to open.
+# The ODBC login ``timeout`` parameter does NOT bound connect stalls — the ACE
+# driver can block indefinitely when the file is in use or a stale sidecar
+# (.laccdb) remains after Access crashed.  We run the connect on a daemon
+# thread and abandon it if it exceeds this bound so one unresponsive backend
+# can never wedge schema introspection or db_list_databases.
+_DEFAULT_CONNECT_TIMEOUT_SECONDS = 10.0
 
 
 class AccessODBCBackend(DatabaseBackend):
@@ -30,9 +38,8 @@ class AccessODBCBackend(DatabaseBackend):
     Uses a TTL-cached connection: the first operation opens an ODBC
     connection and caches it.  Subsequent calls within the TTL window
     reuse the same connection (~0.2 ms instead of ~220 ms).  After the
-    TTL expires with no activity, the connection is closed automatically,
-    releasing the .laccdb lock so the user and other processes can work
-    with the database freely.
+    TTL expires with no activity, the connection is closed automatically so
+    the user and other processes can work with the database freely.
     """
     
     @property
@@ -79,6 +86,17 @@ class AccessODBCBackend(DatabaseBackend):
             if connection_ttl_seconds is not None
             else _DEFAULT_CONN_TTL_SECONDS
         )
+
+        # Wall-clock bound for opening a new connection (see
+        # _DEFAULT_CONNECT_TIMEOUT_SECONDS).  Overridable via env for sites
+        # with unusually slow storage.
+        self._connect_timeout: float = _DEFAULT_CONNECT_TIMEOUT_SECONDS
+        connect_timeout_env = os.getenv("DB_MCP_ACCESS_CONNECT_TIMEOUT")
+        if connect_timeout_env:
+            try:
+                self._connect_timeout = float(connect_timeout_env)
+            except ValueError:
+                pass
     
     def _ensure_dbq_parameter(self, connection_string: str) -> str:
         """
@@ -122,11 +140,76 @@ class AccessODBCBackend(DatabaseBackend):
         etc.) via the ``_connection()`` context manager.  User-facing
         query methods run in a subprocess via ``_run_in_subprocess``
         instead.
+
+        The connect runs on a daemon thread bounded by
+        ``self._connect_timeout``.  The ODBC login ``timeout`` parameter does
+        not reliably bound connect stalls, so without this guard an in-use
+        database or a stale ``.laccdb`` sidecar (e.g. left by a crashed Access
+        session) would block the caller indefinitely.  On timeout we raise
+        ``TimeoutError`` and abandon the worker thread; a late-completing
+        connection is closed (by the worker, or here) so it never leaks.
         """
-        return pyodbc.connect(
-            self.connection_string,
-            timeout=self.query_timeout_seconds,
-        )
+        state: dict[str, Any] = {"conn": None, "error": None, "abandoned": False}
+        state_lock = threading.Lock()
+        done = threading.Event()
+
+        def _worker() -> None:
+            try:
+                conn = pyodbc.connect(
+                    self.connection_string,
+                    timeout=self.query_timeout_seconds,
+                )
+            except BaseException as exc:  # noqa: BLE001 — relay to caller thread
+                with state_lock:
+                    state["error"] = exc
+                done.set()
+                return
+            close_it = False
+            with state_lock:
+                if state["abandoned"]:
+                    close_it = True
+                else:
+                    state["conn"] = conn
+            done.set()
+            if close_it:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        threading.Thread(
+            target=_worker,
+            name=f"access-connect-{self._db_label}",
+            daemon=True,
+        ).start()
+
+        if not done.wait(timeout=self._connect_timeout):
+            # Timed out waiting for the connection.  Mark abandoned so a
+            # late-completing worker closes its connection, and close any
+            # connection that landed in the boundary race ourselves.
+            with state_lock:
+                state["abandoned"] = True
+                stray = state["conn"]
+                state["conn"] = None
+            if stray is not None:
+                try:
+                    stray.close()
+                except Exception:
+                    pass
+            raise TimeoutError(
+                f"Opening a connection to '{self._db_label}' exceeded "
+                f"{self._connect_timeout}s. Common causes: the database is open "
+                f"in Access (exclusive/design mode), an orphaned .laccdb sidecar "
+                f"left after Access crashed or terminated unexpectedly, or a "
+                f"stale lock from a prior timed-out ODBC connection. If no "
+                f"Access process is using the file, try deleting the .laccdb "
+                f"and retry."
+            )
+
+        with state_lock:
+            if state["error"] is not None:
+                raise state["error"]
+            return state["conn"]
 
     def _discard_connection(self) -> None:
         """Close and discard the cached connection (must hold _conn_lock)."""

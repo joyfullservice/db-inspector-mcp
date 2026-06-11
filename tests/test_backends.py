@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch, call
@@ -292,6 +293,117 @@ def test_access_odbc_does_not_set_query_execution_timeout():
 
     if backend._close_timer is not None:
         backend._close_timer.cancel()
+
+
+# ---------------------------------------------------------------------------
+# Access ODBC connect timeout (locked/slow file must not block forever)
+# ---------------------------------------------------------------------------
+
+def test_access_odbc_connect_timeout_default():
+    """The connect timeout defaults to 10s when no env override is set."""
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("DB_MCP_ACCESS_CONNECT_TIMEOUT", None)
+        backend = AccessODBCBackend("test_connection_string", 30)
+        assert backend._connect_timeout == 10.0
+
+
+def test_access_odbc_connect_timeout_env_override():
+    """DB_MCP_ACCESS_CONNECT_TIMEOUT overrides the default connect bound."""
+    with patch.dict(os.environ, {"DB_MCP_ACCESS_CONNECT_TIMEOUT": "3.5"}, clear=False):
+        backend = AccessODBCBackend("test_connection_string", 30)
+        assert backend._connect_timeout == 3.5
+
+
+def test_access_odbc_connect_timeout_raises_promptly_when_stalled():
+    """A blocking pyodbc.connect must raise TimeoutError fast.
+
+    Regression: the ODBC login ``timeout`` does not bound connect stalls (e.g.
+    in-use database or stale .laccdb), so schema introspection would block
+    indefinitely.  _open_connection now bounds the connect on a daemon thread.
+    """
+    backend = AccessODBCBackend("test_connection_string", 30)
+    backend._connect_timeout = 0.2
+
+    release = threading.Event()
+
+    def _blocking_connect(*_args, **_kwargs):
+        # Simulate the ACE driver hanging during connect.
+        release.wait(timeout=5)
+        return MagicMock()
+
+    with patch('db_inspector_mcp.backends.access_odbc.pyodbc') as mock_pyodbc:
+        mock_pyodbc.connect.side_effect = _blocking_connect
+
+        start = time.time()
+        with pytest.raises(TimeoutError, match="exceeded"):
+            backend._open_connection()
+        elapsed = time.time() - start
+
+        # Must return ~immediately after the bound, not after the 5s block.
+        assert elapsed < 2.0
+
+    release.set()
+
+
+def test_access_odbc_abandoned_connection_is_closed():
+    """A connection that completes after the timeout must be closed, not leaked.
+
+    This prevents an abandoned ODBC connection from lingering after the caller
+    has already given up.
+    """
+    backend = AccessODBCBackend("test_connection_string", 30)
+    backend._connect_timeout = 0.1
+
+    gate = threading.Event()
+    late_conn = MagicMock()
+
+    def _slow_connect(*_args, **_kwargs):
+        gate.wait(timeout=5)
+        return late_conn
+
+    with patch('db_inspector_mcp.backends.access_odbc.pyodbc') as mock_pyodbc:
+        mock_pyodbc.connect.side_effect = _slow_connect
+
+        with pytest.raises(TimeoutError):
+            backend._open_connection()
+
+        # Let the worker finish connecting; it must close the abandoned conn.
+        gate.set()
+        deadline = time.time() + 3
+        while not late_conn.close.called and time.time() < deadline:
+            time.sleep(0.02)
+
+        late_conn.close.assert_called_once()
+
+
+def test_access_odbc_slow_connect_within_bound_succeeds():
+    """A connect that completes within the bound returns normally."""
+    backend = AccessODBCBackend("test_connection_string", 30, connection_ttl_seconds=60)
+    backend._connect_timeout = 2.0
+
+    mock_conn = MagicMock()
+
+    def _slow_connect(*_args, **_kwargs):
+        time.sleep(0.2)
+        return mock_conn
+
+    with patch('db_inspector_mcp.backends.access_odbc.pyodbc') as mock_pyodbc:
+        mock_pyodbc.connect.side_effect = _slow_connect
+
+        conn = backend._open_connection()
+        assert conn is mock_conn
+
+
+def test_access_odbc_connect_error_propagates():
+    """A connect that fails fast re-raises the original error (not TimeoutError)."""
+    backend = AccessODBCBackend("test_connection_string", 30)
+    backend._connect_timeout = 2.0
+
+    with patch('db_inspector_mcp.backends.access_odbc.pyodbc') as mock_pyodbc:
+        mock_pyodbc.connect.side_effect = RuntimeError("driver not found")
+
+        with pytest.raises(RuntimeError, match="driver not found"):
+            backend._open_connection()
 
 
 def test_access_odbc_timeout_kills_subprocess():

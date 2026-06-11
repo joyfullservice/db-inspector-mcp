@@ -573,24 +573,42 @@ def initialize_backends() -> BackendRegistry:
             "or DB_MCP_<name>_DATABASE/DB_MCP_<name>_CONNECTION_STRING for multiple databases."
         )
     
-    # Register all backends
+    # Register all backends.  A single backend that fails to construct (bad
+    # connection string, unsupported driver, etc.) must not abort the others
+    # or leave a half-registered registry behind — so each is isolated.
     base_dir = _get_project_root()
-    default_set = False
+    failures: list[str] = []
     for db_name, db_config in db_configs.items():
-        conn_str = _resolve_connection_string_paths(
-            db_config["connection_string"], db_config["backend"], base_dir,
+        try:
+            conn_str = _resolve_connection_string_paths(
+                db_config["connection_string"], db_config["backend"], base_dir,
+            )
+            backend = _create_backend(
+                db_config["backend"],
+                conn_str,
+                query_timeout,
+            )
+        except Exception as exc:
+            failures.append(f"{db_name} ({db_config['backend']}): {exc}")
+            print(
+                f"Warning: failed to configure backend '{db_name}': {exc}",
+                file=sys.stderr,
+            )
+            continue
+        # "default" is always the default; otherwise the first successfully
+        # registered backend becomes the default automatically (the registry
+        # sets the default whenever none is set yet).
+        registry.register(db_name, backend, set_as_default=(db_name == "default"))
+
+    if not registry.list_backends():
+        # Every configured backend failed to construct.  Raise so callers can
+        # surface a clear error and retry, rather than silently exposing an
+        # empty registry.
+        detail = "; ".join(failures) if failures else "Check DB_MCP_* configuration."
+        raise ValueError(
+            f"No database backends could be initialized. {detail}"
         )
-        backend = _create_backend(
-            db_config["backend"],
-            conn_str,
-            query_timeout
-        )
-        # Set first backend as default, or "default" if it exists
-        set_as_default = (db_name == "default") or (not default_set and db_name == list(db_configs.keys())[0])
-        registry.register(db_name, backend, set_as_default=set_as_default)
-        if set_as_default:
-            default_set = True
-    
+
     return registry
 
 

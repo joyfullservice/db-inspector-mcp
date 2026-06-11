@@ -543,3 +543,65 @@ class TestEnvHotReload:
             db_count_query_results("SELECT 1")
             mock_load.assert_called()
 
+
+class TestInitializeBackendsResilience:
+    """initialize_backends must isolate per-backend construction failures."""
+
+    @staticmethod
+    def _clear_db_mcp_env(monkeypatch):
+        for key in list(os.environ):
+            if key.startswith("DB_MCP_"):
+                monkeypatch.delenv(key, raising=False)
+
+    def test_one_bad_backend_does_not_block_others(self, tmp_path, monkeypatch):
+        """A single failed backend must not prevent the others from registering."""
+        from db_inspector_mcp.config import initialize_backends
+        from db_inspector_mcp.backends.registry import get_registry
+        from db_inspector_mcp.backends.base import DatabaseBackend
+
+        self._clear_db_mcp_env(monkeypatch)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("DB_MCP_GOOD_DATABASE", "sqlserver")
+        monkeypatch.setenv("DB_MCP_GOOD_CONNECTION_STRING", "good-conn")
+        monkeypatch.setenv("DB_MCP_BAD_DATABASE", "sqlserver")
+        monkeypatch.setenv("DB_MCP_BAD_CONNECTION_STRING", "bad-conn")
+
+        get_registry().clear()
+
+        def fake_create(backend_type, conn, timeout):
+            if "bad" in conn:
+                raise RuntimeError("driver missing")
+            return MagicMock(spec=DatabaseBackend)
+
+        try:
+            with patch("db_inspector_mcp.config._create_backend", side_effect=fake_create):
+                registry = initialize_backends()
+            names = registry.list_backends()
+            assert "good" in names
+            assert "bad" not in names
+        finally:
+            get_registry().clear()
+
+    def test_all_backends_fail_raises_and_leaves_empty_registry(self, tmp_path, monkeypatch):
+        """When every backend fails, raise ValueError and leave no partial registry."""
+        from db_inspector_mcp.config import initialize_backends
+        from db_inspector_mcp.backends.registry import get_registry
+
+        self._clear_db_mcp_env(monkeypatch)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("DB_MCP_BAD_DATABASE", "sqlserver")
+        monkeypatch.setenv("DB_MCP_BAD_CONNECTION_STRING", "bad-conn")
+
+        get_registry().clear()
+
+        try:
+            with patch(
+                "db_inspector_mcp.config._create_backend",
+                side_effect=RuntimeError("driver missing"),
+            ):
+                with pytest.raises(ValueError, match="No database backends could be initialized"):
+                    initialize_backends()
+            assert get_registry().list_backends() == []
+        finally:
+            get_registry().clear()
+
