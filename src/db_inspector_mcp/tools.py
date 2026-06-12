@@ -670,7 +670,7 @@ def db_preview(query: str, max_rows: int = 100, database: str | None = None) -> 
     """
     Sample N rows from a query result to preview actual data.
     
-    **Requires data access permission** (set DB_MCP_ALLOW_DATA_ACCESS=true or DB_MCP_ALLOW_PREVIEW=true in .env).
+    **Requires data access permission** (set DB_MCP_ALLOW_DATA_ACCESS=true in .env).
     
     This tool executes your query and returns a limited number of actual data rows.
     Useful for spot-checking data quality and debugging.

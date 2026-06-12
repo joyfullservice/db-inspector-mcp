@@ -99,10 +99,9 @@ def check_data_access_permission(
     - db_preview: Fetches actual row data
     - db_compare_queries with compare_samples=True: Compares sample data
 
-    Per-connection overrides (``DB_MCP_<NAME>_ALLOW_DATA_ACCESS``,
-    ``DB_MCP_<NAME>_ALLOW_PREVIEW``) take precedence over the global
-    settings when *database* is provided.  If no per-connection variable
-    is set, the global value is used as a fallback.
+    Per-connection overrides (``DB_MCP_<NAME>_ALLOW_DATA_ACCESS``) take
+    precedence over the global setting when *database* is provided.  If no
+    per-connection variable is set, the global value is used as a fallback.
     
     Args:
         tool_name: Name of the tool being called
@@ -127,23 +126,10 @@ def check_data_access_permission(
         per_conn = env_map.get(f"DB_MCP_{name_upper}_ALLOW_DATA_ACCESS")
         if per_conn is not None:
             return per_conn.lower() == "true"
-
-        if tool_name == "db_preview":
-            per_conn_preview = env_map.get(f"DB_MCP_{name_upper}_ALLOW_PREVIEW")
-            if per_conn_preview is not None:
-                return per_conn_preview.lower() == "true"
     
     # --- global fallback ---
     allow_data_access = config.get("DB_MCP_ALLOW_DATA_ACCESS", "false").lower() == "true"
-    if allow_data_access:
-        return True
-    
-    if tool_name == "db_preview":
-        allow_preview = config.get("DB_MCP_ALLOW_PREVIEW", "false").lower() == "true"
-        if allow_preview:
-            return True
-    
-    return False
+    return allow_data_access
 
 
 def get_permission_error_message(tool_name: str, database: str | None = None) -> str:
@@ -175,7 +161,7 @@ def get_permission_error_message(tool_name: str, database: str | None = None) ->
     if tool_name == "db_preview":
         return (
             "Data access not authorized. "
-            "Set DB_MCP_ALLOW_DATA_ACCESS=true or DB_MCP_ALLOW_PREVIEW=true to enable db_preview."
+            "Set DB_MCP_ALLOW_DATA_ACCESS=true to enable db_preview."
         )
     
     return (

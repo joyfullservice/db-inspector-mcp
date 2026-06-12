@@ -79,6 +79,22 @@ contradictory guidance.
 
 ---
 
+## 2026-06-12 — Remove DB_MCP_ALLOW_PREVIEW flag
+
+**Trigger**: `DB_MCP_ALLOW_PREVIEW` (global) and `DB_MCP_<NAME>_ALLOW_PREVIEW` (per-connection) were redundant with `DB_MCP_ALLOW_DATA_ACCESS`. Every data-access operation gates on the `db_preview` tool name — including `db_compare_queries(compare_samples=True)` — so the narrower preview flag unlocked the same surface area as the global data-access flag.
+
+**Options explored**:
+- **Keep both as forward-looking scaffolding** — preserves a fine-grained slot for future data tools, but adds config surface and documentation burden for no current benefit.
+- **Remove ALLOW_PREVIEW** — single flag (`DB_MCP_ALLOW_DATA_ACCESS` + per-connection variant) for all data access. Simpler mental model; breaking change for anyone using only `ALLOW_PREVIEW`.
+
+**Decision**: Remove `DB_MCP_ALLOW_PREVIEW` and `DB_MCP_<NAME>_ALLOW_PREVIEW`. `DB_MCP_ALLOW_DATA_ACCESS` is the sole data-access gate. Users who relied on `ALLOW_PREVIEW` must switch to `ALLOW_DATA_ACCESS`.
+
+**What this rules out**: Per-tool data-access granularity until a new permission model is introduced (e.g. when additional data tools beyond preview/sample comparison are added). Would revisit if a second data tool needs independent gating.
+
+**Relevant files**: `security.py`, `config.py`, `tools.py`, `.env.example`, `README.md`, `tests/test_security.py`.
+
+---
+
 ## 2026-06-12 — db_tool FastMCP contract guards and Tool.run integration tests
 
 **Trigger**: Repeated regressions after the per-workspace `db_tool` wrapper landed:
@@ -471,6 +487,8 @@ Trade-off: ~500ms overhead per Access ODBC query (Python startup + `pyodbc.conne
 ---
 
 ## 2026-03-05 — Per-connection data access permissions
+
+> **⚠ Partially superseded** (2026-06-12): `DB_MCP_<NAME>_ALLOW_PREVIEW` and the global `DB_MCP_ALLOW_PREVIEW` fallback were removed as redundant with `_ALLOW_DATA_ACCESS`. Per-connection `_ALLOW_DATA_ACCESS` overrides remain. See "Remove DB_MCP_ALLOW_PREVIEW flag" above.
 
 **Trigger**: Data access flags (`DB_MCP_ALLOW_DATA_ACCESS`, `DB_MCP_ALLOW_PREVIEW`) applied globally to all connections. In multi-database configurations (e.g. migration from Access to SQL Server) users needed to allow data preview on a legacy connection while keeping it disabled on others.
 

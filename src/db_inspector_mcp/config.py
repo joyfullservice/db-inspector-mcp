@@ -160,7 +160,6 @@ def config_from_env(env_map: dict[str, str]) -> dict[str, Any]:
             env_map.get("DB_MCP_QUERY_TIMEOUT_SECONDS", "30"),
         ),
         "DB_MCP_ALLOW_DATA_ACCESS": env_map.get("DB_MCP_ALLOW_DATA_ACCESS", "false"),
-        "DB_MCP_ALLOW_PREVIEW": env_map.get("DB_MCP_ALLOW_PREVIEW", "false"),
         "DB_MCP_VERIFY_READONLY": env_map.get("DB_MCP_VERIFY_READONLY", "true"),
         "DB_MCP_READONLY_FAIL_ON_WRITE": env_map.get(
             "DB_MCP_READONLY_FAIL_ON_WRITE", "false",

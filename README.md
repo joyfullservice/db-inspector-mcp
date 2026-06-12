@@ -126,7 +126,6 @@ All configuration is done through environment variables, typically in a `.env` f
 | `DB_MCP_PROJECT_DIR` | Project directory for `.env` file lookup (see [User-Level Configuration](#user-level-configuration)) | auto-detected | No |
 | `DB_MCP_QUERY_TIMEOUT_SECONDS` | Query timeout in seconds | `30` | No |
 | `DB_MCP_ALLOW_DATA_ACCESS` | Global flag to enable data access tools | `false` | No |
-| `DB_MCP_ALLOW_PREVIEW` | Per-tool override for `db_preview` | `false` | No |
 | `DB_MCP_VERIFY_READONLY` | Verify read-only at startup | `true` | No |
 | `DB_MCP_READONLY_FAIL_ON_WRITE` | Fail startup if write permissions detected | `false` | No |
 
@@ -378,7 +377,7 @@ db_measure_query("SELECT * FROM large_table", max_rows=1000)
 
 #### `db_preview(sql, max_rows=100, database=None)`
 
-Sample N rows from a query result. Requires `DB_MCP_ALLOW_DATA_ACCESS=true` or `DB_MCP_ALLOW_PREVIEW=true`.
+Sample N rows from a query result. Requires `DB_MCP_ALLOW_DATA_ACCESS=true`.
 
 ```python
 db_preview("SELECT * FROM users ORDER BY created_at DESC", max_rows=10)
@@ -465,7 +464,7 @@ All SQL queries are validated to reject write operations (INSERT, UPDATE, DELETE
 
 Some tools require explicit authorization:
 
-- **`db_preview`**: Requires `DB_MCP_ALLOW_DATA_ACCESS=true` or `DB_MCP_ALLOW_PREVIEW=true`
+- **`db_preview`**: Requires `DB_MCP_ALLOW_DATA_ACCESS=true`
 - **`db_compare_queries` with `compare_samples=True`**: Requires data access permission
 
 Metadata tools (row counts, column schemas, execution plans) are always available.
