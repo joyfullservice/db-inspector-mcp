@@ -281,18 +281,18 @@ async def test_db_sql_help_access_distinct_mentions_distinctrow():
 
         topic = await db_sql_help(ctx=MagicMock(), topic="distinct")
 
-    assert topic["dialect"] == "access"
-    assert topic["topic"] == "distinct"
-    assert "DISTINCTROW" in topic["title"]
-    assert "DISTINCTROW" in topic["description"]
-    assert "DISTINCTROW" in topic["pattern"]
-    example_sqls = " ".join(ex["sql"] for ex in topic["examples"])
-    assert "DISTINCTROW" in example_sqls
+        assert topic["dialect"] == "access"
+        assert topic["topic"] == "distinct"
+        assert "DISTINCTROW" in topic["title"]
+        assert "DISTINCTROW" in topic["description"]
+        assert "DISTINCTROW" in topic["pattern"]
+        example_sqls = " ".join(ex["sql"] for ex in topic["examples"])
+        assert "DISTINCTROW" in example_sqls
 
-    summary = await db_sql_help(ctx=MagicMock(), topic="all")
-    assert "DISTINCTROW" in " ".join(summary["summary"].keys()) or any(
-        "DISTINCTROW" in v for v in summary["summary"].values()
-    )
+        summary = await db_sql_help(ctx=MagicMock(), topic="all")
+        assert "DISTINCTROW" in " ".join(summary["summary"].keys()) or any(
+            "DISTINCTROW" in v for v in summary["summary"].values()
+        )
 
 
 @pytest.mark.anyio
