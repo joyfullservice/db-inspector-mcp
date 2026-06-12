@@ -18,26 +18,14 @@ Append a new entry to the top of [DECISIONS.md](DECISIONS.md) following the form
 
 ## Running Tests
 
-This project uses a virtual environment. **Activate it before running tests:**
+This project uses [uv](https://docs.astral.sh/uv/) with a committed `uv.lock`. Sync the environment from the lockfile, then run tests through `uv run`:
 
 ```powershell
-# Windows (PowerShell)
-venv\Scripts\Activate.ps1
-pytest
+uv sync --frozen --extra dev
+uv run pytest -m "not integration"
 ```
 
-```bash
-# macOS/Linux
-source venv/bin/activate
-pytest
-```
-
-Or run pytest directly via the venv Python without activating:
-
-```powershell
-venv\Scripts\python.exe -m pytest          # Windows
-./venv/bin/python -m pytest                # macOS/Linux
-```
+`uv run` resolves the locked environment automatically, so no manual activation is needed. When you change dependencies in `pyproject.toml`, regenerate the lock with `uv lock` (or `uv lock --upgrade` to refresh resolutions) and commit `uv.lock`.
 
 ## Usage Logs
 

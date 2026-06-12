@@ -79,6 +79,40 @@ contradictory guidance.
 
 ---
 
+## 2026-06-12 — Adopt uv.lock + Dependabot + uv audit for dependency security
+
+**Trigger**: No automated signal existed for out-of-date or vulnerable dependencies. `pyproject.toml` used `>=` floors with no lock file, so CI and local dev resolved different trees, and nothing detected CVEs on a timer — a security update would only be noticed if someone manually ran an audit.
+
+**Options explored**:
+- **pip-compile (pip-tools) lock + pip-audit in CI** — mature and pip-native, but adds a second toolchain alongside the uv already used for end-user distribution (`uvx`). `pip-compile --generate-hashes` produces platform-specific lockfiles, awkward for the `pywin32; sys_platform == 'win32'` marker on Windows-only CI runners.
+- **Manifest-only with `>=` floors + manual `pip-audit`** — zero infra, but relies on remembering to run it; misses CVEs disclosed during quiet periods.
+- **uv.lock + Dependabot `uv` ecosystem + `uv audit` (chosen)** — single toolchain; Dependabot has native uv support (version updates GA; security updates shipped 2025-12-16). `uv.lock` is a universal cross-platform lockfile that resolves platform markers conditionally.
+
+**Decision**: Commit `uv.lock` for deterministic CI/dev resolution while keeping `pyproject.toml` floors unchanged for library/`uvx` consumers (the lock is a CI/dev artifact, not a constraint on consumers). Two detection layers: Dependabot (`uv` ecosystem, weekly, 7-day cooldown) as the passive detector that opens PRs/alerts, and a weekly scheduled `uv audit` CI job as the backstop that audits the full locked tree — including transitive deps, which Dependabot's uv dependency graph has historically parsed less reliably ([dependabot-core #11913](https://github.com/dependabot/dependabot-core/issues/11913)). Dev and CI both moved to uv (`uv sync --frozen`, `uv run`, `uv build`); the always-applied `.cursor/rules/testing.mdc` and docs were updated to match. No runtime/startup scanning — audits stay in CI only.
+
+**What this rules out**: pip-compile/pip-tools and the venv+`pip install -e ".[dev]"` dev flow for this repo. Revisit if Dependabot's uv security graph proves unreliable (the `uv audit` backstop is the safety net) or if a non-Windows CI matrix is added. `uv audit` is currently experimental (invoked with `--preview-features audit-command`); if its CLI changes, the fallback is `uv export --format requirements-txt | uvx pip-audit -r -`.
+
+**Relevant files**: `uv.lock`, `.github/dependabot.yml`, `.github/workflows/ci.yml`, `.github/workflows/publish.yml`, `CONTRIBUTING.md`, `AGENTS.md`, `README.md`, `.cursor/rules/testing.mdc`.
+
+---
+
+## 2026-06-12 — Robust workspace root discovery and failure logging
+
+**Trigger**: Intermittent failures loading `db-if-portal-sync` `.env` in Cursor: `db_list_databases` returned empty after MCP restarts. Cursor sends bare Windows paths in `roots/list`; MCP SDK validates with `FileUrl` and rejects them. Recovery via regex on Pydantic error strings was fragile, failures occurred before workspace logging initialized (invisible in `usage.jsonl`), and session→workspace cache could stick to a stale root when client roots changed.
+
+**Options explored**:
+- **Regex-only recovery on `list_roots()` failure** — already present; works in unit tests but brittle across Pydantic versions and invisible when other steps fail.
+- **Pre-validate by fetching raw `roots/list` JSON** — normalize bare paths to `file://` before `ListRootsResult` validation; also extract paths from Pydantic `ValidationError.errors()` and raw dict fallback.
+- **Log failures only to stderr** — visible in Cursor MCP Logs but not in `usage.jsonl`; rejected for cross-project debugging.
+
+**Decision**: Fetch raw `roots/list` when possible and normalize URIs before validation; layered fallback (Pydantic error inputs → regex → standard `list_roots()`). Log workspace resolution failures to default `~/.db-inspector-mcp/logs/usage.jsonl` before workspace logging is configured. Re-validate session cache against current client roots each call. Verbose stderr at each probe step.
+
+**What this rules out**: Relying solely on post-validation regex recovery. Unconditional session-root caching without checking current client roots. Assuming workspace failures will appear in per-project logs.
+
+**Relevant files**: `workspace.py`, `tools.py`, `usage_logging.py`, `tests/test_workspace.py`, `tests/test_logging.py`.
+
+---
+
 ## 2026-06-12 — Fail-closed read-only gate (single flag)
 
 **Trigger**: Two flags (`DB_MCP_VERIFY_READONLY` + `DB_MCP_READONLY_FAIL_ON_WRITE`) created a fail-open default: write-capable connections only warned, and inconclusive checks (timeout/error) silently passed even when the user expected a hard guard.

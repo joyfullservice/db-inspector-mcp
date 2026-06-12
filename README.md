@@ -288,24 +288,25 @@ For contributing or running from source, see [CONTRIBUTING.md](CONTRIBUTING.md).
 ```bash
 git clone https://github.com/joyfullservice/db-inspector-mcp.git
 cd db-inspector-mcp
-python -m venv venv
-venv\Scripts\activate        # Windows
-# source venv/bin/activate   # macOS/Linux
-pip install -e ".[dev]"
+uv sync --frozen --extra dev
 ```
 
-For development installs, use `python -m db_inspector_mcp.main` as the command in your MCP config:
+This project uses [uv](https://docs.astral.sh/uv/) with a committed `uv.lock`; `uv sync` creates a managed `.venv` and installs the project in editable mode. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow.
+
+For development installs, use `uv run python -m db_inspector_mcp.main` as the command in your MCP config:
 
 ```json
 {
   "mcpServers": {
     "db-inspector-mcp": {
-      "command": "python",
-      "args": ["-m", "db_inspector_mcp.main"]
+      "command": "uv",
+      "args": ["run", "--directory", "/absolute/path/to/db-inspector-mcp", "python", "-m", "db_inspector_mcp.main"]
     }
   }
 }
 ```
+
+Replace `/absolute/path/to/db-inspector-mcp` with your local clone path. `uv run` ensures the locked `.venv` is used regardless of the client's working directory.
 
 ### Troubleshooting
 

@@ -5,19 +5,25 @@ alwaysApply: true
 
 # Running Tests
 
-This project uses a `venv/` virtual environment. Always use the venv Python to run tests:
+This project uses [uv](https://docs.astral.sh/uv/) with a committed `uv.lock`. Always run tests through `uv run`:
 
 ```powershell
-# Correct — run pytest via venv Python (no activation needed)
-C:\Repos\db-inspector-mcp\venv\Scripts\python.exe -m pytest tests/ -v
+# Correct — uv resolves the locked env automatically (no activation needed)
+uv run pytest tests/ -v
 
 # Run a specific test file
-C:\Repos\db-inspector-mcp\venv\Scripts\python.exe -m pytest tests/test_config.py -v
+uv run pytest tests/test_config.py -v
+```
+
+If the environment is missing or out of sync, create it from the lockfile first:
+
+```powershell
+uv sync --frozen --extra dev
 ```
 
 Do NOT run bare `python -m pytest` or `pytest` — the system Python does not have project dependencies installed.
 
-Do NOT run `pip install` to fix missing dependencies — the venv already has everything installed.
+Do NOT run `pip install` to fix missing dependencies, and do NOT hand-edit `uv.lock` — use `uv sync` (and `uv lock` when dependencies change).
 
 # Shell Environment
 

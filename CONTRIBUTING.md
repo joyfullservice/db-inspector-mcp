@@ -4,41 +4,61 @@ This guide is for developers actively working on improving the db-inspector-mcp 
 
 ## Development Setup
 
-### 1. Clone and Install as Editable
+### 1. Clone and Sync with uv
+
+This project uses [uv](https://docs.astral.sh/uv/) with a committed `uv.lock` for reproducible dev and CI environments. Install uv first if you don't have it:
+
+```powershell
+# Windows
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+# macOS/Linux: curl -LsSf https://astral.sh/uv/install.sh | sh
+```
 
 ```bash
 git clone https://github.com/joyfullservice/db-inspector-mcp.git
 cd db-inspector-mcp
 
-# Create virtual environment
-python -m venv venv
-venv\Scripts\activate  # Windows
-# source venv/bin/activate  # macOS/Linux
-
-# Install in editable mode with dev dependencies
-pip install -e ".[dev]"
+# Create the locked environment with dev dependencies
+uv sync --frozen --extra dev
 ```
 
-**Why editable mode?** Changes to the source code take effect immediately without reinstalling. This also enables the usage logging feature to store logs within the project directory.
+`uv sync` creates a managed `.venv` and installs the project in editable mode, so source changes take effect immediately (this also enables the usage logging feature to store logs within the project directory). `--frozen` installs the exact versions pinned in `uv.lock` and fails if the lock is out of date.
+
+**When dependencies change:** edit the floors in `pyproject.toml`, then regenerate and commit the lock:
+
+```bash
+uv lock              # re-resolve after editing pyproject.toml
+uv lock --upgrade    # refresh all resolutions to the newest versions allowed by the floors
+```
 
 ### 2. Run Tests
 
+Run everything through `uv run` so it uses the locked environment (no manual activation needed):
+
 ```bash
 # Run default test suite (Access integration tests are opt-in)
-pytest
+uv run pytest
 
 # Run with coverage
-pytest --cov=db_inspector_mcp --cov-report=html
+uv run pytest --cov=db_inspector_mcp --cov-report=html
 
 # Run specific test file
-pytest tests/test_backends.py -v
+uv run pytest tests/test_backends.py -v
 
 # Skip integration tests even when Access is installed
-pytest -m "not integration"
+uv run pytest -m "not integration"
 
 # Access integration tests run automatically when Access is detected.
-# To force them off: DB_MCP_RUN_ACCESS_INTEGRATION=false pytest
-# To force them on:  DB_MCP_RUN_ACCESS_INTEGRATION=true  pytest
+# To force them off: DB_MCP_RUN_ACCESS_INTEGRATION=false uv run pytest
+# To force them on:  DB_MCP_RUN_ACCESS_INTEGRATION=true  uv run pytest
+```
+
+### 3. Audit Dependencies
+
+A weekly CI job and Dependabot watch for vulnerable dependencies, but you can run the same check locally against the lockfile:
+
+```bash
+uv audit --preview-features audit-command
 ```
 
 ## Usage Logging for Improvement Analysis
@@ -259,9 +279,9 @@ CI runs on push/PR and validates tests (excluding Access integration tests), pac
 
 2. **Verify quality gates locally:**
    ```bash
-   python -m pytest tests -v -m "not integration"
-   python -m build
-   twine check dist/*
+   uv run pytest tests -v -m "not integration"
+   uv build
+   uv run twine check dist/*
    ```
 
 3. **Commit and push** the version bump to `main`.
