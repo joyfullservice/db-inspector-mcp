@@ -607,40 +607,8 @@ class AccessODBCBackend(DatabaseBackend):
             return views
     
     def verify_readonly(self) -> dict[str, Any]:
-        """
-        Verify user has no write permissions.
-        
-        Note: Access databases opened via ODBC may have different permission models.
-        This checks if we can create temp tables (which should work even in read-only mode).
-        """
-        with self._connection() as conn:
-            cursor = conn.cursor()
-            
-            details = []
-            readonly = True
-            
-            try:
-                # Try to create a temp table
-                try:
-                    cursor.execute("CREATE TABLE #test_readonly (id INT)")
-                    cursor.execute("DROP TABLE #test_readonly")
-                    details.append("✓ Can create temp tables (expected for read-only)")
-                except Exception as e:
-                    details.append(f"✗ Cannot create temp tables: {str(e)}")
-                    readonly = False
-                
-                # Access doesn't have the same role-based security as SQL Server/PostgreSQL
-                # We can't easily check write permissions without trying to write
-                details.append("⚠ Access permission model differs from SQL Server/PostgreSQL")
-                details.append("⚠ Write permission checks are limited for Access databases")
-                
-            except Exception as e:
-                details.append(f"Error during verification: {str(e)}")
-                readonly = False
-            finally:
-                cursor.close()
-            
-            return {
-                "readonly": readonly,
-                "details": "\n".join(details),
-            }
+        """Access databases do not support role-based readonly verification."""
+        return {
+            "readonly": None,
+            "details": "Read-only verification is not supported for Access databases.",
+        }
