@@ -54,9 +54,9 @@ class BackendRegistry:
         if not self._backends:
             raise ValueError(
                 "No database backends are initialised. "
-                "Please call db_list_databases() first to trigger workspace detection, "
-                "or ensure a .env file with DB_MCP_DATABASE / DB_MCP_CONNECTION_STRING "
-                "exists in your project root."
+                "Ensure a .env file with DB_MCP_DATABASE / DB_MCP_CONNECTION_STRING "
+                "or DB_MCP_<name>_DATABASE / DB_MCP_<name>_CONNECTION_STRING "
+                "exists in the workspace root."
             )
 
         if name is None:

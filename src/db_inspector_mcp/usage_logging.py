@@ -5,16 +5,10 @@ Provides structured JSON logging for tool usage analytics and debugging.
 Logs are stored with automatic rotation.
 
 **Log Location Strategy:**
-- Development mode: Logs to {project_root}/logs/ within the source directory
-- Package mode: Logs to ~/.db-inspector-mcp/logs/
+- Default: ~/.db-inspector-mcp/logs/usage.jsonl (centralized across all workspaces)
+- Override: DB_MCP_LOG_DIR in a project's .env (relative paths resolve against workspace root)
 
-Development mode is detected when the source files are in a directory with
-pyproject.toml and src/ structure, indicating an editable install.
-
-This allows developers to:
-1. Collect usage logs from any client project using the tool
-2. Open the MCP source project in an editor
-3. Have agents analyze logs alongside source code to suggest improvements
+Each log entry includes workspace_root for per-project attribution in the shared log file.
 
 Configuration via environment variables:
 - DB_MCP_ENABLE_LOGGING: Set to "true" to enable logging (default: false)
@@ -37,6 +31,8 @@ from typing import Any, Callable
 _logging_enabled: bool | None = None
 _log_handler: RotatingFileHandler | None = None
 _log_file: Path | None = None
+_last_logging_fingerprint: tuple | None = None
+_workspace_root_for_logging: str | None = None
 
 
 def _is_development_install() -> bool:
@@ -84,30 +80,106 @@ def _get_project_root() -> Path | None:
 
 
 def _get_default_log_dir() -> Path:
-    """
-    Get the default log directory.
-    
-    - Development mode: {project_root}/logs/
-    - Package mode: ~/.db-inspector-mcp/logs/
-    """
-    project_root = _get_project_root()
-    
-    if project_root is not None:
-        # Development mode: log to project directory
-        return project_root / "logs"
+    """Centralized default log directory for all workspaces."""
+    return Path.home() / ".db-inspector-mcp" / "logs"
+
+
+def _logging_config_from_env_map(
+    env_map: dict[str, str], workspace_root: Path,
+) -> dict[str, Any]:
+    """Build logging configuration from a workspace env map."""
+    log_dir_raw = env_map.get("DB_MCP_LOG_DIR", "").strip()
+    if log_dir_raw:
+        log_dir_path = Path(log_dir_raw)
+        if not log_dir_path.is_absolute():
+            log_dir_path = (workspace_root / log_dir_path).resolve()
+        log_dir = str(log_dir_path)
     else:
-        # Package mode: log to user's home directory
-        return Path.home() / ".db-inspector-mcp" / "logs"
+        log_dir = str(_get_default_log_dir())
+
+    return {
+        "enabled": env_map.get("DB_MCP_ENABLE_LOGGING", "false").lower() == "true",
+        "log_dir": log_dir,
+        "max_size_mb": int(env_map.get("DB_MCP_LOG_MAX_SIZE_MB", "10")),
+        "backup_count": int(env_map.get("DB_MCP_LOG_BACKUP_COUNT", "5")),
+    }
+
+
+def _logging_fingerprint(config: dict[str, Any]) -> tuple:
+    return (
+        config["enabled"],
+        config["log_dir"],
+        config["max_size_mb"],
+        config["backup_count"],
+    )
+
+
+def refresh_logging_from_env(env_map: dict[str, str], workspace_root: Path) -> bool:
+    """Apply per-workspace logging settings; return True if logging is active."""
+    global _workspace_root_for_logging
+
+    config = _logging_config_from_env_map(env_map, workspace_root)
+    fingerprint = _logging_fingerprint(config)
+    _workspace_root_for_logging = str(workspace_root.resolve())
+
+    global _last_logging_fingerprint
+    if fingerprint != _last_logging_fingerprint:
+        reset_logging()
+        _last_logging_fingerprint = fingerprint
+
+    if not config["enabled"]:
+        return False
+
+    return _initialize_logging_from_config(config)
 
 
 def _get_logging_config() -> dict[str, Any]:
-    """Load logging configuration from environment variables."""
+    """Load logging configuration from process environment (fallback)."""
     return {
         "enabled": os.getenv("DB_MCP_ENABLE_LOGGING", "false").lower() == "true",
-        "log_dir": os.getenv("DB_MCP_LOG_DIR", ""),
+        "log_dir": os.getenv("DB_MCP_LOG_DIR", "") or str(_get_default_log_dir()),
         "max_size_mb": int(os.getenv("DB_MCP_LOG_MAX_SIZE_MB", "10")),
         "backup_count": int(os.getenv("DB_MCP_LOG_BACKUP_COUNT", "5")),
     }
+
+
+def _initialize_logging_from_config(config: dict[str, Any]) -> bool:
+    """Initialize logging from a resolved config dict."""
+    global _logging_enabled, _log_handler, _log_file
+
+    if _logging_enabled is True and _log_handler is not None:
+        return True
+
+    if not config["enabled"]:
+        return False
+
+    log_dir = Path(config["log_dir"])
+    if not _ensure_log_dir(log_dir):
+        _logging_enabled = False
+        return False
+
+    _log_file = log_dir / "usage.jsonl"
+    max_bytes = config["max_size_mb"] * 1024 * 1024
+
+    try:
+        _log_handler = RotatingFileHandler(
+            filename=str(_log_file),
+            maxBytes=max_bytes,
+            backupCount=config["backup_count"],
+            encoding="utf-8",
+        )
+        _logging_enabled = True
+        _write_log_entry({
+            "event": "logging_initialized",
+            "log_file": str(_log_file),
+            "max_size_mb": config["max_size_mb"],
+            "backup_count": config["backup_count"],
+        })
+        return True
+    except Exception as e:
+        print(f"Warning: Could not initialize logging: {e}", file=sys.stderr)
+        _logging_enabled = False
+        return False
 
 
 def _ensure_log_dir(log_dir: Path) -> bool:
@@ -126,78 +198,22 @@ def _ensure_log_dir(log_dir: Path) -> bool:
 
 
 def _initialize_logging() -> bool:
-    """
-    Initialize the logging system.
-    
-    Returns:
-        True if logging is enabled and initialized, False otherwise.
-    """
-    global _logging_enabled, _log_handler, _log_file
-    
-    # Already successfully initialized -- skip re-init.
+    """Initialize logging from process env (fallback when no workspace context)."""
+    global _logging_enabled
+
     if _logging_enabled is True:
         return True
 
     config = _get_logging_config()
-
     if not config["enabled"]:
-        # Do NOT cache False: in the lazy-init path the .env file hasn't
-        # been loaded yet, so the env var is absent.  Leaving
-        # _logging_enabled as None lets us re-check on the next call once
-        # load_config() has populated the environment.
         return False
-    
-    # Determine log directory
-    if config["log_dir"]:
-        log_dir = Path(config["log_dir"])
-    else:
-        log_dir = _get_default_log_dir()
-    
-    # Ensure directory exists
-    if not _ensure_log_dir(log_dir):
-        _logging_enabled = False
-        return False
-    
-    # Create log file path
-    _log_file = log_dir / "usage.jsonl"
-    
-    # Calculate max bytes from MB
-    max_bytes = config["max_size_mb"] * 1024 * 1024
-    
-    try:
-        # Create rotating file handler
-        _log_handler = RotatingFileHandler(
-            filename=str(_log_file),
-            maxBytes=max_bytes,
-            backupCount=config["backup_count"],
-            encoding="utf-8",
-        )
-        _logging_enabled = True
-        
-        # Log initialization
-        _write_log_entry({
-            "event": "logging_initialized",
-            "log_file": str(_log_file),
-            "max_size_mb": config["max_size_mb"],
-            "backup_count": config["backup_count"],
-        })
-        
-        return True
-        
-    except Exception as e:
-        print(f"Warning: Could not initialize logging: {e}", file=sys.stderr)
-        _logging_enabled = False
-        return False
+
+    return _initialize_logging_from_config(config)
 
 
 def reset_logging() -> None:
-    """Clear logging state so it re-initializes from fresh env vars.
-
-    Called by :func:`config.load_config` when a ``.env`` file change is
-    detected, ensuring that logging configuration changes (enable/disable,
-    log directory, rotation settings) take effect without a server restart.
-    """
-    global _logging_enabled, _log_handler, _log_file
+    """Clear logging state so it re-initializes from fresh workspace settings."""
+    global _logging_enabled, _log_handler, _log_file, _last_logging_fingerprint
     if _log_handler is not None:
         try:
             _log_handler.close()
@@ -206,6 +222,7 @@ def reset_logging() -> None:
     _logging_enabled = None
     _log_handler = None
     _log_file = None
+    _last_logging_fingerprint = None
 
 
 def _write_log_entry(entry: dict[str, Any]) -> None:
@@ -251,6 +268,7 @@ def log_tool_call(
     execution_time_ms: float | None = None,
     database: str | None = None,
     dialect: str | None = None,
+    workspace_root: str | None = None,
 ) -> None:
     """
     Log a tool call with its parameters and result.
@@ -264,7 +282,7 @@ def log_tool_call(
         database: Database name used
         dialect: SQL dialect (access, mssql, postgres)
     """
-    if not _initialize_logging():
+    if not _logging_enabled:
         return
     
     # Truncate large parameters (like long SQL queries)
@@ -275,6 +293,7 @@ def log_tool_call(
         "tool": tool_name,
         "database": database,
         "dialect": dialect,
+        "workspace_root": workspace_root or _workspace_root_for_logging,
         "parameters": sanitized_params,
         "success": error is None,
         "execution_time_ms": execution_time_ms,
@@ -426,8 +445,8 @@ def with_logging(tool_name: str):
         database = kwargs.get("database")
         dialect = None
         try:
-            from .backends.registry import get_registry
-            registry = get_registry()
+            from .config import current_registry
+            registry = current_registry()
             if registry.list_backends():
                 backend = registry.get(database)
                 dialect = getattr(backend, "sql_dialect", None)
@@ -451,6 +470,7 @@ def with_logging(tool_name: str):
             execution_time_ms=round(execution_time_ms, 2),
             database=database,
             dialect=dialect,
+            workspace_root=_workspace_root_for_logging,
         )
 
     def _check_serialization(result):
@@ -482,7 +502,7 @@ def with_logging(tool_name: str):
         if _inspect.iscoroutinefunction(func):
             @functools.wraps(func)
             async def async_wrapper(*args, **kwargs) -> Any:
-                if not _initialize_logging():
+                if not _logging_enabled:
                     return await func(*args, **kwargs)
 
                 start_time = time.time()
@@ -503,7 +523,7 @@ def with_logging(tool_name: str):
         else:
             @functools.wraps(func)
             def wrapper(*args, **kwargs) -> Any:
-                if not _initialize_logging():
+                if not _logging_enabled:
                     return func(*args, **kwargs)
 
                 start_time = time.time()

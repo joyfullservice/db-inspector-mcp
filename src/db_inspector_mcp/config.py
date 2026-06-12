@@ -2,59 +2,75 @@
 
 import os
 import re
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 
 from .backends.base import DatabaseBackend
 from .backends.registry import BackendRegistry, get_registry
 from .security import check_data_access_permission, get_permission_error_message
 
+# Per-tool-call workspace context (set by db_tool decorator).
+_workspace_ctx: ContextVar[tuple[BackendRegistry, dict[str, str]] | None] = ContextVar(
+    "workspace_ctx", default=None,
+)
+
+
+def current_registry() -> BackendRegistry:
+    """Return the registry for the active workspace tool call."""
+    ctx = _workspace_ctx.get()
+    if ctx is not None:
+        return ctx[0]
+    return get_registry()
+
+
+def current_env() -> dict[str, str]:
+    """Return the env map for the active workspace tool call."""
+    ctx = _workspace_ctx.get()
+    if ctx is not None:
+        return ctx[1]
+    root = _find_project_root()
+    return parse_workspace_env(root)
+
+
+def set_workspace_context(
+    registry: BackendRegistry, env_map: dict[str, str],
+) -> object:
+    """Set workspace context; returns token for reset."""
+    return _workspace_ctx.set((registry, env_map))
+
+
+def reset_workspace_context(token: object) -> None:
+    """Restore previous workspace context."""
+    _workspace_ctx.reset(token)
+
 
 def _find_project_root() -> Path:
     """
     Find the project root by searching for .env file or common project markers.
-    
+
     Resolution order:
     1. ``DB_MCP_PROJECT_DIR`` env-var (explicit override)
     2. Upward search from the current working directory
     3. Upward search from the installed package location
     4. Falls back to the current working directory
-    
-    When Cursor (or another IDE) launches the MCP server, it normally sets
-    the working directory to the open workspace root — so the automatic
-    search finds the project's ``.env`` file even when the server is
-    configured at the *user* level.  ``DB_MCP_PROJECT_DIR`` is available as
-    a fallback for environments where the working directory is not set to
-    the project root.
-    
-    For each starting point the function walks up the directory tree looking
-    for:
-    * ``.env`` — primary indicator
-    * ``.cursor/mcp.json`` — MCP configuration
-    * ``pyproject.toml`` — Python project marker
-    
-    Returns:
-        Path to project root, or current working directory if not found
     """
     import sys
-    
-    # 1. Explicit override via DB_MCP_PROJECT_DIR
+
     explicit_dir = os.getenv("DB_MCP_PROJECT_DIR")
     if explicit_dir:
         explicit_path = Path(explicit_dir).resolve()
         if explicit_path.is_dir():
             return explicit_path
-        else:
-            print(
-                f"Warning: DB_MCP_PROJECT_DIR points to a non-existent directory: {explicit_dir}",
-                file=sys.stderr,
-            )
-    
-    # 2–3. Automatic search from CWD and package location
+        print(
+            f"Warning: DB_MCP_PROJECT_DIR points to a non-existent directory: {explicit_dir}",
+            file=sys.stderr,
+        )
+
     search_roots = [Path.cwd().resolve()]
-    
+
     try:
         package_dir = Path(__file__).parent.parent.parent.resolve()
         if (package_dir.parent / "pyproject.toml").exists():
@@ -62,7 +78,7 @@ def _find_project_root() -> Path:
         search_roots.append(package_dir.parent)
     except Exception:
         pass
-    
+
     for root in search_roots:
         current = root
         while current != current.parent:
@@ -73,297 +89,111 @@ def _find_project_root() -> Path:
             if (current / "pyproject.toml").exists():
                 return current
             current = current.parent
-    
-    # 4. Fall back to current working directory
+
     return Path.cwd().resolve()
 
 
-_env_loaded = False
-_is_reload = False
-_project_root: Path | None = None
-_env_mtimes: dict[str, float] = {}  # path -> mtime at last load
+def parse_workspace_env(directory: Path) -> dict[str, str]:
+    """Parse workspace .env files into a dict without mutating os.environ.
 
-
-def _get_project_root() -> Path:
-    """Return the stored project root, falling back to discovery."""
-    if _project_root is not None:
-        return _project_root
-    return _find_project_root()
-
-
-def _record_env_mtimes() -> None:
-    """Store the modification times of loaded .env files for hot-reload detection."""
-    global _env_mtimes
-    _env_mtimes.clear()
-    root = _get_project_root()
-    for name in (".env", ".env.local"):
-        path = root / name
-        if path.exists():
-            try:
-                _env_mtimes[str(path)] = path.stat().st_mtime
-            except OSError:
-                pass
-
-
-def _check_env_reload() -> bool:
-    """Compare current .env mtimes against stored values, trigger reload if changed.
-
-    Returns True if a reload was triggered (``_env_loaded`` reset to False).
+    Layering: ``.env`` <- ``.env.local`` <- explicit ``DB_MCP_*`` from process
+    env (preserves mcp.json env-section precedence).
     """
-    global _env_loaded, _is_reload
-    if not _env_loaded or not _env_mtimes:
-        return False
+    directory = directory.resolve()
+    env_map: dict[str, str] = {}
 
-    for path_str, old_mtime in _env_mtimes.items():
-        try:
-            current_mtime = Path(path_str).stat().st_mtime
-            if current_mtime != old_mtime:
-                _env_loaded = False
-                _is_reload = True
-                _env_mtimes.clear()
-                return True
-        except OSError:
-            pass
-
-    return False
-
-
-def _snapshot_backend_env() -> dict[str, str]:
-    """Capture current backend-related env vars for change detection."""
-    snapshot: dict[str, str] = {}
-    for key, value in os.environ.items():
-        upper = key.upper()
-        if upper.startswith("DB_MCP_") and (
-            upper.endswith("_DATABASE")
-            or upper.endswith("_CONNECTION_STRING")
-            or upper == "DB_MCP_DATABASE"
-            or upper == "DB_MCP_CONNECTION_STRING"
-            or upper == "DB_MCP_QUERY_TIMEOUT_SECONDS"
-        ):
-            snapshot[key] = value
-    return snapshot
-
-
-def _load_env_files() -> None:
-    """
-    Load .env files from the project root.
-    
-    Searches for project root by looking for .env file or project markers,
-    then loads:
-    1. .env (base configuration)
-    2. .env.local (local overrides, if exists)
-    
-    Environment variables already set (e.g., from MCP server env section) take precedence.
-    
-    Prints diagnostic messages to stderr so users can verify which files were
-    loaded (visible in Cursor's MCP server output pane).
-    """
-    global _env_loaded, _is_reload, _project_root
-    if _env_loaded:
-        return
-    _env_loaded = True
-
-    import sys
-
-    reloading = _is_reload
-    _is_reload = False
-    
-    project_root = _find_project_root()
-    _project_root = project_root
-    cwd = Path.cwd().resolve()
-
-    if not reloading:
-        print(f"Working directory: {cwd}", file=sys.stderr)
-        if os.getenv("DB_MCP_PROJECT_DIR"):
-            print(f"DB_MCP_PROJECT_DIR: {os.getenv('DB_MCP_PROJECT_DIR')}", file=sys.stderr)
-        print(f"Resolved project root: {project_root}", file=sys.stderr)
-    
-    # On reload, use override=True so edited values replace old ones.
-    # On first load, override=False preserves MCP env-section precedence.
-    env_override = reloading
-
-    # Load .env file if it exists
-    env_path = project_root / ".env"
-    if env_path.exists():
-        result = load_dotenv(str(env_path), override=env_override)
-        if result:
-            label = "Reloaded" if reloading else "Loaded"
-            print(f"{label} .env from {env_path}", file=sys.stderr)
-        elif not reloading:
-            print(
-                f"Warning: .env file exists at {env_path} but no new variables were loaded "
-                f"(they may already be set via mcp.json env section)",
-                file=sys.stderr,
-            )
-    elif not reloading:
-        print(
-            f"No .env file found at {env_path} — "
-            f"if this is unexpected, set DB_MCP_PROJECT_DIR to your project path",
-            file=sys.stderr,
-        )
-    
-    # Load .env.local if it exists (always overrides)
-    env_local_path = project_root / ".env.local"
-    if env_local_path.exists():
-        load_dotenv(str(env_local_path), override=True)
-        label = "Reloaded" if reloading else "Loaded"
-        print(f"{label} .env.local from {env_local_path}", file=sys.stderr)
-
-    _record_env_mtimes()
-
-
-def _load_env_from_directory(directory: Path) -> bool:
-    """Load .env and .env.local from an explicit directory.
-
-    Returns True if at least one file was loaded.
-    """
-    global _project_root
-    import sys
-
-    _project_root = directory.resolve()
-    loaded = False
     env_path = directory / ".env"
     if env_path.exists():
-        result = load_dotenv(str(env_path), override=False)
-        if result:
-            print(f"Loaded .env from {env_path}", file=sys.stderr)
-            loaded = True
-        else:
-            print(
-                f"Warning: .env file exists at {env_path} but no new variables were loaded "
-                f"(they may already be set via mcp.json env section)",
-                file=sys.stderr,
-            )
+        for key, value in dotenv_values(env_path).items():
+            if key and value is not None:
+                env_map[key] = value
 
     env_local_path = directory / ".env.local"
     if env_local_path.exists():
-        load_dotenv(str(env_local_path), override=True)
-        print(f"Loaded .env.local from {env_local_path}", file=sys.stderr)
-        loaded = True
+        for key, value in dotenv_values(env_local_path).items():
+            if key and value is not None:
+                env_map[key] = value
 
-    _record_env_mtimes()
-    return loaded
+    for key, value in os.environ.items():
+        if key.startswith("DB_MCP_"):
+            env_map[key] = value
+
+    return env_map
 
 
-def initialize_from_workspace(workspace_path: Path) -> "BackendRegistry":
-    """Initialize backends from a workspace directory discovered via MCP roots.
+def record_env_mtimes(directory: Path) -> dict[str, float]:
+    """Return mtimes for .env and .env.local in *directory*."""
+    mtimes: dict[str, float] = {}
+    for name in (".env", ".env.local"):
+        path = directory / name
+        if path.exists():
+            try:
+                mtimes[str(path.resolve())] = path.stat().st_mtime
+            except OSError:
+                pass
+    return mtimes
 
-    This is the *lazy-init* path used when the server starts without a
-    ``.env`` file (e.g. user-level MCP configuration where the working
-    directory is not the project root).
 
-    Args:
-        workspace_path: Absolute path to the workspace root provided by the
-            MCP client (Cursor / VS Code).
+def env_files_changed(directory: Path, stored_mtimes: dict[str, float]) -> bool:
+    """Return True if any tracked .env file mtime differs from *stored_mtimes*."""
+    if not stored_mtimes:
+        return False
+    current = record_env_mtimes(directory)
+    for path_str, old_mtime in stored_mtimes.items():
+        try:
+            if Path(path_str).stat().st_mtime != old_mtime:
+                return True
+        except OSError:
+            return True
+    for path_str in current:
+        if path_str not in stored_mtimes:
+            return True
+    return False
 
-    Returns:
-        The populated ``BackendRegistry``.
 
-    Raises:
-        ValueError: If no database configuration is found in the workspace.
-    """
-    global _project_root
-    import sys
-
-    workspace_path = workspace_path.resolve()
-    _project_root = workspace_path
-    print(f"Lazy init: loading .env from workspace root {workspace_path}", file=sys.stderr)
-
-    _load_env_from_directory(workspace_path)
-    return initialize_backends()
+def config_from_env(env_map: dict[str, str]) -> dict[str, Any]:
+    """Build configuration dict from a parsed workspace env map."""
+    return {
+        "DB_MCP_DATABASE": env_map.get("DB_MCP_DATABASE", "").lower(),
+        "DB_MCP_CONNECTION_STRING": env_map.get("DB_MCP_CONNECTION_STRING", ""),
+        "DB_MCP_QUERY_TIMEOUT_SECONDS": int(
+            env_map.get("DB_MCP_QUERY_TIMEOUT_SECONDS", "30"),
+        ),
+        "DB_MCP_ALLOW_DATA_ACCESS": env_map.get("DB_MCP_ALLOW_DATA_ACCESS", "false"),
+        "DB_MCP_ALLOW_PREVIEW": env_map.get("DB_MCP_ALLOW_PREVIEW", "false"),
+        "DB_MCP_VERIFY_READONLY": env_map.get("DB_MCP_VERIFY_READONLY", "true"),
+        "DB_MCP_READONLY_FAIL_ON_WRITE": env_map.get(
+            "DB_MCP_READONLY_FAIL_ON_WRITE", "false",
+        ),
+        "DB_MCP_ENABLE_LOGGING": (
+            env_map.get("DB_MCP_ENABLE_LOGGING", "false").lower() == "true"
+        ),
+        "DB_MCP_LOG_DIR": env_map.get("DB_MCP_LOG_DIR", ""),
+        "DB_MCP_LOG_MAX_SIZE_MB": int(env_map.get("DB_MCP_LOG_MAX_SIZE_MB", "10")),
+        "DB_MCP_LOG_BACKUP_COUNT": int(env_map.get("DB_MCP_LOG_BACKUP_COUNT", "5")),
+    }
 
 
 def load_config() -> dict[str, Any]:
-    """
-    Load configuration from environment variables.
-    
-    Automatically loads .env and .env.local files from the project root.
-    Environment variables passed via MCP server env section take precedence.
-
-    On subsequent calls the .env file modification time is checked; if the
-    file was edited since last load the environment is refreshed
-    automatically (hot-reload).  When backend-related variables change the
-    database backends are re-initialized.
-    
-    Returns:
-        Dictionary with configuration values
-    """
-    import sys
-
-    # Snapshot backend env vars before a potential reload so we can detect changes.
-    old_backend_env = _snapshot_backend_env() if _env_loaded else None
-
-    # Check for .env file changes and trigger reload if needed.
-    reloaded = _check_env_reload()
-
-    # Load .env files (first load or reload).
-    _load_env_files()
-
-    config = {
-        "DB_MCP_DATABASE": os.getenv("DB_MCP_DATABASE", "").lower(),
-        "DB_MCP_CONNECTION_STRING": os.getenv("DB_MCP_CONNECTION_STRING", ""),
-        "DB_MCP_QUERY_TIMEOUT_SECONDS": int(os.getenv("DB_MCP_QUERY_TIMEOUT_SECONDS", "30")),
-        "DB_MCP_ALLOW_DATA_ACCESS": os.getenv("DB_MCP_ALLOW_DATA_ACCESS", "false"),
-        "DB_MCP_ALLOW_PREVIEW": os.getenv("DB_MCP_ALLOW_PREVIEW", "false"),
-        "DB_MCP_VERIFY_READONLY": os.getenv("DB_MCP_VERIFY_READONLY", "true"),
-        "DB_MCP_READONLY_FAIL_ON_WRITE": os.getenv("DB_MCP_READONLY_FAIL_ON_WRITE", "false"),
-        # Logging configuration
-        "DB_MCP_ENABLE_LOGGING": os.getenv("DB_MCP_ENABLE_LOGGING", "false").lower() == "true",
-        "DB_MCP_LOG_DIR": os.getenv("DB_MCP_LOG_DIR", ""),
-        "DB_MCP_LOG_MAX_SIZE_MB": int(os.getenv("DB_MCP_LOG_MAX_SIZE_MB", "10")),
-        "DB_MCP_LOG_BACKUP_COUNT": int(os.getenv("DB_MCP_LOG_BACKUP_COUNT", "5")),
-    }
-
-    if reloaded:
-        # Always reset logging so changes to DB_MCP_ENABLE_LOGGING,
-        # DB_MCP_LOG_DIR, etc. take effect even when backend config is
-        # unchanged.
-        from .usage_logging import reset_logging
-        reset_logging()
-
-        if old_backend_env is not None:
-            new_backend_env = _snapshot_backend_env()
-            if new_backend_env != old_backend_env:
-                print("Backend configuration changed — re-initializing backends…", file=sys.stderr)
-                registry = get_registry()
-                registry.clear()
-
-                # Reset lazy-init flag in tools module so workspace detection
-                # doesn't get skipped after a registry clear.
-                _reset_lazy_init()
-
-                try:
-                    initialize_backends()
-                    from .main import _verify_readonly
-                    _verify_readonly(config, get_registry())
-                except Exception as exc:
-                    print(f"Warning: backend re-init after .env reload failed: {exc}", file=sys.stderr)
-            else:
-                print("Configuration reloaded (no backend changes).", file=sys.stderr)
-
-    return config
+    """Load configuration from the discovered project root (eager/fallback path)."""
+    root = _find_project_root()
+    return config_from_env(parse_workspace_env(root))
 
 
-def _reset_lazy_init() -> None:
-    """Reset the lazy-init flag in the tools module.
-
-    Called after a backend re-initialization so that the workspace
-    detection path is available again if needed.
-    """
-    try:
-        from . import tools as _tools_mod
-        _tools_mod._lazy_init_attempted = False
-    except Exception:
-        pass
+def _get_access_conn_ttl(env_map: dict[str, str]) -> float | None:
+    """Read the Access ODBC connection TTL from a workspace env map."""
+    raw = env_map.get("DB_MCP_ACCESS_CONN_TTL")
+    if raw is not None:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return None
 
 
-def _get_access_conn_ttl() -> float | None:
-    """Read the Access ODBC connection TTL from the environment.
-
-    Returns:
-        TTL in seconds, or None to use the backend default (5 s).
-    """
-    raw = os.getenv("DB_MCP_ACCESS_CONN_TTL")
+def _get_access_connect_timeout(env_map: dict[str, str]) -> float | None:
+    """Read the Access ODBC connect timeout from a workspace env map."""
+    raw = env_map.get("DB_MCP_ACCESS_CONNECT_TIMEOUT")
     if raw is not None:
         try:
             return float(raw)
@@ -378,12 +208,7 @@ _ACCESS_BACKENDS = {"access_odbc", "access_com"}
 def _resolve_connection_string_paths(
     connection_string: str, backend_type: str, base_dir: Path,
 ) -> str:
-    """Resolve relative database file paths in a connection string.
-
-    For Access backends, the ``DBQ=`` value (or a bare file path) is resolved
-    against *base_dir* when it is not already absolute.  Other backend types
-    are returned unchanged.
-    """
+    """Resolve relative database file paths in a connection string."""
     import sys
 
     if backend_type.lower() not in _ACCESS_BACKENDS:
@@ -411,7 +236,6 @@ def _resolve_connection_string_paths(
                     file=sys.stderr,
                 )
     elif not re.search(r"Driver\s*=", connection_string, re.IGNORECASE):
-        # Bare file path (no DBQ=, no Driver=)
         db_path = Path(connection_string.strip())
         if not db_path.is_absolute():
             resolved = (base_dir / db_path).resolve()
@@ -429,154 +253,86 @@ def _resolve_connection_string_paths(
     return connection_string
 
 
-def _create_backend(backend_type: str, connection_string: str, query_timeout: int) -> DatabaseBackend:
-    """
-    Create a backend instance based on type.
-    
-    Args:
-        backend_type: Type of backend (sqlserver, postgres, access_odbc, access_com)
-        connection_string: Database connection string
-        query_timeout: Query timeout in seconds
-        
-    Returns:
-        DatabaseBackend instance
-        
-    Raises:
-        ValueError: If backend type is unsupported
-    """
+def _create_backend(
+    backend_type: str,
+    connection_string: str,
+    query_timeout: int,
+    env_map: dict[str, str],
+) -> DatabaseBackend:
+    """Create a backend instance based on type."""
     backend_type = backend_type.lower()
-    
+    conn_ttl = _get_access_conn_ttl(env_map)
+    connect_timeout = _get_access_connect_timeout(env_map)
+
     if backend_type == "sqlserver":
         from .backends.mssql import MSSQLBackend
         return MSSQLBackend(connection_string, query_timeout)
-    elif backend_type == "postgres":
+    if backend_type == "postgres":
         from .backends.postgres import PostgresBackend
         return PostgresBackend(connection_string, query_timeout)
-    elif backend_type == "access_odbc":
+    if backend_type == "access_odbc":
         from .backends.access_odbc import AccessODBCBackend
-        conn_ttl = _get_access_conn_ttl()
-        return AccessODBCBackend(connection_string, query_timeout, conn_ttl)
-    elif backend_type == "access_com":
+        return AccessODBCBackend(
+            connection_string, query_timeout, conn_ttl, connect_timeout,
+        )
+    if backend_type == "access_com":
         from .backends.access_com import AccessCOMBackend
-        conn_ttl = _get_access_conn_ttl()
         return AccessCOMBackend(connection_string, query_timeout, conn_ttl)
-    else:
-        raise ValueError(
-            f"Unsupported backend: {backend_type}. "
-            "Supported backends: sqlserver, postgres, access_odbc, access_com"
-        )
-
-
-def get_backend() -> DatabaseBackend:
-    """
-    Create and return a database backend based on configuration.
-    
-    This function maintains backward compatibility with single-database configuration.
-    For multi-database support, use initialize_backends() instead.
-    
-    Returns:
-        DatabaseBackend instance
-        
-    Raises:
-        ValueError: If backend is not specified or invalid
-        ValueError: If connection string is missing
-    """
-    config = load_config()
-    
-    backend_name = config["DB_MCP_DATABASE"]
-    connection_string = config["DB_MCP_CONNECTION_STRING"]
-    query_timeout = config["DB_MCP_QUERY_TIMEOUT_SECONDS"]
-    
-    if not backend_name:
-        raise ValueError(
-            "DB_MCP_DATABASE environment variable is required. "
-            "Set DB_MCP_DATABASE=sqlserver, postgres, access_odbc, or access_com"
-        )
-    
-    if not connection_string:
-        raise ValueError(
-            "DB_MCP_CONNECTION_STRING environment variable is required. "
-            "Provide a valid database connection string."
-        )
-    
-    connection_string = _resolve_connection_string_paths(
-        connection_string, backend_name, _get_project_root(),
+    raise ValueError(
+        f"Unsupported backend: {backend_type}. "
+        "Supported backends: sqlserver, postgres, access_odbc, access_com"
     )
-    return _create_backend(backend_name, connection_string, query_timeout)
 
 
-def initialize_backends() -> BackendRegistry:
-    """
-    Initialize multiple database backends from environment variables.
-    
-    Supports two configuration patterns:
-    1. Single database: DB_MCP_DATABASE, DB_MCP_CONNECTION_STRING (registered as "default")
-    2. Multi-database: DB_MCP_<name>_DATABASE, DB_MCP_<name>_CONNECTION_STRING for each database
-    
-    Examples:
-        # Single database
-        DB_MCP_DATABASE=sqlserver
-        DB_MCP_CONNECTION_STRING=...
-        
-        # Multiple databases
-        DB_MCP_LEGACY_DATABASE=access
-        DB_MCP_LEGACY_CONNECTION_STRING=...
-        DB_MCP_NEW_DATABASE=sqlserver
-        DB_MCP_NEW_CONNECTION_STRING=...
-        
-    Returns:
-        BackendRegistry with all configured backends
-        
-    Raises:
-        ValueError: If configuration is invalid
-    """
-    import sys
-    
-    registry = get_registry()
-    config = load_config()
-    query_timeout = config["DB_MCP_QUERY_TIMEOUT_SECONDS"]
-    
-    # Collect all database configurations
+def _collect_db_configs(env_map: dict[str, str]) -> dict[str, dict[str, str]]:
+    """Collect database configurations from a workspace env map."""
     db_configs: dict[str, dict[str, str]] = {}
-    
-    # Check for single-database configuration
-    if config["DB_MCP_DATABASE"] and config["DB_MCP_CONNECTION_STRING"]:
+
+    database = env_map.get("DB_MCP_DATABASE", "").lower()
+    connection_string = env_map.get("DB_MCP_CONNECTION_STRING", "")
+    if database and connection_string:
         db_configs["default"] = {
-            "backend": config["DB_MCP_DATABASE"],
-            "connection_string": config["DB_MCP_CONNECTION_STRING"],
+            "backend": database,
+            "connection_string": connection_string,
         }
-    
-    # Scan for multi-database configurations (DB_MCP_<name>_DATABASE pattern)
-    env_vars = dict(os.environ)
-    for key, value in env_vars.items():
+
+    for key, value in env_map.items():
         if key.startswith("DB_MCP_") and key.endswith("_DATABASE"):
-            # Extract database name (e.g., "LEGACY" from "DB_MCP_LEGACY_DATABASE")
-            # Remove "DB_MCP_" prefix (7 chars) and "_DATABASE" suffix (8 chars)
-            # The name_part includes the trailing underscore, so we need to remove it
-            name_part = key[7:-8].rstrip("_")  # Remove prefix, suffix, and trailing underscore
+            name_part = key[7:-8].rstrip("_")
             if name_part:
                 db_name = name_part.lower()
                 conn_key = f"DB_MCP_{name_part}_CONNECTION_STRING"
-                
-                if conn_key in env_vars:
+                if conn_key in env_map:
                     db_configs[db_name] = {
                         "backend": value.lower(),
-                        "connection_string": env_vars[conn_key],
+                        "connection_string": env_map[conn_key],
                     }
-                else:
-                    print(f"Warning: Found {key} but missing {conn_key}", file=sys.stderr)
-    
+
+    return db_configs
+
+
+def build_registry_from_env(
+    env_map: dict[str, str],
+    base_dir: Path,
+    registry: BackendRegistry | None = None,
+) -> BackendRegistry:
+    """Build a BackendRegistry from a parsed workspace env map."""
+    import sys
+
+    if registry is None:
+        registry = BackendRegistry()
+
+    config = config_from_env(env_map)
+    query_timeout = config["DB_MCP_QUERY_TIMEOUT_SECONDS"]
+    db_configs = _collect_db_configs(env_map)
+
     if not db_configs:
         raise ValueError(
             "No database configuration found. "
             "Set DB_MCP_DATABASE/DB_MCP_CONNECTION_STRING for single database, "
             "or DB_MCP_<name>_DATABASE/DB_MCP_<name>_CONNECTION_STRING for multiple databases."
         )
-    
-    # Register all backends.  A single backend that fails to construct (bad
-    # connection string, unsupported driver, etc.) must not abort the others
-    # or leave a half-registered registry behind — so each is isolated.
-    base_dir = _get_project_root()
+
     failures: list[str] = []
     for db_name, db_config in db_configs.items():
         try:
@@ -584,9 +340,7 @@ def initialize_backends() -> BackendRegistry:
                 db_config["connection_string"], db_config["backend"], base_dir,
             )
             backend = _create_backend(
-                db_config["backend"],
-                conn_str,
-                query_timeout,
+                db_config["backend"], conn_str, query_timeout, env_map,
             )
         except Exception as exc:
             failures.append(f"{db_name} ({db_config['backend']}): {exc}")
@@ -595,53 +349,64 @@ def initialize_backends() -> BackendRegistry:
                 file=sys.stderr,
             )
             continue
-        # "default" is always the default; otherwise the first successfully
-        # registered backend becomes the default automatically (the registry
-        # sets the default whenever none is set yet).
         registry.register(db_name, backend, set_as_default=(db_name == "default"))
 
     if not registry.list_backends():
-        # Every configured backend failed to construct.  Raise so callers can
-        # surface a clear error and retry, rather than silently exposing an
-        # empty registry.
         detail = "; ".join(failures) if failures else "Check DB_MCP_* configuration."
-        raise ValueError(
-            f"No database backends could be initialized. {detail}"
-        )
+        raise ValueError(f"No database backends could be initialized. {detail}")
 
     return registry
 
 
-def check_data_access(tool_name: str, database: str | None = None) -> None:
-    """
-    Check if a tool has data access permission.
+def get_backend() -> DatabaseBackend:
+    """Create and return a database backend based on configuration."""
+    root = _find_project_root()
+    env_map = parse_workspace_env(root)
+    config = config_from_env(env_map)
 
-    When *database* is ``None`` the default connection name is resolved from
-    the registry so that per-connection env vars (e.g.
-    ``DB_MCP_DEFAULT_ALLOW_DATA_ACCESS``) are still evaluated.
-    
-    Args:
-        tool_name: Name of the tool being called
-        database: Optional connection name for per-connection lookup
-        
-    Raises:
-        PermissionError: If data access is not authorized
-    """
-    config = load_config()
+    backend_name = config["DB_MCP_DATABASE"]
+    connection_string = config["DB_MCP_CONNECTION_STRING"]
+    query_timeout = config["DB_MCP_QUERY_TIMEOUT_SECONDS"]
+
+    if not backend_name:
+        raise ValueError(
+            "DB_MCP_DATABASE environment variable is required. "
+            "Set DB_MCP_DATABASE=sqlserver, postgres, access_odbc, or access_com"
+        )
+
+    if not connection_string:
+        raise ValueError(
+            "DB_MCP_CONNECTION_STRING environment variable is required. "
+            "Provide a valid database connection string."
+        )
+
+    connection_string = _resolve_connection_string_paths(
+        connection_string, backend_name, root,
+    )
+    return _create_backend(backend_name, connection_string, query_timeout, env_map)
+
+
+def initialize_backends() -> BackendRegistry:
+    """Initialize backends into the global registry (eager startup path)."""
+    root = _find_project_root()
+    env_map = parse_workspace_env(root)
+    registry = get_registry()
+    registry.clear()
+    return build_registry_from_env(env_map, root, registry)
+
+
+def check_data_access(tool_name: str, database: str | None = None) -> None:
+    """Check if a tool has data access permission for the active workspace."""
+    env_map = current_env()
+    config = config_from_env(env_map)
     if database is None:
-        registry = get_registry()
+        registry = current_registry()
         database = registry.get_default_name()
-    if not check_data_access_permission(tool_name, config, database=database):
+    if not check_data_access_permission(tool_name, config, env_map, database=database):
         error_msg = get_permission_error_message(tool_name, database=database)
         raise PermissionError(error_msg)
 
 
 def get_config() -> dict[str, Any]:
-    """
-    Get the current configuration.
-    
-    Returns:
-        Configuration dictionary
-    """
+    """Get the current configuration (eager/fallback path)."""
     return load_config()
-

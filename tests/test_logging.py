@@ -8,7 +8,9 @@ import pytest
 
 import db_inspector_mcp.usage_logging as logging_module
 from db_inspector_mcp.usage_logging import (
+    _get_default_log_dir,
     _initialize_logging,
+    refresh_logging_from_env,
     reset_logging,
 )
 
@@ -19,10 +21,14 @@ def _clean_logging_state():
     logging_module._logging_enabled = None
     logging_module._log_handler = None
     logging_module._log_file = None
+    logging_module._last_logging_fingerprint = None
+    logging_module._workspace_root_for_logging = None
     yield
     logging_module._logging_enabled = None
     logging_module._log_handler = None
     logging_module._log_file = None
+    logging_module._last_logging_fingerprint = None
+    logging_module._workspace_root_for_logging = None
 
 
 class TestInitializeLogging:
@@ -155,3 +161,24 @@ class TestResetLogging:
             _initialize_logging()
             assert logging_module._log_handler is not None
             assert logging_module._log_handler is not old_handler
+
+
+class TestRefreshLoggingFromEnv:
+    """Tests for per-workspace logging via refresh_logging_from_env."""
+
+    def test_default_centralized_log_dir(self, tmp_path):
+        env_map = {"DB_MCP_ENABLE_LOGGING": "true"}
+        assert refresh_logging_from_env(env_map, tmp_path) is True
+        assert logging_module._log_file == _get_default_log_dir() / "usage.jsonl"
+
+    def test_explicit_log_dir_relative_to_workspace(self, tmp_path):
+        env_map = {
+            "DB_MCP_ENABLE_LOGGING": "true",
+            "DB_MCP_LOG_DIR": "custom_logs",
+        }
+        assert refresh_logging_from_env(env_map, tmp_path) is True
+        assert logging_module._log_file == (tmp_path / "custom_logs" / "usage.jsonl").resolve()
+
+    def test_disabled_returns_false(self, tmp_path):
+        env_map = {"DB_MCP_ENABLE_LOGGING": "false"}
+        assert refresh_logging_from_env(env_map, tmp_path) is False

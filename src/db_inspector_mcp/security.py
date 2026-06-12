@@ -1,6 +1,5 @@
 """Security module for SQL validation and permission checks."""
 
-import os
 import re
 from typing import Any
 
@@ -88,7 +87,10 @@ def validate_readonly_sql(sql: str) -> None:
 
 
 def check_data_access_permission(
-    tool_name: str, config: dict[str, Any], database: str | None = None,
+    tool_name: str,
+    config: dict[str, Any],
+    env_map: dict[str, str],
+    database: str | None = None,
 ) -> bool:
     """
     Check if a tool requires and has data access permission.
@@ -122,12 +124,12 @@ def check_data_access_permission(
     if database:
         name_upper = database.upper()
 
-        per_conn = os.getenv(f"DB_MCP_{name_upper}_ALLOW_DATA_ACCESS")
+        per_conn = env_map.get(f"DB_MCP_{name_upper}_ALLOW_DATA_ACCESS")
         if per_conn is not None:
             return per_conn.lower() == "true"
 
         if tool_name == "db_preview":
-            per_conn_preview = os.getenv(f"DB_MCP_{name_upper}_ALLOW_PREVIEW")
+            per_conn_preview = env_map.get(f"DB_MCP_{name_upper}_ALLOW_PREVIEW")
             if per_conn_preview is not None:
                 return per_conn_preview.lower() == "true"
     

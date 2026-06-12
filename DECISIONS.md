@@ -79,6 +79,160 @@ contradictory guidance.
 
 ---
 
+## 2026-06-12 — db_tool FastMCP contract guards and Tool.run integration tests
+
+**Trigger**: Repeated regressions after the per-workspace `db_tool` wrapper landed:
+(1) `functools.wraps` hid `ctx`, so tools failed with "missing ctx"; (2) undeclared
+`*args/**kwargs` leaked into the MCP JSON schema as required `args`/`kwargs`
+fields; (3) unit tests called wrapped functions directly with `ctx=MagicMock()`,
+bypassing `Tool.run()` schema validation and Context injection — so every fix
+shipped green while Cursor still broke.
+
+**Options explored**:
+- **Rely on direct-call unit tests only** — fast but cannot see FastMCP metadata
+  bugs; rejected after three invisible regressions.
+- **Import-time contract assertion on each `@db_tool` registration (chosen)** —
+  `_assert_tool_contract()` verifies `context_kwarg == "ctx"` and forbids
+  `ctx`/`args`/`kwargs`/`self` in the published JSON schema.
+- **Registry-driven `Tool.run` integration tests (chosen)** — invoke representative
+  tools through `mcp._tool_manager.get_tool(name).run(...)` so schema validation
+  and injection run for real.
+
+**Decision**: Document the FastMCP introspection contract in `_workspace_wrapper`
+(`__signature__` = `(ctx, <real params>)`, no `functools.wraps`, `__annotations__`
+includes `Context`). Fail fast at import if any tool violates the contract. Add
+`tests/test_tools_contract.py` with per-tool metadata checks and `Tool.run` tests.
+Keep existing direct-call body tests in `test_tools.py` for fast logic coverage.
+
+**What this rules out**: Changing `_workspace_wrapper` without updating contract
+tests. Testing tools only via `await db_preview(ctx=..., ...)` without at least
+one `Tool.run` path test for new tools.
+
+**Relevant files**:
+- `src/db_inspector_mcp/tools.py` — `_assert_tool_contract`, `_workspace_wrapper`
+- `tests/test_tools_contract.py`
+
+---
+
+## 2026-06-11 — Revert MCP protocol diagnostics; keep stderr for Cursor visibility
+
+**Trigger**: Manual testing in Cursor showed that `notifications/message` log
+notifications (`Context.info()` etc.) produced **no output** in the MCP Logs
+panel. Operational diagnostics disappeared entirely. stderr remains the only
+channel Cursor reliably surfaces for stdio MCP servers (tagged `[error]`
+regardless of content).
+
+**Options explored**:
+- **Dual-write (protocol + stderr)** — would restore visibility but duplicate
+  every line once Cursor adds protocol log support. Deferred unless needed.
+- **Keep MCP protocol logging only** — rejected; invisible in Cursor today.
+- **Revert to `print(..., stderr)` (chosen)** — restores diagnostic visibility;
+  accept Cursor's `[error]` tag on operational messages.
+
+**Decision**: Removed `diagnostic_log.py` and restored direct stderr prints in
+`workspace.py`, `config.py`, `readonly.py`, and `main.py`. Removed
+`DB_MCP_DIAGNOSTIC_LOG_LEVEL` from `.env.example`.
+
+**What this rules out**: Using MCP protocol logging as the sole diagnostic
+channel until Cursor renders `notifications/message` in the Output panel.
+
+**Cursor behavior (tested 2026-06-11)**: After implementing `Context.info()` /
+`send_log_message` for lazy-init diagnostics, no messages appeared in Output
+(MCP Logs / Shared MCP process). stderr output remained visible. This reflects
+Cursor as of that date — protocol log notifications may be supported in a
+future Cursor release; revisit then before removing stderr diagnostics.
+
+**Relevant files**:
+- `src/db_inspector_mcp/workspace.py`, `config.py`, `readonly.py`, `main.py`
+- deleted `src/db_inspector_mcp/diagnostic_log.py`, `tests/test_diagnostic_log.py`
+
+---
+
+## 2026-06-11 — MCP protocol diagnostics instead of stderr for operational logs
+
+> **⚠ Superseded** (2026-06-11): Cursor does not display MCP log notifications
+> in the Output panel; diagnostics became invisible. Reverted to stderr.
+> See "Revert MCP protocol diagnostics; keep stderr for Cursor visibility" above.
+
+**Trigger**: Cursor's Shared MCP process labels all stderr output as `[error]`,
+even for normal operational messages (workspace root recovery, backend
+initialization, path resolution). Users could not distinguish real failures
+from healthy lazy-init diagnostics.
+
+**Options explored**:
+- **Keep `print(..., stderr)`** — works but every message appears as `[error]` in
+  Cursor. Rejected for operational noise.
+- **Prefix stderr with `[INFO]`** — Cursor still tags the line `[error]`; prefix
+  does not change client severity. Rejected.
+- **`DB_MCP_DIAGNOSTIC_LOG_LEVEL` to suppress INFO** — reduces noise but does
+  not fix mis-tagged severity. Useful as a complement only.
+- **MCP `notifications/message` via FastMCP `Context.info()` (chosen)** — send
+  leveled diagnostics through the protocol during tool calls when MCP session
+  context is available; fall back to prefixed stderr only before handshake
+  (eager startup).
+
+**Decision**: Added `diagnostic_log.py` with `diag_info` / `diag_warning` /
+`diag_error` helpers. `WorkspaceManager.get_registry_for()` binds the active
+MCP `Context` and applies per-workspace `DB_MCP_DIAGNOSTIC_LOG_LEVEL`. Replaced
+stderr prints in `workspace.py`, `config.py`, `readonly.py`, and `main.py`.
+Failed MCP log delivery falls back to stderr without breaking tool execution.
+
+**What this rules out**: Assuming stderr severity matches message intent in
+Cursor. Backend connection-time prints in `access_com.py` / `access_odbc.py`
+still use stderr until migrated separately.
+
+**Relevant files**:
+- `src/db_inspector_mcp/diagnostic_log.py`
+- `src/db_inspector_mcp/workspace.py`, `config.py`, `readonly.py`, `main.py`
+- `tests/test_diagnostic_log.py`, `tests/test_workspace.py`
+- `.env.example`
+
+---
+
+## 2026-06-11 — Per-workspace backend isolation via parsed env dicts
+
+**Trigger**: A single user-level MCP server process serves multiple Cursor
+windows. The global `_lazy_init_attempted` latch and `load_dotenv()` mutation
+of `os.environ` meant the first window to call `db_list_databases` permanently
+owned the backend registry; a second window with a different `.env` got wrong
+or clobbered configuration.
+
+**Options explored**:
+- **Keep global registry + load_dotenv (status quo)** — simple but
+  fundamentally broken for multi-window; second workspace overwrites first.
+- **Separate MCP server process per window** — would work but defeats the
+  purpose of a single user-level `mcp.json` entry.
+- **Per-workspace registry manager with parsed env dicts (chosen)** — parse
+  `.env`/`.env.local` into in-memory dicts via `dotenv_values()`; never
+  mutate `os.environ` for workspace values; cache `BackendRegistry` per
+  workspace root and per MCP session; route every tool call through an async
+  `db_tool` wrapper that sets a `ContextVar`.
+
+**Decision**: `WorkspaceManager` resolves `ctx.session` → workspace root
+(cached per `id(session)`), builds or reuses a per-root `BackendRegistry` from
+`parse_workspace_env()` + `build_registry_from_env()`. All 13 tools use
+`current_registry()` via `ContextVar`. Read-only verification runs at registry
+build time (bounded timeout); lazy path raises `ValueError` on write
+permissions instead of `sys.exit(1)`. Logging reads per-workspace
+`DB_MCP_ENABLE_LOGGING` etc. from the active `env_map`; log output defaults to
+`~/.db-inspector-mcp/logs/usage.jsonl` with `workspace_root` in each entry
+unless `DB_MCP_LOG_DIR` is explicitly set per project.
+
+**What this rules out**: Relying on call order (`db_list_databases` first) for
+initialization. Mutating `os.environ` with workspace `.env` values. Global
+hot-reload via `load_config()` clearing a single registry — hot-reload is now
+per-root mtime inside `WorkspaceManager`.
+
+**Relevant files**:
+- `src/db_inspector_mcp/config.py` — `parse_workspace_env`, `build_registry_from_env`, ContextVar helpers
+- `src/db_inspector_mcp/workspace.py` — `WorkspaceManager`
+- `src/db_inspector_mcp/readonly.py` — `verify_readonly_for_registry`
+- `src/db_inspector_mcp/tools.py` — async `db_tool` wrapper
+- `src/db_inspector_mcp/usage_logging.py` — `refresh_logging_from_env`
+- `tests/test_workspace.py` — isolation and session caching tests
+
+---
+
 ## 2026-05-22 — Tool quick-reference in server instructions
 
 **Trigger**: Review of ~12 agent chat transcripts from the db-if-portal-sync
@@ -886,6 +1040,11 @@ finally:
 ---
 
 ## 2026-02-17 — Lazy backend initialization via MCP roots for user-level configs
+
+> **⚠ Superseded** (2026-06-11): Per-workspace isolation replaces the global
+> `_lazy_init_attempted` latch and "only `db_list_databases` triggers lazy
+> init" model. See "Per-workspace backend isolation via parsed env dicts"
+> above.
 
 **Trigger**: When the MCP server is configured at the user level (global Cursor settings) rather than the project level (`.cursor/mcp.json`), Cursor sets the working directory to the user's home folder (`C:\Users\akw`), not the open workspace. The server's `.env` search starts from CWD and walks upward, so it never finds the project's `.env` file. The server crashed at startup with "No database configuration found."
 

@@ -19,125 +19,23 @@ All tools are read-only by default and designed for safe database exploration an
 - Performance measurement and execution plans
 """
 
-import functools
 import inspect
 import re
 import sys
 from pathlib import Path
-from typing import Any
-from urllib.parse import unquote, urlparse
+from typing import Any, get_type_hints
 
 from mcp.server.fastmcp import Context, FastMCP
 
-from .backends.registry import get_registry
-from .config import check_data_access, get_config, initialize_from_workspace, load_config
+from .config import (
+    check_data_access,
+    current_registry,
+    reset_workspace_context,
+    set_workspace_context,
+)
 from .security import validate_readonly_sql
-from .usage_logging import with_logging
-
-
-# ---------------------------------------------------------------------------
-# Lazy backend initialisation via MCP workspace roots
-# ---------------------------------------------------------------------------
-# When the server is configured at the *user* level the working directory is
-# typically the user's home folder, not the project root.  In that case
-# ``main.py`` skips backend initialisation and defers to this module which
-# uses the MCP ``roots/list`` call (available after the protocol handshake)
-# to discover the workspace and its ``.env`` file.
-
-_lazy_init_attempted = False
-
-
-async def _ensure_backends_initialized(ctx: Context) -> None:
-    """Lazily initialize backends from MCP workspace roots if not yet done.
-
-    The module-level guard is committed only on success.  If initialization
-    fails, finds no usable workspace, or yields an empty registry, the guard
-    is left unset so a later call retries — e.g. after the user opens the
-    right workspace or releases a database lock — without a server restart.
-
-    Read-only verification is intentionally NOT performed here: it opens
-    connections and can block on a locked/slow backend.  ``db_list_databases``
-    must stay pure metadata.  Verification runs at startup (``main.py``) for
-    eagerly-configured backends, bounded by a per-backend timeout.
-    """
-    global _lazy_init_attempted
-    if _lazy_init_attempted:
-        return
-
-    registry = get_registry()
-    if registry.list_backends():
-        _lazy_init_attempted = True
-        return  # Already initialised at startup
-
-    try:
-        roots_result = await ctx.session.list_roots()
-    except Exception as exc:
-        # Transient (handshake/client issue) — leave guard unset to retry.
-        print(f"Could not request workspace roots from client: {exc}", file=sys.stderr)
-        return
-
-    found_env = False
-    for root in roots_result.roots:
-        workspace = _file_uri_to_path(str(root.uri))
-        if workspace is None:
-            continue
-        env_path = workspace / ".env"
-        if not env_path.exists():
-            continue
-        found_env = True
-        try:
-            new_registry = initialize_from_workspace(workspace)
-        except Exception as exc:
-            print(f"Failed to initialize from {workspace}: {exc}", file=sys.stderr)
-            continue
-
-        backends = new_registry.list_backends()
-        if not backends:
-            print(
-                f"Found {env_path} but no database backends could be configured "
-                f"(check DB_MCP_* variables).",
-                file=sys.stderr,
-            )
-            continue
-
-        default_name = new_registry.get_default_name()
-        print(
-            f"Initialized {len(backends)} backend(s) from workspace root: "
-            f"{', '.join(backends)}",
-            file=sys.stderr,
-        )
-        if default_name:
-            print(f"Default backend: {default_name}", file=sys.stderr)
-
-        # Success — commit the guard so we don't re-scan on every call.
-        _lazy_init_attempted = True
-        return
-
-    # No workspace yielded a usable registry.  Leave the guard unset so a
-    # future call can retry once the environment is fixed.
-    if found_env:
-        print(
-            "Found .env file(s) in workspace roots but no backends were "
-            "initialized — see errors above.",
-            file=sys.stderr,
-        )
-    else:
-        print(
-            "No .env file found in any workspace root provided by the client.",
-            file=sys.stderr,
-        )
-
-
-def _file_uri_to_path(uri: str) -> Path | None:
-    """Convert a ``file://`` URI to a local ``Path``, or return *None*."""
-    parsed = urlparse(uri)
-    if parsed.scheme != "file":
-        return None
-    # On Windows, file:///C:/path → /C:/path — strip leading slash
-    raw_path = unquote(parsed.path)
-    if len(raw_path) >= 3 and raw_path[0] == "/" and raw_path[2] == ":":
-        raw_path = raw_path[1:]
-    return Path(raw_path)
+from .usage_logging import refresh_logging_from_env, with_logging
+from .workspace import get_workspace_manager
 
 
 def _resolve_query_column_name(
@@ -430,36 +328,107 @@ def setup_db_inspector() -> str:
 # Composite tool decorator
 # ---------------------------------------------------------------------------
 
+async def _invoke_tool(func, *args, **kwargs):
+    """Run a sync or async tool body."""
+    if inspect.iscoroutinefunction(func):
+        return await func(*args, **kwargs)
+    return func(*args, **kwargs)
+
+
+_FORBIDDEN_SCHEMA_PARAMS = frozenset({"ctx", "args", "kwargs", "self"})
+
+
+def _assert_tool_contract(name: str, tool) -> None:
+    """Fail fast at import if FastMCP tool metadata does not match our contract."""
+    from mcp.server.fastmcp.utilities.context_injection import find_context_parameter
+
+    if tool is None:
+        raise RuntimeError(f"Tool {name!r} was not registered with FastMCP")
+
+    if tool.name != name:
+        raise RuntimeError(
+            f"Tool registered as {tool.name!r} but @db_tool expected {name!r}."
+        )
+
+    if tool.context_kwarg != "ctx":
+        raise RuntimeError(
+            f"Tool {name!r}: context_kwarg must be 'ctx', got {tool.context_kwarg!r}. "
+            "Ensure _workspace_wrapper exposes ctx: Context in __signature__ and "
+            "__annotations__ (do not use functools.wraps on the wrapper)."
+        )
+
+    if find_context_parameter(tool.fn) != "ctx":
+        raise RuntimeError(
+            f"Tool {name!r}: FastMCP could not detect ctx on the wrapper function."
+        )
+
+    leaked = set(tool.parameters.get("properties", {})) & _FORBIDDEN_SCHEMA_PARAMS
+    if leaked:
+        raise RuntimeError(
+            f"Tool {name!r}: JSON schema must not expose {sorted(leaked)}. "
+            "Set __signature__ to (ctx, <real params>) without *args/**kwargs."
+        )
+
+
+def _workspace_wrapper(func, logged):
+    """Build an async MCP entrypoint with ctx plus the tool's real parameters.
+
+    FastMCP introspection contract (all required for Cursor tool calls to work):
+    - ``__signature__`` must be ``(ctx: Context, <original params>)`` with no
+      ``*args`` or ``**kwargs`` in the declared signature (those leak into the
+      JSON schema as spurious required fields).
+    - ``__annotations__`` must include ``ctx: Context`` plus the inner tool hints.
+    - Do **not** use ``functools.wraps`` on the wrapper — it copies the inner
+      signature and hides ``ctx``, so Context injection fails at runtime.
+    - The runtime body may still use ``*args, **kwargs`` to forward tool args;
+      only the declared ``__signature__`` drives schema generation.
+    """
+    inner_sig = inspect.signature(func)
+    ctx_param = inspect.Parameter(
+        "ctx",
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        annotation=Context,
+    )
+    wrapper_sig = inner_sig.replace(
+        parameters=[ctx_param, *inner_sig.parameters.values()],
+    )
+
+    async def with_workspace(ctx: Context, *args, **kwargs):
+        manager = get_workspace_manager()
+        registry, env_map, workspace_root = await manager.get_registry_for(ctx)
+        token = set_workspace_context(registry, env_map)
+        try:
+            refresh_logging_from_env(env_map, workspace_root)
+            return await _invoke_tool(logged, *args, **kwargs)
+        finally:
+            reset_workspace_context(token)
+
+    with_workspace.__name__ = func.__name__
+    with_workspace.__doc__ = func.__doc__
+    with_workspace.__module__ = func.__module__
+    with_workspace.__qualname__ = func.__qualname__
+    # __signature__ drives FastMCP's JSON schema; do not use functools.wraps
+    # (hides ctx) or leave *args/**kwargs in the signature (leaks into schema).
+    with_workspace.__signature__ = wrapper_sig
+    with_workspace.__annotations__ = {"ctx": Context, **get_type_hints(func)}
+    return with_workspace
+
+
 def db_tool(name: str):
-    """Register an MCP tool with config hot-reload and usage logging.
+    """Register an MCP tool with per-workspace context and usage logging.
 
-    Composes three concerns in the correct order so that every tool call:
-    1. Refreshes configuration from ``.env`` (one ``stat()`` call, reload
-       only when the file has changed).
-    2. Initializes or re-initializes usage logging with the current env vars.
-    3. Executes the tool body and logs the outcome.
-
-    Usage::
-
-        @db_tool("db_my_tool")
-        def db_my_tool(query: str, database: str | None = None) -> dict[str, Any]:
-            ...
+    Every tool call:
+    1. Resolves the workspace registry via MCP session roots.
+    2. Sets ContextVar for registry/env_map used by tool bodies.
+    3. Applies per-workspace logging settings.
+    4. Executes the tool body and logs the outcome.
     """
     def decorator(func):
         logged = with_logging(name)(func)
-
-        if inspect.iscoroutinefunction(func):
-            @functools.wraps(func)
-            async def with_refresh(*args, **kwargs):
-                load_config()
-                return await logged(*args, **kwargs)
-        else:
-            @functools.wraps(func)
-            def with_refresh(*args, **kwargs):
-                load_config()
-                return logged(*args, **kwargs)
-
-        return mcp.tool()(with_refresh)
+        with_workspace = _workspace_wrapper(func, logged)
+        mcp.tool(name=name)(with_workspace)
+        _assert_tool_contract(name, mcp._tool_manager.get_tool(name))
+        return with_workspace
     return decorator
 
 
@@ -506,7 +475,7 @@ def db_count_query_results(query: str, database: str | None = None) -> dict[str,
         Dictionary with "count" key containing the row count as an integer
     """
     validate_readonly_sql(query)
-    registry = get_registry()
+    registry = current_registry()
     backend = registry.get(database)
     
     try:
@@ -566,7 +535,7 @@ def db_get_query_columns(query: str, database: str | None = None) -> dict[str, A
         Each column dict includes: name, type, nullable, precision, scale, etc.
     """
     validate_readonly_sql(query)
-    registry = get_registry()
+    registry = current_registry()
     backend = registry.get(database)
     
     try:
@@ -624,7 +593,7 @@ def db_sum_query_column(query: str, column: str, database: str | None = None) ->
         Dictionary with "sum" key containing the sum value (numeric) or None if all values are NULL
     """
     validate_readonly_sql(query)
-    registry = get_registry()
+    registry = current_registry()
     backend = registry.get(database)
     
     try:
@@ -682,7 +651,7 @@ def db_measure_query(query: str, max_rows: int = 1000, database: str | None = No
         - hit_limit: Boolean indicating if max_rows limit was reached
     """
     validate_readonly_sql(query)
-    registry = get_registry()
+    registry = current_registry()
     backend = registry.get(database)
     
     try:
@@ -735,7 +704,7 @@ def db_preview(query: str, max_rows: int = 100, database: str | None = None) -> 
     """
     validate_readonly_sql(query)
     check_data_access("db_preview", database=database)
-    registry = get_registry()
+    registry = current_registry()
     backend = registry.get(database)
     
     try:
@@ -795,7 +764,7 @@ def db_explain(query: str, database: str | None = None) -> dict[str, Any]:
         to get empirical timing data for Access queries.
     """
     validate_readonly_sql(query)
-    registry = get_registry()
+    registry = current_registry()
     backend = registry.get(database)
     
     try:
@@ -881,7 +850,7 @@ def db_compare_queries(
         effective_db2 = database2 if database2 is not None else database1
         check_data_access("db_preview", database=effective_db2)
     
-    registry = get_registry()
+    registry = current_registry()
     backend1 = registry.get(database1)
     # If database2 is not specified, use database1 (same database comparison)
     backend2 = registry.get(database2 if database2 is not None else database1)
@@ -1002,7 +971,7 @@ def db_list_tables(database: str | None = None, name_filter: str | None = None) 
         Dictionary with "tables" key containing list of table metadata dictionaries.
         Each table dict includes: name, schema, row_count, and other metadata.
     """
-    registry = get_registry()
+    registry = current_registry()
     backend = registry.get(database)
     
     try:
@@ -1061,7 +1030,7 @@ def db_list_views(database: str | None = None, name_filter: str | None = None) -
         For Access COM backend, list_views() returns query names without SQL definitions
         (SQL extraction is expensive). Use db_get_access_query_definition() to get SQL for specific queries.
     """
-    registry = get_registry()
+    registry = current_registry()
     backend = registry.get(database)
     
     try:
@@ -1109,7 +1078,7 @@ def db_check_readonly_status(database: str | None = None) -> dict[str, Any]:
         - "readonly": Boolean indicating if connection is read-only
         - "details": String with verification details and status
     """
-    registry = get_registry()
+    registry = current_registry()
     backend = registry.get(database)
     
     try:
@@ -1165,7 +1134,7 @@ def db_get_access_query_definition(name: str, database: str | None = None) -> di
     """
     from .backends.access_com import AccessCOMBackend
 
-    registry = get_registry()
+    registry = current_registry()
     backend = registry.get(database)
     
     if not isinstance(backend, AccessCOMBackend):
@@ -1191,7 +1160,7 @@ def db_get_access_query_definition(name: str, database: str | None = None) -> di
 
 
 @db_tool("db_list_databases")
-async def db_list_databases(ctx: Context) -> dict[str, Any]:
+def db_list_databases() -> dict[str, Any]:
     """
     List all available database backends that have been configured.
     
@@ -1253,12 +1222,7 @@ async def db_list_databases(ctx: Context) -> dict[str, Any]:
         for object types the backend cannot measure.
         Also includes "default" key with the default database name.
     """
-    # Lazy-init: if backends were not configured at startup (e.g. user-level
-    # mcp.json where CWD != project root), try to discover the workspace via
-    # MCP roots and load its .env file.
-    await _ensure_backends_initialized(ctx)
-
-    registry = get_registry()
+    registry = current_registry()
     backend_names = registry.list_backends()
     default_name = registry.get_default_name()
 
@@ -1276,8 +1240,10 @@ async def db_list_databases(ctx: Context) -> dict[str, Any]:
                 "opened contains a .env with DB_MCP_DATABASE/DB_MCP_CONNECTION_STRING "
                 "or DB_MCP_<name>_DATABASE/_CONNECTION_STRING entries; (2) if the "
                 "MCP server is configured at the user level, set DB_MCP_PROJECT_DIR "
-                "to the project path; (3) restart the db-inspector-mcp server. "
-                "See the server log (stderr) for the specific reason."
+                "to the project path; (3) if stderr shows a workspace-roots validation "
+                "error, restart the db-inspector-mcp server (the server recovers bare "
+                "paths from that error automatically). See the server log (stderr) for "
+                "the specific reason."
             ),
         }
 
@@ -1648,7 +1614,7 @@ def db_sql_help(topic: str | None = None, database: str | None = None) -> dict[s
     Returns:
         Dictionary with syntax help including title, description, examples, and patterns.
     """
-    registry = get_registry()
+    registry = current_registry()
     backend = registry.get(database)
     dialect = backend.sql_dialect
     

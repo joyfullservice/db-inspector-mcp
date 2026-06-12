@@ -85,27 +85,27 @@ def test_validate_readonly_sql_handles_literals():
 def test_check_data_access_permission_allows_metadata_tools():
     """Test that metadata tools don't require permission."""
     config = {"DB_MCP_ALLOW_DATA_ACCESS": "false"}
-    assert check_data_access_permission("db_row_count", config) is True
-    assert check_data_access_permission("db_columns", config) is True
-    assert check_data_access_permission("db_explain", config) is True
+    assert check_data_access_permission("db_row_count", config, {}) is True
+    assert check_data_access_permission("db_columns", config, {}) is True
+    assert check_data_access_permission("db_explain", config, {}) is True
 
 
 def test_check_data_access_permission_requires_permission_for_preview():
     """Test that db_preview requires permission."""
     config = {"DB_MCP_ALLOW_DATA_ACCESS": "false", "DB_MCP_ALLOW_PREVIEW": "false"}
-    assert check_data_access_permission("db_preview", config) is False
+    assert check_data_access_permission("db_preview", config, {}) is False
 
 
 def test_check_data_access_permission_allows_with_global_flag():
     """Test that global flag enables data access."""
     config = {"DB_MCP_ALLOW_DATA_ACCESS": "true"}
-    assert check_data_access_permission("db_preview", config) is True
+    assert check_data_access_permission("db_preview", config, {}) is True
 
 
 def test_check_data_access_permission_allows_with_per_tool_flag():
     """Test that per-tool flag enables specific tool."""
     config = {"DB_MCP_ALLOW_DATA_ACCESS": "false", "DB_MCP_ALLOW_PREVIEW": "true"}
-    assert check_data_access_permission("db_preview", config) is True
+    assert check_data_access_permission("db_preview", config, {}) is True
 
 
 def test_get_permission_error_message():
@@ -118,56 +118,54 @@ def test_get_permission_error_message():
 # Per-connection data access overrides
 # ---------------------------------------------------------------------------
 
-def test_per_connection_allow_overrides_global_deny(monkeypatch):
+def test_per_connection_allow_overrides_global_deny():
     """Per-connection ALLOW_DATA_ACCESS=true overrides global false."""
-    monkeypatch.setenv("DB_MCP_LEGACY_ALLOW_DATA_ACCESS", "true")
+    env_map = {"DB_MCP_LEGACY_ALLOW_DATA_ACCESS": "true"}
     config = {"DB_MCP_ALLOW_DATA_ACCESS": "false", "DB_MCP_ALLOW_PREVIEW": "false"}
-    assert check_data_access_permission("db_preview", config, database="legacy") is True
+    assert check_data_access_permission("db_preview", config, env_map, database="legacy") is True
 
 
-def test_per_connection_deny_overrides_global_allow(monkeypatch):
+def test_per_connection_deny_overrides_global_allow():
     """Per-connection ALLOW_DATA_ACCESS=false overrides global true."""
-    monkeypatch.setenv("DB_MCP_PROD_ALLOW_DATA_ACCESS", "false")
+    env_map = {"DB_MCP_PROD_ALLOW_DATA_ACCESS": "false"}
     config = {"DB_MCP_ALLOW_DATA_ACCESS": "true"}
-    assert check_data_access_permission("db_preview", config, database="prod") is False
+    assert check_data_access_permission("db_preview", config, env_map, database="prod") is False
 
 
-def test_per_connection_allow_preview_overrides_global_deny(monkeypatch):
+def test_per_connection_allow_preview_overrides_global_deny():
     """Per-connection ALLOW_PREVIEW=true overrides global false."""
-    monkeypatch.setenv("DB_MCP_LEGACY_ALLOW_PREVIEW", "true")
+    env_map = {"DB_MCP_LEGACY_ALLOW_PREVIEW": "true"}
     config = {"DB_MCP_ALLOW_DATA_ACCESS": "false", "DB_MCP_ALLOW_PREVIEW": "false"}
-    assert check_data_access_permission("db_preview", config, database="legacy") is True
+    assert check_data_access_permission("db_preview", config, env_map, database="legacy") is True
 
 
-def test_per_connection_data_access_takes_priority_over_preview(monkeypatch):
+def test_per_connection_data_access_takes_priority_over_preview():
     """Per-connection ALLOW_DATA_ACCESS is checked before ALLOW_PREVIEW."""
-    monkeypatch.setenv("DB_MCP_DEV_ALLOW_DATA_ACCESS", "false")
-    monkeypatch.setenv("DB_MCP_DEV_ALLOW_PREVIEW", "true")
+    env_map = {
+        "DB_MCP_DEV_ALLOW_DATA_ACCESS": "false",
+        "DB_MCP_DEV_ALLOW_PREVIEW": "true",
+    }
     config = {"DB_MCP_ALLOW_DATA_ACCESS": "false"}
-    assert check_data_access_permission("db_preview", config, database="dev") is False
+    assert check_data_access_permission("db_preview", config, env_map, database="dev") is False
 
 
-def test_per_connection_falls_back_to_global(monkeypatch):
+def test_per_connection_falls_back_to_global():
     """Without per-connection vars, global setting is used."""
-    monkeypatch.delenv("DB_MCP_NEW_ALLOW_DATA_ACCESS", raising=False)
-    monkeypatch.delenv("DB_MCP_NEW_ALLOW_PREVIEW", raising=False)
     config = {"DB_MCP_ALLOW_DATA_ACCESS": "true"}
-    assert check_data_access_permission("db_preview", config, database="new") is True
+    assert check_data_access_permission("db_preview", config, {}, database="new") is True
 
 
-def test_per_connection_falls_back_to_global_deny(monkeypatch):
+def test_per_connection_falls_back_to_global_deny():
     """Without per-connection vars, global deny is honoured."""
-    monkeypatch.delenv("DB_MCP_NEW_ALLOW_DATA_ACCESS", raising=False)
-    monkeypatch.delenv("DB_MCP_NEW_ALLOW_PREVIEW", raising=False)
     config = {"DB_MCP_ALLOW_DATA_ACCESS": "false", "DB_MCP_ALLOW_PREVIEW": "false"}
-    assert check_data_access_permission("db_preview", config, database="new") is False
+    assert check_data_access_permission("db_preview", config, {}, database="new") is False
 
 
-def test_per_connection_metadata_tools_always_allowed(monkeypatch):
+def test_per_connection_metadata_tools_always_allowed():
     """Metadata tools are allowed regardless of per-connection settings."""
-    monkeypatch.setenv("DB_MCP_PROD_ALLOW_DATA_ACCESS", "false")
+    env_map = {"DB_MCP_PROD_ALLOW_DATA_ACCESS": "false"}
     config = {"DB_MCP_ALLOW_DATA_ACCESS": "false"}
-    assert check_data_access_permission("db_explain", config, database="prod") is True
+    assert check_data_access_permission("db_explain", config, env_map, database="prod") is True
 
 
 def test_per_connection_error_message_includes_connection_name():

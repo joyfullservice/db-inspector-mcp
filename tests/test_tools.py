@@ -1,10 +1,10 @@
 """Tests for MCP tools."""
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from db_inspector_mcp.config import check_data_access
 from db_inspector_mcp.security import validate_readonly_sql
 from db_inspector_mcp.tools import (
     db_check_readonly_status,
@@ -18,7 +18,20 @@ from db_inspector_mcp.tools import (
     db_preview,
     db_sql_help,
     db_sum_query_column,
+    mcp,
 )
+from mcp.server.fastmcp.utilities.context_injection import find_context_parameter
+
+
+def test_db_tool_registers_context_injection():
+    """db_tool wrapper must expose ctx for FastMCP injection."""
+    tool = mcp._tool_manager.get_tool("db_preview")
+    assert tool is not None
+    assert tool.context_kwarg == "ctx"
+    assert find_context_parameter(tool.fn) == "ctx"
+    assert "query" in tool.parameters["properties"]
+    assert "args" not in tool.parameters["properties"]
+    assert "kwargs" not in tool.parameters["properties"]
 
 
 @pytest.fixture
@@ -46,389 +59,363 @@ def mock_backend():
         "readonly": True,
         "details": "✓ Read-only",
     }
+    backend.sql_dialect = "mssql"
     return backend
 
 
 @pytest.fixture
-def mock_registry(mock_backend):
-    """Mock the registry to return mock_backend."""
-    with patch("db_inspector_mcp.tools.get_registry") as mock_get_registry:
-        registry = MagicMock()
-        registry.get.return_value = mock_backend
-        mock_get_registry.return_value = registry
-        yield mock_backend
+def workspace_ctx(mock_backend):
+    """Mock workspace manager and return the mock backend."""
+    registry = MagicMock()
+    registry.get.return_value = mock_backend
+    registry.list_backends.return_value = ["default"]
+    registry.get_default_name.return_value = "default"
+
+    async def fake_get_registry_for(ctx):
+        return registry, {}, Path("/fake/workspace")
+
+    with patch("db_inspector_mcp.tools.get_workspace_manager") as mock_mgr, \
+         patch("db_inspector_mcp.tools.refresh_logging_from_env"):
+        manager = MagicMock()
+        manager.get_registry_for = fake_get_registry_for
+        mock_mgr.return_value = manager
+        yield registry, mock_backend
 
 
-def test_db_count_query_results(mock_registry):
+@pytest.mark.anyio
+async def test_db_count_query_results(workspace_ctx):
     """Test db_count_query_results tool."""
-    result = db_count_query_results("SELECT * FROM users")
+    registry, mock_backend = workspace_ctx
+    result = await db_count_query_results(ctx=MagicMock(), query="SELECT * FROM users")
     assert result["count"] == 100
-    mock_registry.count_query_results.assert_called_once_with("SELECT * FROM users")
+    mock_backend.count_query_results.assert_called_once_with("SELECT * FROM users")
 
 
-def test_db_get_query_columns(mock_registry):
+@pytest.mark.anyio
+async def test_db_get_query_columns(workspace_ctx):
     """Test db_get_query_columns tool."""
-    result = db_get_query_columns("SELECT * FROM users")
+    result = await db_get_query_columns(ctx=MagicMock(), query="SELECT * FROM users")
     assert "columns" in result
     assert len(result["columns"]) >= 1
 
 
-def test_db_sum_query_column(mock_registry):
+@pytest.mark.anyio
+async def test_db_sum_query_column(workspace_ctx):
     """Test db_sum_query_column tool."""
-    result = db_sum_query_column("SELECT amount FROM transactions", "amount")
+    result = await db_sum_query_column(
+        ctx=MagicMock(), query="SELECT amount FROM transactions", column="amount",
+    )
     assert result["sum"] == 1234.56
 
 
-def test_db_sum_query_column_rejects_unknown_column(mock_registry):
+@pytest.mark.anyio
+async def test_db_sum_query_column_rejects_unknown_column(workspace_ctx):
     """Test db_sum_query_column rejects columns not present in query output."""
     with pytest.raises(ValueError, match="was not found"):
-        db_sum_query_column("SELECT amount FROM transactions", "nonexistent")
-
-
-def test_db_sum_query_column_rejects_malicious_column_name(mock_registry):
-    """Test db_sum_query_column rejects injection-like column values."""
-    with pytest.raises(ValueError, match="was not found"):
-        db_sum_query_column(
-            "SELECT amount FROM transactions",
-            'amount"; DROP TABLE users; --',
+        await db_sum_query_column(
+            ctx=MagicMock(), query="SELECT amount FROM transactions", column="nonexistent",
         )
 
 
-def test_db_measure_query(mock_registry):
+@pytest.mark.anyio
+async def test_db_sum_query_column_rejects_malicious_column_name(workspace_ctx):
+    """Test db_sum_query_column rejects injection-like column values."""
+    with pytest.raises(ValueError, match="was not found"):
+        await db_sum_query_column(
+            ctx=MagicMock(),
+            query="SELECT amount FROM transactions",
+            column='amount"; DROP TABLE users; --',
+        )
+
+
+@pytest.mark.anyio
+async def test_db_measure_query(workspace_ctx):
     """Test db_measure_query tool."""
-    result = db_measure_query("SELECT * FROM users", max_rows=1000)
+    result = await db_measure_query(ctx=MagicMock(), query="SELECT * FROM users", max_rows=1000)
     assert result["execution_time_ms"] == 50.0
     assert result["row_count"] == 10
     assert result["hit_limit"] is False
 
 
-def test_db_preview_requires_permission(mock_registry):
+@pytest.mark.anyio
+async def test_db_preview_requires_permission(workspace_ctx):
     """Test that db_preview requires permission."""
     with patch("db_inspector_mcp.tools.check_data_access") as mock_check:
         mock_check.side_effect = PermissionError("Not authorized")
         with pytest.raises(PermissionError):
-            db_preview("SELECT * FROM users", max_rows=10)
+            await db_preview(ctx=MagicMock(), query="SELECT * FROM users", max_rows=10)
 
 
-def test_db_explain(mock_registry):
+@pytest.mark.anyio
+async def test_db_explain(workspace_ctx):
     """Test db_explain tool."""
-    result = db_explain("SELECT * FROM users")
+    result = await db_explain(ctx=MagicMock(), query="SELECT * FROM users")
     assert result["plan"] == "<plan>"
 
 
-def test_db_list_tables(mock_registry):
+@pytest.mark.anyio
+async def test_db_list_tables(workspace_ctx):
     """Test db_list_tables tool."""
-    result = db_list_tables()
+    result = await db_list_tables(ctx=MagicMock())
     assert "tables" in result
     assert len(result["tables"]) == 1
 
 
-def test_db_list_views(mock_registry):
+@pytest.mark.anyio
+async def test_db_list_views(workspace_ctx):
     """Test db_list_views tool."""
-    result = db_list_views()
+    result = await db_list_views(ctx=MagicMock())
     assert "views" in result
     assert len(result["views"]) == 1
 
 
-def test_db_check_readonly_status(mock_registry):
+@pytest.mark.anyio
+async def test_db_check_readonly_status(workspace_ctx):
     """Test db_check_readonly_status tool."""
-    result = db_check_readonly_status()
+    result = await db_check_readonly_status(ctx=MagicMock())
     assert result["readonly"] is True
     assert "details" in result
 
 
-def test_tools_reject_write_operations(mock_registry):
+@pytest.mark.anyio
+async def test_tools_reject_write_operations(workspace_ctx):
     """Test that tools reject write operations."""
     with pytest.raises(ValueError, match="INSERT"):
-        db_count_query_results("INSERT INTO users VALUES (1)")
+        await db_count_query_results(ctx=MagicMock(), query="INSERT INTO users VALUES (1)")
 
     with pytest.raises(ValueError, match="SELECT \\.\\.\\. INTO"):
-        db_count_query_results("SELECT * INTO users_copy FROM users")
+        await db_count_query_results(ctx=MagicMock(), query="SELECT * INTO users_copy FROM users")
 
 
 @pytest.mark.anyio
 async def test_db_list_databases_includes_dialect():
     """Test that db_list_databases includes dialect information."""
-    with patch("db_inspector_mcp.tools.get_registry") as mock_get_registry, \
-         patch("db_inspector_mcp.tools._ensure_backends_initialized"):
-        mock_access_backend = MagicMock()
-        mock_access_backend.sql_dialect = "access"
-        mock_access_backend.is_connected = True
-        mock_access_backend.get_object_counts.return_value = {"tables": 10}
-        
-        mock_mssql_backend = MagicMock()
-        mock_mssql_backend.sql_dialect = "mssql"
-        mock_mssql_backend.is_connected = False
-        
-        registry = MagicMock()
-        registry.list_backends.return_value = ["legacy", "new"]
-        registry.get_default_name.return_value = "legacy"
-        registry.get.side_effect = lambda name: (
-            mock_access_backend if name == "legacy" else mock_mssql_backend
-        )
-        mock_get_registry.return_value = registry
-        
-        mock_ctx = MagicMock()
-        result = await db_list_databases(mock_ctx)
-        
-        assert "databases" in result
-        assert len(result["databases"]) == 2
-        
-        # Connected backend gets object counts and status
-        legacy_db = next(db for db in result["databases"] if db["name"] == "legacy")
-        assert legacy_db["dialect"] == "access"
-        assert legacy_db["is_default"] is True
-        assert legacy_db["status"] == "connected"
-        assert legacy_db["object_counts"] == {"tables": 10}
-        mock_access_backend.get_object_counts.assert_called_once()
-        
-        # Not-connected backend skips object counts
-        new_db = next(db for db in result["databases"] if db["name"] == "new")
-        assert new_db["dialect"] == "mssql"
-        assert new_db["is_default"] is False
-        assert new_db["status"] == "not_connected"
-        assert new_db["object_counts"] == {}
-        mock_mssql_backend.get_object_counts.assert_not_called()
+    mock_access_backend = MagicMock()
+    mock_access_backend.sql_dialect = "access"
+    mock_access_backend.is_connected = True
+    mock_access_backend.get_object_counts.return_value = {"tables": 10}
+
+    mock_mssql_backend = MagicMock()
+    mock_mssql_backend.sql_dialect = "mssql"
+    mock_mssql_backend.is_connected = False
+
+    registry = MagicMock()
+    registry.list_backends.return_value = ["legacy", "new"]
+    registry.get_default_name.return_value = "legacy"
+    registry.get.side_effect = lambda name: (
+        mock_access_backend if name == "legacy" else mock_mssql_backend
+    )
+
+    async def fake_get_registry_for(ctx):
+        return registry, {}, Path("/fake/workspace")
+
+    with patch("db_inspector_mcp.tools.get_workspace_manager") as mock_mgr, \
+         patch("db_inspector_mcp.tools.refresh_logging_from_env"):
+        manager = MagicMock()
+        manager.get_registry_for = fake_get_registry_for
+        mock_mgr.return_value = manager
+
+        result = await db_list_databases(ctx=MagicMock())
+
+    assert "databases" in result
+    assert len(result["databases"]) == 2
+
+    legacy_db = next(db for db in result["databases"] if db["name"] == "legacy")
+    assert legacy_db["dialect"] == "access"
+    assert legacy_db["is_default"] is True
+    assert legacy_db["status"] == "connected"
+    assert legacy_db["object_counts"] == {"tables": 10}
+    mock_access_backend.get_object_counts.assert_called_once()
+
+    new_db = next(db for db in result["databases"] if db["name"] == "new")
+    assert new_db["dialect"] == "mssql"
+    assert new_db["is_default"] is False
+    assert new_db["status"] == "not_connected"
+    assert new_db["object_counts"] == {}
+    mock_mssql_backend.get_object_counts.assert_not_called()
 
 
-def test_db_sql_help_access_joins():
+@pytest.mark.anyio
+async def test_db_sql_help_access_joins():
     """Test db_sql_help returns Access JOIN syntax help."""
-    with patch("db_inspector_mcp.tools.get_registry") as mock_get_registry:
-        mock_backend = MagicMock()
-        mock_backend.sql_dialect = "access"
-        
-        registry = MagicMock()
-        registry.get.return_value = mock_backend
-        mock_get_registry.return_value = registry
-        
-        result = db_sql_help("joins")
-        
-        assert result["dialect"] == "access"
-        assert result["topic"] == "joins"
-        assert "examples" in result
-        assert "parentheses" in result["description"].lower()
+    mock_backend = MagicMock()
+    mock_backend.sql_dialect = "access"
+    registry = MagicMock()
+    registry.get.return_value = mock_backend
+
+    async def fake_get_registry_for(ctx):
+        return registry, {}, Path("/fake/workspace")
+
+    with patch("db_inspector_mcp.tools.get_workspace_manager") as mock_mgr, \
+         patch("db_inspector_mcp.tools.refresh_logging_from_env"):
+        manager = MagicMock()
+        manager.get_registry_for = fake_get_registry_for
+        mock_mgr.return_value = manager
+
+        result = await db_sql_help(ctx=MagicMock(), topic="joins")
+
+    assert result["dialect"] == "access"
+    assert result["topic"] == "joins"
+    assert "examples" in result
+    assert "parentheses" in result["description"].lower()
 
 
-def test_db_sql_help_access_distinct_mentions_distinctrow():
-    """Regression: the Access 'distinct' help topic must mention DISTINCTROW.
+@pytest.mark.anyio
+async def test_db_sql_help_access_distinct_mentions_distinctrow():
+    """Regression: the Access 'distinct' help topic must mention DISTINCTROW."""
+    mock_backend = MagicMock()
+    mock_backend.sql_dialect = "access"
+    registry = MagicMock()
+    registry.get.return_value = mock_backend
 
-    DISTINCTROW is a valid Access-only SQL keyword (the query designer's
-    default modifier on multi-table queries). Earlier versions of this help
-    topic only documented DISTINCT, which gave readers the false impression
-    that DISTINCTROW was unsupported. Both the topic body and the 'all'
-    summary should reference it.
-    """
-    with patch("db_inspector_mcp.tools.get_registry") as mock_get_registry:
-        mock_backend = MagicMock()
-        mock_backend.sql_dialect = "access"
+    async def fake_get_registry_for(ctx):
+        return registry, {}, Path("/fake/workspace")
 
-        registry = MagicMock()
-        registry.get.return_value = mock_backend
-        mock_get_registry.return_value = registry
+    with patch("db_inspector_mcp.tools.get_workspace_manager") as mock_mgr, \
+         patch("db_inspector_mcp.tools.refresh_logging_from_env"):
+        manager = MagicMock()
+        manager.get_registry_for = fake_get_registry_for
+        mock_mgr.return_value = manager
 
-        topic = db_sql_help("distinct")
+        topic = await db_sql_help(ctx=MagicMock(), topic="distinct")
 
-        assert topic["dialect"] == "access"
-        assert topic["topic"] == "distinct"
-        assert "DISTINCTROW" in topic["title"]
-        assert "DISTINCTROW" in topic["description"]
-        assert "DISTINCTROW" in topic["pattern"]
-        example_sqls = " ".join(ex["sql"] for ex in topic["examples"])
-        assert "DISTINCTROW" in example_sqls
+    assert topic["dialect"] == "access"
+    assert topic["topic"] == "distinct"
+    assert "DISTINCTROW" in topic["title"]
+    assert "DISTINCTROW" in topic["description"]
+    assert "DISTINCTROW" in topic["pattern"]
+    example_sqls = " ".join(ex["sql"] for ex in topic["examples"])
+    assert "DISTINCTROW" in example_sqls
 
-        summary = db_sql_help("all")
-        assert "DISTINCTROW" in " ".join(summary["summary"].keys()) or any(
-            "DISTINCTROW" in v for v in summary["summary"].values()
-        )
+    summary = await db_sql_help(ctx=MagicMock(), topic="all")
+    assert "DISTINCTROW" in " ".join(summary["summary"].keys()) or any(
+        "DISTINCTROW" in v for v in summary["summary"].values()
+    )
 
 
-def test_db_sql_help_access_all():
+@pytest.mark.anyio
+async def test_db_sql_help_access_all():
     """Test db_sql_help returns Access quick reference."""
-    with patch("db_inspector_mcp.tools.get_registry") as mock_get_registry:
-        mock_backend = MagicMock()
-        mock_backend.sql_dialect = "access"
-        
-        registry = MagicMock()
-        registry.get.return_value = mock_backend
-        mock_get_registry.return_value = registry
-        
-        result = db_sql_help("all")
-        
-        assert result["dialect"] == "access"
-        assert "summary" in result
-        assert "Multiple JOINs" in result["summary"]
-        assert "Conditionals" in result["summary"]
+    mock_backend = MagicMock()
+    mock_backend.sql_dialect = "access"
+    registry = MagicMock()
+    registry.get.return_value = mock_backend
+
+    async def fake_get_registry_for(ctx):
+        return registry, {}, Path("/fake/workspace")
+
+    with patch("db_inspector_mcp.tools.get_workspace_manager") as mock_mgr, \
+         patch("db_inspector_mcp.tools.refresh_logging_from_env"):
+        manager = MagicMock()
+        manager.get_registry_for = fake_get_registry_for
+        mock_mgr.return_value = manager
+
+        result = await db_sql_help(ctx=MagicMock(), topic="all")
+
+    assert result["dialect"] == "access"
+    assert "summary" in result
+    assert "Multiple JOINs" in result["summary"]
+    assert "Conditionals" in result["summary"]
 
 
-def test_db_sql_help_invalid_topic():
+@pytest.mark.anyio
+async def test_db_sql_help_invalid_topic():
     """Test db_sql_help returns error for invalid topic."""
-    with patch("db_inspector_mcp.tools.get_registry") as mock_get_registry:
-        mock_backend = MagicMock()
-        mock_backend.sql_dialect = "access"
-        
-        registry = MagicMock()
-        registry.get.return_value = mock_backend
-        mock_get_registry.return_value = registry
-        
-        result = db_sql_help("invalid_topic")
-        
-        assert "error" in result
-        assert "available_topics" in result
+    mock_backend = MagicMock()
+    mock_backend.sql_dialect = "access"
+    registry = MagicMock()
+    registry.get.return_value = mock_backend
+
+    async def fake_get_registry_for(ctx):
+        return registry, {}, Path("/fake/workspace")
+
+    with patch("db_inspector_mcp.tools.get_workspace_manager") as mock_mgr, \
+         patch("db_inspector_mcp.tools.refresh_logging_from_env"):
+        manager = MagicMock()
+        manager.get_registry_for = fake_get_registry_for
+        mock_mgr.return_value = manager
+
+        result = await db_sql_help(ctx=MagicMock(), topic="invalid_topic")
+
+    assert "error" in result
+    assert "available_topics" in result
 
 
-def test_db_sql_help_defaults_to_all():
+@pytest.mark.anyio
+async def test_db_sql_help_defaults_to_all():
     """Test db_sql_help defaults to 'all' when no topic specified."""
-    with patch("db_inspector_mcp.tools.get_registry") as mock_get_registry:
-        mock_backend = MagicMock()
-        mock_backend.sql_dialect = "access"
-        
-        registry = MagicMock()
-        registry.get.return_value = mock_backend
-        mock_get_registry.return_value = registry
-        
-        result = db_sql_help()
-        
-        assert result["dialect"] == "access"
-        assert result["topic"] == "all"
-        assert "summary" in result
+    mock_backend = MagicMock()
+    mock_backend.sql_dialect = "access"
+    registry = MagicMock()
+    registry.get.return_value = mock_backend
 
+    async def fake_get_registry_for(ctx):
+        return registry, {}, Path("/fake/workspace")
 
-# ---------------------------------------------------------------------------
-# db_list_databases: empty -> explicit error, and never connects
-# ---------------------------------------------------------------------------
+    with patch("db_inspector_mcp.tools.get_workspace_manager") as mock_mgr, \
+         patch("db_inspector_mcp.tools.refresh_logging_from_env"):
+        manager = MagicMock()
+        manager.get_registry_for = fake_get_registry_for
+        mock_mgr.return_value = manager
+
+        result = await db_sql_help(ctx=MagicMock())
+
+    assert result["dialect"] == "access"
+    assert result["topic"] == "all"
+    assert "summary" in result
+
 
 @pytest.mark.anyio
 async def test_db_list_databases_empty_returns_error():
     """An empty registry yields an explicit error, not a silent empty success."""
-    with patch("db_inspector_mcp.tools.get_registry") as mock_get_registry, \
-         patch("db_inspector_mcp.tools._ensure_backends_initialized"):
-        registry = MagicMock()
-        registry.list_backends.return_value = []
-        registry.get_default_name.return_value = None
-        mock_get_registry.return_value = registry
+    registry = MagicMock()
+    registry.list_backends.return_value = []
+    registry.get_default_name.return_value = None
 
-        result = await db_list_databases(MagicMock())
+    async def fake_get_registry_for(ctx):
+        return registry, {}, Path("/fake/workspace")
 
-        assert result["databases"] == []
-        assert result["default"] is None
-        assert "error" in result
-        assert "No database backends" in result["error"]
+    with patch("db_inspector_mcp.tools.get_workspace_manager") as mock_mgr, \
+         patch("db_inspector_mcp.tools.refresh_logging_from_env"):
+        manager = MagicMock()
+        manager.get_registry_for = fake_get_registry_for
+        mock_mgr.return_value = manager
+
+        result = await db_list_databases(ctx=MagicMock())
+
+    assert result["databases"] == []
+    assert result["default"] is None
+    assert "error" in result
+    assert "No database backends" in result["error"]
 
 
 @pytest.mark.anyio
 async def test_db_list_databases_does_not_connect_disconnected_backend():
-    """db_list_databases must not open a connection for disconnected backends.
-
-    A single locked/slow backend would otherwise block discovery of every
-    database, which is the bug this guards against.
-    """
-    with patch("db_inspector_mcp.tools.get_registry") as mock_get_registry, \
-         patch("db_inspector_mcp.tools._ensure_backends_initialized"):
-        backend = MagicMock()
-        backend.sql_dialect = "access"
-        backend.is_connected = False
-        backend.get_object_counts.side_effect = AssertionError(
-            "db_list_databases must not connect to a disconnected backend"
-        )
-
-        registry = MagicMock()
-        registry.list_backends.return_value = ["sync"]
-        registry.get_default_name.return_value = "sync"
-        registry.get.return_value = backend
-        mock_get_registry.return_value = registry
-
-        result = await db_list_databases(MagicMock())
-
-        assert len(result["databases"]) == 1
-        assert result["databases"][0]["status"] == "not_connected"
-        assert result["databases"][0]["object_counts"] == {}
-        backend.get_object_counts.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
-# Lazy backend initialization: retryable on failure, guard only on success
-# ---------------------------------------------------------------------------
-
-@pytest.mark.anyio
-async def test_lazy_init_retryable_when_no_env(tmp_path, monkeypatch):
-    """If no workspace root has a .env, the guard stays unset so a later call retries."""
-    import db_inspector_mcp.tools as tools_mod
-    monkeypatch.setattr(tools_mod, "_lazy_init_attempted", False)
+    """db_list_databases must not open a connection for disconnected backends."""
+    backend = MagicMock()
+    backend.sql_dialect = "access"
+    backend.is_connected = False
+    backend.get_object_counts.side_effect = AssertionError(
+        "db_list_databases must not connect to a disconnected backend"
+    )
 
     registry = MagicMock()
-    registry.list_backends.return_value = []
+    registry.list_backends.return_value = ["sync"]
+    registry.get_default_name.return_value = "sync"
+    registry.get.return_value = backend
 
-    root = MagicMock()
-    root.uri = (tmp_path / "no_env_dir").as_uri()
+    async def fake_get_registry_for(ctx):
+        return registry, {}, Path("/fake/workspace")
 
-    ctx = MagicMock()
+    with patch("db_inspector_mcp.tools.get_workspace_manager") as mock_mgr, \
+         patch("db_inspector_mcp.tools.refresh_logging_from_env"):
+        manager = MagicMock()
+        manager.get_registry_for = fake_get_registry_for
+        mock_mgr.return_value = manager
 
-    async def fake_list_roots():
-        return MagicMock(roots=[root])
+        result = await db_list_databases(ctx=MagicMock())
 
-    ctx.session.list_roots = fake_list_roots
-
-    with patch.object(tools_mod, "get_registry", return_value=registry):
-        await tools_mod._ensure_backends_initialized(ctx)
-
-    assert tools_mod._lazy_init_attempted is False
-
-
-@pytest.mark.anyio
-async def test_lazy_init_sets_guard_on_success(tmp_path, monkeypatch):
-    """A successful init commits the guard so we don't re-scan on every call."""
-    import db_inspector_mcp.tools as tools_mod
-    monkeypatch.setattr(tools_mod, "_lazy_init_attempted", False)
-    (tmp_path / ".env").write_text("DB_MCP_DATABASE=sqlserver\n")
-
-    registry = MagicMock()
-    registry.list_backends.return_value = []
-
-    new_registry = MagicMock()
-    new_registry.list_backends.return_value = ["default"]
-    new_registry.get_default_name.return_value = "default"
-
-    root = MagicMock()
-    root.uri = tmp_path.as_uri()
-
-    ctx = MagicMock()
-
-    async def fake_list_roots():
-        return MagicMock(roots=[root])
-
-    ctx.session.list_roots = fake_list_roots
-
-    with patch.object(tools_mod, "get_registry", return_value=registry), \
-         patch.object(tools_mod, "initialize_from_workspace", return_value=new_registry) as mock_init:
-        await tools_mod._ensure_backends_initialized(ctx)
-
-    mock_init.assert_called_once()
-    assert tools_mod._lazy_init_attempted is True
-
-
-@pytest.mark.anyio
-async def test_lazy_init_failure_is_retryable(tmp_path, monkeypatch):
-    """If initialization raises (e.g. locked backend), the guard stays unset."""
-    import db_inspector_mcp.tools as tools_mod
-    monkeypatch.setattr(tools_mod, "_lazy_init_attempted", False)
-    (tmp_path / ".env").write_text("DB_MCP_DATABASE=sqlserver\n")
-
-    registry = MagicMock()
-    registry.list_backends.return_value = []
-
-    root = MagicMock()
-    root.uri = tmp_path.as_uri()
-
-    ctx = MagicMock()
-
-    async def fake_list_roots():
-        return MagicMock(roots=[root])
-
-    ctx.session.list_roots = fake_list_roots
-
-    with patch.object(tools_mod, "get_registry", return_value=registry), \
-         patch.object(tools_mod, "initialize_from_workspace", side_effect=RuntimeError("locked")):
-        await tools_mod._ensure_backends_initialized(ctx)
-
-    assert tools_mod._lazy_init_attempted is False
-
+    assert len(result["databases"]) == 1
+    assert result["databases"][0]["status"] == "not_connected"
+    assert result["databases"][0]["object_counts"] == {}
+    backend.get_object_counts.assert_not_called()

@@ -56,6 +56,7 @@ class AccessODBCBackend(DatabaseBackend):
         connection_string: str,
         query_timeout_seconds: int = 30,
         connection_ttl_seconds: float | None = None,
+        connect_timeout_seconds: float | None = None,
     ):
         """
         Initialize Access ODBC backend.
@@ -90,13 +91,16 @@ class AccessODBCBackend(DatabaseBackend):
         # Wall-clock bound for opening a new connection (see
         # _DEFAULT_CONNECT_TIMEOUT_SECONDS).  Overridable via env for sites
         # with unusually slow storage.
-        self._connect_timeout: float = _DEFAULT_CONNECT_TIMEOUT_SECONDS
-        connect_timeout_env = os.getenv("DB_MCP_ACCESS_CONNECT_TIMEOUT")
-        if connect_timeout_env:
-            try:
-                self._connect_timeout = float(connect_timeout_env)
-            except ValueError:
-                pass
+        if connect_timeout_seconds is not None:
+            self._connect_timeout = connect_timeout_seconds
+        else:
+            self._connect_timeout = _DEFAULT_CONNECT_TIMEOUT_SECONDS
+            connect_timeout_env = os.getenv("DB_MCP_ACCESS_CONNECT_TIMEOUT")
+            if connect_timeout_env:
+                try:
+                    self._connect_timeout = float(connect_timeout_env)
+                except ValueError:
+                    pass
     
     def _ensure_dbq_parameter(self, connection_string: str) -> str:
         """
