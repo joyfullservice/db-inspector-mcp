@@ -41,23 +41,24 @@ def verify_readonly_for_registry(
 ) -> None:
     """Verify read-only status for all registered backends.
 
+    When ``DB_MCP_VERIFY_READONLY`` is true (default), every verifiable backend
+    must be confirmed read-only. Write permissions detected or an inconclusive
+    check (timeout/error) fail closed. Set ``DB_MCP_VERIFY_READONLY=false`` to
+    skip verification entirely.
+
     Args:
-        config: Configuration dict with DB_MCP_VERIFY_READONLY and
-            DB_MCP_READONLY_FAIL_ON_WRITE keys.
+        config: Configuration dict with DB_MCP_VERIFY_READONLY key.
         registry: BackendRegistry to verify.
-        exit_on_write_failure: When True (startup path), call sys.exit(1) if
-            write permissions are detected and DB_MCP_READONLY_FAIL_ON_WRITE
-            is set. When False (per-workspace lazy path), raise ValueError
+        exit_on_write_failure: When True (startup path), call sys.exit(1) on
+            failure. When False (per-workspace lazy path), raise ValueError
             instead so other workspaces are unaffected.
     """
     verify_readonly = config.get("DB_MCP_VERIFY_READONLY", "true").lower() == "true"
     if not verify_readonly:
         return
 
-    env_fail_on_write = (
-        config.get("DB_MCP_READONLY_FAIL_ON_WRITE", "false").lower() == "true"
-    )
-    write_failures: list[str] = []
+    write_detected: list[str] = []
+    inconclusive: list[str] = []
 
     for backend_name in registry.list_backends():
         try:
@@ -67,31 +68,47 @@ def verify_readonly_for_registry(
             result = _verify_readonly_bounded(backend, _VERIFY_READONLY_TIMEOUT_SECONDS)
 
             if result.get("readonly") is None:
+                detail = result.get("details", "unknown")
                 print(
-                    f"[{backend_name}] ⚠ Could not verify read-only status: "
-                    f"{result.get('details', 'unknown')}",
+                    f"[{backend_name}] ⚠ Could not verify read-only status: {detail}",
                     file=sys.stderr,
                 )
+                inconclusive.append(f"{backend_name} ({detail})")
                 continue
 
-            readonly_status = "✓ Read-only" if result["readonly"] else "⚠ Write permissions detected"
+            readonly_status = (
+                "✓ Read-only" if result["readonly"] else "⚠ Write permissions detected"
+            )
             print(f"[{backend_name}] {readonly_status}: {result['details']}", file=sys.stderr)
 
-            if not result["readonly"] and env_fail_on_write:
-                write_failures.append(backend_name)
+            if not result["readonly"]:
+                write_detected.append(backend_name)
         except Exception as e:
             print(
                 f"Warning: Could not verify read-only status for '{backend_name}': {e}",
                 file=sys.stderr,
             )
+            inconclusive.append(f"{backend_name} ({e})")
 
-    if write_failures and env_fail_on_write:
-        names = ", ".join(write_failures)
-        message = (
-            f"Write permissions detected on: {names}. "
-            "Set DB_MCP_READONLY_FAIL_ON_WRITE=false to allow, or fix connection permissions."
+    if not write_detected and not inconclusive:
+        return
+
+    parts: list[str] = []
+    if write_detected:
+        parts.append(
+            f"Write permissions detected on: {', '.join(write_detected)}"
         )
-        if exit_on_write_failure:
-            print(f"Failing startup: {message}", file=sys.stderr)
-            sys.exit(1)
-        raise ValueError(message)
+    if inconclusive:
+        parts.append(
+            "Could not verify read-only status for: "
+            + "; ".join(inconclusive)
+        )
+    message = (
+        ". ".join(parts)
+        + ". Set DB_MCP_VERIFY_READONLY=false to skip verification, "
+        "or fix connection permissions."
+    )
+    if exit_on_write_failure:
+        print(f"Failing startup: {message}", file=sys.stderr)
+        sys.exit(1)
+    raise ValueError(message)

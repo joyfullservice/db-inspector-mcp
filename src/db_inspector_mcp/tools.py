@@ -21,7 +21,6 @@ All tools are read-only by default and designed for safe database exploration an
 
 import inspect
 import re
-import sys
 from pathlib import Path
 from typing import Any, get_type_hints
 
@@ -778,6 +777,38 @@ def db_explain(query: str, database: str | None = None) -> dict[str, Any]:
         return {"error": msg, "plan": None}
 
 
+def _compare_sample_rows(
+    samples1: list[dict[str, Any]],
+    samples2: list[dict[str, Any]],
+    common_cols: set[str],
+    max_rows: int = 10,
+) -> dict[str, Any]:
+    """Compare sample rows over shared columns, capped at *max_rows*."""
+    rows_compared = min(len(samples1), len(samples2), max_rows)
+    mismatches: list[dict[str, Any]] = []
+    for row_idx in range(rows_compared):
+        row1 = samples1[row_idx]
+        row2 = samples2[row_idx]
+        for col in sorted(common_cols):
+            value1 = row1.get(col)
+            value2 = row2.get(col)
+            if value1 != value2:
+                mismatches.append({
+                    "row_index": row_idx,
+                    "column": col,
+                    "value_1": value1,
+                    "value_2": value2,
+                })
+    return {
+        "rows_compared": rows_compared,
+        "samples_1_count": len(samples1),
+        "samples_2_count": len(samples2),
+        "mismatch_count": len(mismatches),
+        "mismatches": mismatches,
+        "note": f"Sample comparison limited to first {max_rows} rows",
+    }
+
+
 @db_tool("db_compare_queries")
 def db_compare_queries(
     sql1: str,
@@ -840,7 +871,8 @@ def db_compare_queries(
         - columns_missing_in_2, columns_missing_in_1: Column name differences
         - type_mismatches: List of columns with different types
         - database1, database2: Database names used
-        - sample_differences: (if compare_samples=True) Sample data comparison
+        - sample_differences: (if compare_samples=True) rows_compared,
+          mismatch_count, and per-cell mismatches over common columns
     """
     validate_readonly_sql(sql1)
     validate_readonly_sql(sql2)
@@ -904,11 +936,9 @@ def db_compare_queries(
             try:
                 samples1 = backend1.preview(sql1, 10)
                 samples2 = backend2.preview(sql2, 10)
-                result["sample_differences"] = {
-                    "samples_1_count": len(samples1),
-                    "samples_2_count": len(samples2),
-                    "note": "Sample comparison limited to first 10 rows",
-                }
+                result["sample_differences"] = _compare_sample_rows(
+                    samples1, samples2, common_cols,
+                )
             except Exception as e:
                 result["sample_differences"] = {"error": str(e)}
         

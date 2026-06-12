@@ -6,6 +6,7 @@ import sys
 
 from .backends.registry import get_registry
 from .config import (
+    NoDatabaseConfigError,
     config_from_env,
     initialize_backends,
     parse_workspace_env,
@@ -95,12 +96,15 @@ def main() -> None:
 
         verify_readonly_for_registry(config, registry, exit_on_write_failure=True)
         manager.seed(root, registry, env_map)
-    except ValueError:
+    except NoDatabaseConfigError:
         print(
             "No database configuration found at startup — "
             "will initialize per workspace on first tool call.",
             file=sys.stderr,
         )
+    except ValueError as e:
+        print(f"Failed to initialize database backends: {e}", file=sys.stderr)
+        sys.exit(1)
     except Exception as e:
         print(f"Failed to initialize database backends: {e}", file=sys.stderr)
         sys.exit(1)

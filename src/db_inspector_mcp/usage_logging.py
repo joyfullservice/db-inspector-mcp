@@ -542,20 +542,3 @@ def with_logging(tool_name: str):
 
             return wrapper
     return decorator
-
-
-def get_log_file_path() -> Path | None:
-    """
-    Get the current log file path.
-    
-    Returns:
-        Path to log file if logging is enabled, None otherwise.
-    """
-    if _initialize_logging():
-        return _log_file
-    return None
-
-
-def is_logging_enabled() -> bool:
-    """Check if logging is currently enabled."""
-    return _initialize_logging()

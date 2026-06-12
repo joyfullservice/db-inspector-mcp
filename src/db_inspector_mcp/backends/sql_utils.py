@@ -13,6 +13,10 @@ import re
 _SELECT_MODIFIER_RE = re.compile(
     r"^SELECT\s+(DISTINCT|ALL)\s+", re.IGNORECASE
 )
+_TOP_AFTER_SELECT_RE = re.compile(
+    r"^SELECT\s+(?:(?:DISTINCT|ALL)\s+)?TOP\s+\d+",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def _find_final_select_pos(sql: str) -> int | None:
@@ -92,6 +96,52 @@ def split_cte_prefix(query: str) -> tuple[str, str]:
     return (stripped[:pos], stripped[pos:])
 
 
+def has_top_clause(query: str) -> bool:
+    """Return True if the final SELECT already has a TOP n clause."""
+    _, core = split_cte_prefix(query.strip())
+    return bool(_TOP_AFTER_SELECT_RE.match(core.lstrip()))
+
+
+def has_limit_clause(query: str) -> bool:
+    """Return True if a top-level LIMIT keyword is present outside string literals."""
+    upper = query.strip().upper()
+    depth = 0
+    i = 0
+    length = len(upper)
+
+    while i < length:
+        ch = upper[i]
+
+        if ch == "'":
+            i += 1
+            while i < length:
+                if upper[i] == "'":
+                    if i + 1 < length and upper[i + 1] == "'":
+                        i += 2
+                        continue
+                    break
+                i += 1
+            i += 1
+            continue
+
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+        elif depth == 0 and upper[i : i + 5] == "LIMIT":
+            before_ok = i == 0 or not (upper[i - 1].isalnum() or upper[i - 1] == "_")
+            end = i + 5
+            after_ok = end >= length or not (
+                upper[end].isalnum() or upper[end] == "_"
+            )
+            if before_ok and after_ok:
+                return True
+
+        i += 1
+
+    return False
+
+
 def inject_top_clause(query: str, n: int) -> str:
     """Inject ``TOP n`` into a SQL query.
 
@@ -104,7 +154,7 @@ def inject_top_clause(query: str, n: int) -> str:
     """
     query = query.strip()
 
-    if "TOP " in query.upper():
+    if has_top_clause(query):
         return query
 
     cte_prefix, core = split_cte_prefix(query)

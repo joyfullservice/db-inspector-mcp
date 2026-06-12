@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from psycopg2.extras import RealDictCursor
 
 from .base import DatabaseBackend
+from .sql_utils import has_limit_clause, split_cte_prefix
 
 
 class PostgresBackend(DatabaseBackend):
@@ -60,26 +61,35 @@ class PostgresBackend(DatabaseBackend):
     def _execute_query(self, sql: str, fetch: bool = True) -> Any:
         """
         Execute a SQL query and optionally fetch results.
-        
+
         Args:
             sql: SQL query to execute
             fetch: Whether to fetch results
-            
+
         Returns:
             Cursor with results if fetch=True, otherwise None
         """
+        import psycopg2
         from psycopg2.extras import RealDictCursor
-        
-        conn = self._get_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute(sql)
-        if fetch:
-            return cursor
-        return None
+
+        for attempt in range(2):
+            try:
+                conn = self._get_connection()
+                cursor = conn.cursor(cursor_factory=RealDictCursor)
+                cursor.execute(sql)
+                if fetch:
+                    return cursor
+                return None
+            except (psycopg2.OperationalError, psycopg2.InterfaceError):
+                if attempt == 0:
+                    self.close()
+                    continue
+                raise
     
     def count_query_results(self, query: str) -> int:
         """Count row count by wrapping query in SELECT COUNT(*)."""
-        wrapped_query = f"SELECT COUNT(*) as cnt FROM ({query}) AS subquery"
+        cte, core = split_cte_prefix(query)
+        wrapped_query = f"{cte}SELECT COUNT(*) as cnt FROM ({core}) AS subquery"
         cursor = self._execute_query(wrapped_query)
         result = cursor.fetchone()
         count = result["cnt"] if result else 0
@@ -88,8 +98,8 @@ class PostgresBackend(DatabaseBackend):
     
     def get_query_columns(self, query: str) -> list[dict[str, Any]]:
         """Get column metadata using LIMIT 0."""
-        # Use LIMIT 0 to get metadata without fetching data
-        wrapped_query = f"SELECT * FROM ({query}) AS subquery LIMIT 0"
+        cte, core = split_cte_prefix(query)
+        wrapped_query = f"{cte}SELECT * FROM ({core}) AS subquery LIMIT 0"
         cursor = self._execute_query(wrapped_query)
         
         columns = []
@@ -97,12 +107,14 @@ class PostgresBackend(DatabaseBackend):
             if col:
                 # PostgreSQL cursor description format:
                 # (name, type_code, display_size, internal_size, precision, scale, null_ok)
+                precision = col.precision if hasattr(col, "precision") else None
+                scale = col.scale if hasattr(col, "scale") else None
                 columns.append({
                     "name": col.name,
                     "type": str(col.type_code),
                     "nullable": col.null_ok if hasattr(col, 'null_ok') else None,
-                    "precision": col.precision if hasattr(col, 'precision') and col.precision else None,
-                    "scale": col.scale if hasattr(col, 'scale') and col.scale else None,
+                    "precision": precision if precision is not None else None,
+                    "scale": scale if scale is not None else None,
                 })
         
         cursor.close()
@@ -110,9 +122,11 @@ class PostgresBackend(DatabaseBackend):
     
     def sum_query_column(self, query: str, column: str) -> float | None:
         """Compute SUM of a column from query results."""
-        # Use double quotes for column name and escape embedded quotes.
+        cte, core = split_cte_prefix(query)
         safe_column = column.replace('"', '""')
-        wrapped_query = f'SELECT SUM("{safe_column}") as sum_val FROM ({query}) AS subquery'
+        wrapped_query = (
+            f'{cte}SELECT SUM("{safe_column}") as sum_val FROM ({core}) AS subquery'
+        )
         cursor = self._execute_query(wrapped_query)
         result = cursor.fetchone()
         sum_val = result["sum_val"] if result else None
@@ -121,8 +135,7 @@ class PostgresBackend(DatabaseBackend):
     
     def measure_query(self, query: str, max_rows: int) -> dict[str, Any]:
         """Measure query execution time and retrieve limited rows."""
-        # Add LIMIT clause
-        if "LIMIT" not in query.upper():
+        if not has_limit_clause(query):
             query = f"{query} LIMIT {max_rows}"
         
         start_time = time.time()
@@ -146,8 +159,7 @@ class PostgresBackend(DatabaseBackend):
     
     def preview(self, query: str, max_rows: int) -> list[dict[str, Any]]:
         """Sample N rows from a query result."""
-        # Add LIMIT clause
-        if "LIMIT" not in query.upper():
+        if not has_limit_clause(query):
             query = f"{query} LIMIT {max_rows}"
         
         cursor = self._execute_query(query)
@@ -246,7 +258,11 @@ class PostgresBackend(DatabaseBackend):
             tables.append({
                 "name": row["table_name"],
                 "schema": row["table_schema"],
-                "row_count": int(row["approximate_row_count"]) if row["approximate_row_count"] else None,
+                "row_count": (
+                    int(row["approximate_row_count"])
+                    if row["approximate_row_count"] is not None
+                    else None
+                ),
             })
 
         cursor.close()

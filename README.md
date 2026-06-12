@@ -126,8 +126,7 @@ All configuration is done through environment variables, typically in a `.env` f
 | `DB_MCP_PROJECT_DIR` | Project directory for `.env` file lookup (see [User-Level Configuration](#user-level-configuration)) | auto-detected | No |
 | `DB_MCP_QUERY_TIMEOUT_SECONDS` | Query timeout in seconds | `30` | No |
 | `DB_MCP_ALLOW_DATA_ACCESS` | Global flag to enable data access tools | `false` | No |
-| `DB_MCP_VERIFY_READONLY` | Verify read-only at startup | `true` | No |
-| `DB_MCP_READONLY_FAIL_ON_WRITE` | Fail startup if write permissions detected | `false` | No |
+| `DB_MCP_VERIFY_READONLY` | Verify read-only at startup; fail if not confirmed | `true` | No |
 
 *Either single-database (`DB_MCP_DATABASE` + `DB_MCP_CONNECTION_STRING`) or multi-database (`DB_MCP_<name>_DATABASE` + `DB_MCP_<name>_CONNECTION_STRING`) configuration is required.
 
@@ -490,7 +489,7 @@ DB_MCP_PROD_ALLOW_DATA_ACCESS=false
 
 ### Read-Only Verification
 
-At startup (if `DB_MCP_VERIFY_READONLY=true`), the server verifies the database connection is read-only by checking role membership (SQL Server) or privileges (PostgreSQL). If write permissions are detected, a warning is logged. Set `DB_MCP_READONLY_FAIL_ON_WRITE=true` to exit on detection instead.
+At startup (if `DB_MCP_VERIFY_READONLY=true`, the default), the server verifies each SQL Server/PostgreSQL backend is read-only by checking role membership or privileges. Access backends are exempt (no role-based permission model). If write permissions are detected or verification is inconclusive (timeout/error), startup fails. Set `DB_MCP_VERIFY_READONLY=false` to skip verification.
 
 ## CLI Commands
 

@@ -79,6 +79,52 @@ contradictory guidance.
 
 ---
 
+## 2026-06-12 — Fail-closed read-only gate (single flag)
+
+**Trigger**: Two flags (`DB_MCP_VERIFY_READONLY` + `DB_MCP_READONLY_FAIL_ON_WRITE`) created a fail-open default: write-capable connections only warned, and inconclusive checks (timeout/error) silently passed even when the user expected a hard guard.
+
+**Options explored**:
+- **Add `DB_MCP_READONLY_FAIL_ON_INCONCLUSIVE`** — preserves today's default but adds a third flag.
+- **Collapse to one flag, fail closed (chosen)** — `DB_MCP_VERIFY_READONLY=true` requires every verifiable backend to be confirmed read-only; write-detected or inconclusive both block startup. `DB_MCP_VERIFY_READONLY=false` is explicit approval to skip. Access backends remain exempt (not applicable ≠ inconclusive).
+
+**Decision**: Remove `DB_MCP_READONLY_FAIL_ON_WRITE`. Fail on write-detected and inconclusive when verification is enabled. Access `sql_dialect == "access"` skip unchanged.
+
+**What this rules out**: Warn-only read-only posture at default settings. Users with write-capable dev connections must set `DB_MCP_VERIFY_READONLY=false` or fix permissions.
+
+**Relevant files**: `readonly.py`, `config.py`, `main.py`, `README.md`, `.env.example`, `tests/test_readonly.py`.
+
+---
+
+## 2026-06-12 — NoDatabaseConfigError for startup deferral
+
+**Trigger**: `build_registry_from_env` raised `ValueError` for both "no config keys" and "config present but all backends failed". `main.py` caught all `ValueError` as benign deferral, so genuine misconfiguration exited silently instead of `sys.exit(1)`.
+
+**Decision**: Introduce `NoDatabaseConfigError` for the empty-config case only. `main.py` defers on that exception; other `ValueError` (all backends failed) exits with an error message.
+
+**Relevant files**: `config.py`, `main.py`, `tests/test_config.py`.
+
+---
+
+## 2026-06-12 — Postgres CTE wrapping and TOP/LIMIT token guards
+
+**Trigger**: Postgres `count_query_results`/`get_query_columns`/`sum_query_column` wrapped entire CTE queries in subqueries (syntax error). MSSQL/Postgres row caps used substring checks (`"TOP "` / `"LIMIT"`), bypassed by literals like `'TOP SECRET'` or identifiers like `DELIMITER`.
+
+**Decision**: Reuse `split_cte_prefix()` in Postgres wrap paths (aligned with MSSQL). Add `has_top_clause()` / `has_limit_clause()` with string-literal and keyword-boundary awareness; use in `inject_top_clause` and Postgres `preview`/`measure_query`.
+
+**Relevant files**: `postgres.py`, `sql_utils.py`, `tests/test_sql_utils.py`, `tests/test_backends.py`.
+
+---
+
+## 2026-06-12 — Remove unused config and logging public helpers
+
+**Trigger**: Audit found `load_config`, `get_config`, `get_backend`, `WorkspaceManager.invalidate_root`, and `get_log_file_path`/`is_logging_enabled` referenced only by tests — not the live workspace/MCP path. `config_from_env` also parsed logging keys never read from the config dict.
+
+**Decision**: Remove the dead helpers and logging keys from `config_from_env`. Keep internal `_is_development_install()` (used by logging path resolution). Hot-reload uses per-workspace mtime tracking in `WorkspaceManager._get_or_build`.
+
+**Relevant files**: `config.py`, `workspace.py`, `usage_logging.py`, `tests/test_config.py`.
+
+---
+
 ## 2026-06-12 — Remove DB_MCP_ALLOW_PREVIEW flag
 
 **Trigger**: `DB_MCP_ALLOW_PREVIEW` (global) and `DB_MCP_<NAME>_ALLOW_PREVIEW` (per-connection) were redundant with `DB_MCP_ALLOW_DATA_ACCESS`. Every data-access operation gates on the `db_preview` tool name — including `db_compare_queries(compare_samples=True)` — so the narrower preview flag unlocked the same surface area as the global data-access flag.

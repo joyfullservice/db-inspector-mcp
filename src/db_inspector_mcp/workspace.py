@@ -286,14 +286,6 @@ class WorkspaceManager:
                 mtimes=record_env_mtimes(root),
             )
 
-    def invalidate_root(self, root: Path) -> None:
-        """Drop cached entry for a workspace root (e.g. after hot-reload)."""
-        key = self._root_key(root)
-        with self._lock:
-            entry = self._registries.pop(key, None)
-        if entry is not None:
-            entry.registry.clear()
-
     def close_all(self) -> None:
         """Close all cached backend registries."""
         with self._lock:

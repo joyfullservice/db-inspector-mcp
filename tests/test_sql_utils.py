@@ -4,6 +4,8 @@ import pytest
 
 from db_inspector_mcp.backends.sql_utils import (
     _find_final_select_pos,
+    has_limit_clause,
+    has_top_clause,
     inject_top_clause,
     split_cte_prefix,
 )
@@ -312,5 +314,13 @@ class TestEdgeCases:
     def test_inject_top_with_string_containing_top(self):
         sql = "SELECT col FROM t WHERE name = 'TOP SECRET'"
         result = inject_top_clause(sql, 10)
-        # "TOP " exists in the query, so it should be returned as-is
-        assert result == sql
+        assert result == "SELECT TOP 10 col FROM t WHERE name = 'TOP SECRET'"
+
+    def test_has_top_clause_detects_real_top(self):
+        assert has_top_clause("SELECT TOP 5 * FROM t")
+        assert not has_top_clause("SELECT col FROM t WHERE name = 'TOP SECRET'")
+
+    def test_has_limit_clause_ignores_identifiers_and_literals(self):
+        assert has_limit_clause("SELECT * FROM t LIMIT 10")
+        assert not has_limit_clause("SELECT DELIMITER FROM t")
+        assert not has_limit_clause("SELECT 'NO LIMIT' AS x FROM t")

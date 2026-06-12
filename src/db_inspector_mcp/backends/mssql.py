@@ -55,20 +55,27 @@ class MSSQLBackend(DatabaseBackend):
     def _execute_query(self, sql: str, fetch: bool = True) -> Any:
         """
         Execute a SQL query and optionally fetch results.
-        
+
         Args:
             sql: SQL query to execute
             fetch: Whether to fetch results
-            
+
         Returns:
             Cursor with results if fetch=True, otherwise None
         """
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        cursor.execute(sql)
-        if fetch:
-            return cursor
-        return None
+        for attempt in range(2):
+            try:
+                conn = self._get_connection()
+                cursor = conn.cursor()
+                cursor.execute(sql)
+                if fetch:
+                    return cursor
+                return None
+            except pyodbc.OperationalError:
+                if attempt == 0:
+                    self.close()
+                    continue
+                raise
     
     def count_query_results(self, query: str) -> int:
         """Count row count by wrapping query in SELECT COUNT(*)."""

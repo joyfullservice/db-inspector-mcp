@@ -101,6 +101,76 @@ def test_postgres_backend_initialization():
     assert backend.query_timeout_seconds == 30
 
 
+def test_postgres_count_query_results_preserves_cte_prefix():
+    backend = PostgresBackend("test_connection_string", 30)
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = {"cnt": 3}
+    backend._execute_query = MagicMock(return_value=mock_cursor)
+
+    query = "WITH cte AS (SELECT 1 AS x) SELECT x FROM cte"
+    count = backend.count_query_results(query)
+
+    assert count == 3
+    sql = backend._execute_query.call_args[0][0]
+    assert sql.startswith("WITH cte AS")
+    assert "SELECT COUNT(*) as cnt FROM (SELECT x FROM cte) AS subquery" in sql
+    mock_cursor.close.assert_called_once()
+
+
+def test_postgres_reconnects_after_operational_error():
+    backend = PostgresBackend("test_connection_string", 30)
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_conn.cursor.return_value = mock_cursor
+
+    import psycopg2
+
+    attempts = {"count": 0}
+
+    def fake_get_connection():
+        attempts["count"] += 1
+        return mock_conn
+
+    backend._get_connection = fake_get_connection
+    backend.close = MagicMock()
+    mock_cursor.execute.side_effect = [
+        psycopg2.OperationalError("connection lost"),
+        None,
+    ]
+
+    cursor = backend._execute_query("SELECT 1")
+    assert cursor is mock_cursor
+    backend.close.assert_called_once()
+    assert attempts["count"] == 2
+
+
+def test_mssql_reconnects_after_operational_error():
+    backend = MSSQLBackend("test_connection_string", 30)
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_conn.cursor.return_value = mock_cursor
+
+    import pyodbc
+
+    attempts = {"count": 0}
+
+    def fake_get_connection():
+        attempts["count"] += 1
+        return mock_conn
+
+    backend._get_connection = fake_get_connection
+    backend.close = MagicMock()
+    mock_cursor.execute.side_effect = [
+        pyodbc.OperationalError("connection lost"),
+        None,
+    ]
+
+    cursor = backend._execute_query("SELECT 1")
+    assert cursor is mock_cursor
+    backend.close.assert_called_once()
+    assert attempts["count"] == 2
+
+
 def test_access_odbc_backend_initialization():
     """Test that Access ODBC backend can be initialized."""
     conn_str = "Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\test.accdb;"

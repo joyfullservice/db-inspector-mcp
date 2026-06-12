@@ -7,13 +7,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from db_inspector_mcp.config import (
+    NoDatabaseConfigError,
     _find_project_root,
     _resolve_connection_string_paths,
     build_registry_from_env,
     config_from_env,
     env_files_changed,
-    get_backend,
-    load_config,
     parse_workspace_env,
     record_env_mtimes,
 )
@@ -88,87 +87,33 @@ def test_config_from_env_defaults():
     assert config["DB_MCP_VERIFY_READONLY"] == "true"
 
 
-def test_load_config_from_env(tmp_path, monkeypatch):
-    """Test that load_config reads from .env via parse_workspace_env."""
+def test_config_from_env_via_workspace_files(tmp_path):
+    """Test that config_from_env reads values from parse_workspace_env."""
     (tmp_path / ".env").write_text(
         "DB_MCP_DATABASE=postgres\n"
         "DB_MCP_CONNECTION_STRING=dbname=test\n"
         "DB_MCP_QUERY_TIMEOUT_SECONDS=60\n"
     )
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("DB_MCP_PROJECT_DIR", raising=False)
-    config = load_config()
+    config = config_from_env(parse_workspace_env(tmp_path))
     assert config["DB_MCP_DATABASE"] == "postgres"
     assert config["DB_MCP_CONNECTION_STRING"] == "dbname=test"
     assert config["DB_MCP_QUERY_TIMEOUT_SECONDS"] == 60
 
 
-def test_get_backend_missing_backend(tmp_path, monkeypatch):
-    """Test that missing backend raises error."""
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("DB_MCP_PROJECT_DIR", raising=False)
-    with pytest.raises(ValueError, match="DB_MCP_DATABASE"):
-        get_backend()
+def test_build_registry_no_config_raises_no_database_config_error(tmp_path):
+    """Missing DB_MCP_* keys raise NoDatabaseConfigError, not generic ValueError."""
+    with pytest.raises(NoDatabaseConfigError, match="No database configuration found"):
+        build_registry_from_env({}, tmp_path)
 
 
-def test_get_backend_missing_connection_string(tmp_path, monkeypatch):
-    """Test that missing connection string raises error."""
-    (tmp_path / ".env").write_text("DB_MCP_DATABASE=sqlserver\n")
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("DB_MCP_PROJECT_DIR", raising=False)
-    with pytest.raises(ValueError, match="DB_MCP_CONNECTION_STRING"):
-        get_backend()
-
-
-def test_get_backend_invalid_backend(tmp_path, monkeypatch):
-    """Test that invalid backend raises error."""
-    (tmp_path / ".env").write_text(
-        "DB_MCP_DATABASE=invalid\nDB_MCP_CONNECTION_STRING=test\n"
-    )
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("DB_MCP_PROJECT_DIR", raising=False)
-    with pytest.raises(ValueError, match="Unsupported backend"):
-        get_backend()
-
-
-def test_get_backend_sqlserver(tmp_path, monkeypatch):
-    """Test that SQL Server backend is created."""
-    (tmp_path / ".env").write_text(
-        "DB_MCP_DATABASE=sqlserver\nDB_MCP_CONNECTION_STRING=test\n"
-    )
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("DB_MCP_PROJECT_DIR", raising=False)
-    backend = get_backend()
-    assert backend.__class__.__name__ == "MSSQLBackend"
-
-
-def test_get_backend_postgres(tmp_path, monkeypatch):
-    """Test that PostgreSQL backend is created."""
-    (tmp_path / ".env").write_text(
-        "DB_MCP_DATABASE=postgres\nDB_MCP_CONNECTION_STRING=dbname=test\n"
-    )
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("DB_MCP_PROJECT_DIR", raising=False)
-    backend = get_backend()
-    assert backend.__class__.__name__ == "PostgresBackend"
-
-
-def test_get_backend_access_odbc():
+def test_create_backend_access_odbc():
     """Test that Access ODBC backend is created."""
-    with patch.dict(
-        os.environ,
-        {
-            "DB_MCP_DATABASE": "access_odbc",
-            "DB_MCP_CONNECTION_STRING": "Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=C:\\test.accdb;",
-        },
-        clear=True,
-    ):
-        from db_inspector_mcp.config import _create_backend
-        backend = _create_backend("access_odbc", "test_connection_string", 30, {})
-        assert backend.__class__.__name__ == "AccessODBCBackend"
+    from db_inspector_mcp.config import _create_backend
+    backend = _create_backend("access_odbc", "test_connection_string", 30, {})
+    assert backend.__class__.__name__ == "AccessODBCBackend"
 
 
-def test_get_backend_access_com():
+def test_create_backend_access_com():
     """Test that Access COM backend is created."""
     with patch.dict(
         os.environ,
@@ -324,6 +269,11 @@ class TestEnvMtimeTracking:
         original_mtime = env_file.stat().st_mtime
         os.utime(str(env_file), (original_mtime + 1, original_mtime + 1))
         assert env_files_changed(tmp_path, mtimes)
+
+    def test_empty_stored_mtimes_detects_new_env(self, tmp_path):
+        assert not env_files_changed(tmp_path, {})
+        (tmp_path / ".env").write_text("X=1\n")
+        assert env_files_changed(tmp_path, {})
 
 
 class TestBuildRegistryFromEnv:

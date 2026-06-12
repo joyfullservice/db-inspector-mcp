@@ -18,6 +18,10 @@ _workspace_ctx: ContextVar[tuple[BackendRegistry, dict[str, str]] | None] = Cont
 )
 
 
+class NoDatabaseConfigError(ValueError):
+    """Raised when no DB_MCP_* database configuration keys are present."""
+
+
 def current_registry() -> BackendRegistry:
     """Return the registry for the active workspace tool call."""
     ctx = _workspace_ctx.get()
@@ -75,7 +79,6 @@ def _find_project_root() -> Path:
         package_dir = Path(__file__).parent.parent.parent.resolve()
         if (package_dir.parent / "pyproject.toml").exists():
             search_roots.append(package_dir.parent)
-        search_roots.append(package_dir.parent)
     except Exception:
         pass
 
@@ -136,9 +139,9 @@ def record_env_mtimes(directory: Path) -> dict[str, float]:
 
 def env_files_changed(directory: Path, stored_mtimes: dict[str, float]) -> bool:
     """Return True if any tracked .env file mtime differs from *stored_mtimes*."""
-    if not stored_mtimes:
-        return False
     current = record_env_mtimes(directory)
+    if not stored_mtimes:
+        return bool(current)
     for path_str, old_mtime in stored_mtimes.items():
         try:
             if Path(path_str).stat().st_mtime != old_mtime:
@@ -161,22 +164,7 @@ def config_from_env(env_map: dict[str, str]) -> dict[str, Any]:
         ),
         "DB_MCP_ALLOW_DATA_ACCESS": env_map.get("DB_MCP_ALLOW_DATA_ACCESS", "false"),
         "DB_MCP_VERIFY_READONLY": env_map.get("DB_MCP_VERIFY_READONLY", "true"),
-        "DB_MCP_READONLY_FAIL_ON_WRITE": env_map.get(
-            "DB_MCP_READONLY_FAIL_ON_WRITE", "false",
-        ),
-        "DB_MCP_ENABLE_LOGGING": (
-            env_map.get("DB_MCP_ENABLE_LOGGING", "false").lower() == "true"
-        ),
-        "DB_MCP_LOG_DIR": env_map.get("DB_MCP_LOG_DIR", ""),
-        "DB_MCP_LOG_MAX_SIZE_MB": int(env_map.get("DB_MCP_LOG_MAX_SIZE_MB", "10")),
-        "DB_MCP_LOG_BACKUP_COUNT": int(env_map.get("DB_MCP_LOG_BACKUP_COUNT", "5")),
     }
-
-
-def load_config() -> dict[str, Any]:
-    """Load configuration from the discovered project root (eager/fallback path)."""
-    root = _find_project_root()
-    return config_from_env(parse_workspace_env(root))
 
 
 def _get_access_conn_ttl(env_map: dict[str, str]) -> float | None:
@@ -326,7 +314,7 @@ def build_registry_from_env(
     db_configs = _collect_db_configs(env_map)
 
     if not db_configs:
-        raise ValueError(
+        raise NoDatabaseConfigError(
             "No database configuration found. "
             "Set DB_MCP_DATABASE/DB_MCP_CONNECTION_STRING for single database, "
             "or DB_MCP_<name>_DATABASE/DB_MCP_<name>_CONNECTION_STRING for multiple databases."
@@ -357,34 +345,6 @@ def build_registry_from_env(
     return registry
 
 
-def get_backend() -> DatabaseBackend:
-    """Create and return a database backend based on configuration."""
-    root = _find_project_root()
-    env_map = parse_workspace_env(root)
-    config = config_from_env(env_map)
-
-    backend_name = config["DB_MCP_DATABASE"]
-    connection_string = config["DB_MCP_CONNECTION_STRING"]
-    query_timeout = config["DB_MCP_QUERY_TIMEOUT_SECONDS"]
-
-    if not backend_name:
-        raise ValueError(
-            "DB_MCP_DATABASE environment variable is required. "
-            "Set DB_MCP_DATABASE=sqlserver, postgres, access_odbc, or access_com"
-        )
-
-    if not connection_string:
-        raise ValueError(
-            "DB_MCP_CONNECTION_STRING environment variable is required. "
-            "Provide a valid database connection string."
-        )
-
-    connection_string = _resolve_connection_string_paths(
-        connection_string, backend_name, root,
-    )
-    return _create_backend(backend_name, connection_string, query_timeout, env_map)
-
-
 def initialize_backends() -> BackendRegistry:
     """Initialize backends into the global registry (eager startup path)."""
     root = _find_project_root()
@@ -404,8 +364,3 @@ def check_data_access(tool_name: str, database: str | None = None) -> None:
     if not check_data_access_permission(tool_name, config, env_map, database=database):
         error_msg = get_permission_error_message(tool_name, database=database)
         raise PermissionError(error_msg)
-
-
-def get_config() -> dict[str, Any]:
-    """Get the current configuration (eager/fallback path)."""
-    return load_config()

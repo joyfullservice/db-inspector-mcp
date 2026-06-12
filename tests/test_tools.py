@@ -7,7 +7,9 @@ import pytest
 
 from db_inspector_mcp.security import validate_readonly_sql
 from db_inspector_mcp.tools import (
+    _compare_sample_rows,
     db_check_readonly_status,
+    db_compare_queries,
     db_count_query_results,
     db_explain,
     db_get_query_columns,
@@ -419,3 +421,30 @@ async def test_db_list_databases_does_not_connect_disconnected_backend():
     assert result["databases"][0]["status"] == "not_connected"
     assert result["databases"][0]["object_counts"] == {}
     backend.get_object_counts.assert_not_called()
+
+
+def test_compare_sample_rows_reports_mismatches():
+    samples1 = [{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]
+    samples2 = [{"id": 1, "name": "alice"}, {"id": 2, "name": "robert"}]
+    result = _compare_sample_rows(samples1, samples2, {"id", "name"})
+    assert result["rows_compared"] == 2
+    assert result["mismatch_count"] == 1
+    assert result["mismatches"][0]["column"] == "name"
+    assert result["mismatches"][0]["value_2"] == "robert"
+
+
+@pytest.mark.anyio
+async def test_db_compare_queries_with_samples(workspace_ctx, mock_backend):
+    mock_backend.preview.side_effect = [
+        [{"id": 1, "amount": 10}],
+        [{"id": 1, "amount": 11}],
+    ]
+    with patch("db_inspector_mcp.tools.check_data_access"):
+        result = await db_compare_queries(
+            ctx=MagicMock(),
+            sql1="SELECT id, amount FROM t",
+            sql2="SELECT id, amount FROM t",
+            compare_samples=True,
+        )
+    assert result["sample_differences"]["mismatch_count"] == 1
+    assert result["sample_differences"]["mismatches"][0]["column"] == "amount"
