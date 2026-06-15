@@ -260,6 +260,35 @@ def _write_log_entry(entry: dict[str, Any]) -> None:
         print(f"Warning: Failed to write log entry: {e}", file=sys.stderr)
 
 
+def log_workspace_resolution_failure(
+    tool_name: str,
+    error: Exception,
+    parameters: dict[str, Any] | None = None,
+) -> None:
+    """Log workspace/.env resolution failures before workspace logging is active."""
+    config = {
+        "enabled": True,
+        "log_dir": str(_get_default_log_dir()),
+        "max_size_mb": int(os.getenv("DB_MCP_LOG_MAX_SIZE_MB", "10")),
+        "backup_count": int(os.getenv("DB_MCP_LOG_BACKUP_COUNT", "5")),
+    }
+    if not _initialize_logging_from_config(config):
+        return
+
+    error_text = str(error)
+    entry = {
+        "event": "workspace_resolution_failure",
+        "tool": tool_name,
+        "workspace_root": None,
+        "parameters": _sanitize_parameters(parameters or {}),
+        "success": False,
+        "execution_time_ms": 0,
+        "error": _truncate_string(error_text, max_length=500),
+        "error_pattern": _extract_error_pattern(error_text),
+    }
+    _write_log_entry(entry)
+
+
 def log_tool_call(
     tool_name: str,
     parameters: dict[str, Any],

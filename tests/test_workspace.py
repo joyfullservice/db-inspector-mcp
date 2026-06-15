@@ -11,7 +11,11 @@ from db_inspector_mcp.workspace import (
     _deprioritize_own_source_dirs,
     _get_server_project_root,
     _is_own_source_dir,
+    _list_workspace_root_paths,
+    _normalize_root_uri_for_mcp,
     _paths_from_list_roots_validation_error,
+    _paths_from_pydantic_validation_error,
+    _paths_from_raw_list_roots,
     _root_uri_to_path,
     collect_workspace_candidates,
 )
@@ -25,6 +29,60 @@ def test_root_uri_to_path_bare_windows_path():
     assert _root_uri_to_path(r"c:\Repos\db-if-portal-sync") == Path(
         r"c:\Repos\db-if-portal-sync"
     )
+
+
+def test_normalize_root_uri_for_mcp_bare_windows_path():
+    uri = _normalize_root_uri_for_mcp(r"c:\Repos\db-if-portal-sync")
+    assert uri.startswith("file:///")
+    assert "db-if-portal-sync" in uri
+
+
+def test_paths_from_pydantic_validation_error():
+    from mcp.types import ListRootsResult
+    from pydantic import ValidationError
+
+    try:
+        ListRootsResult.model_validate(
+            {"roots": [{"uri": r"c:\Repos\db-if-portal-sync"}]},
+        )
+    except ValidationError as exc:
+        paths = _paths_from_pydantic_validation_error(exc)
+    else:
+        pytest.fail("expected ValidationError")
+
+    assert len(paths) == 1
+    assert paths[0] == Path(r"c:\Repos\db-if-portal-sync").resolve()
+
+
+def test_paths_from_raw_list_roots():
+    raw = {
+        "roots": [
+            {"uri": r"c:\Repos\db-if-portal-sync", "name": "client"},
+            {"uri": "file:///c:/Repos/db-inspector-mcp", "name": "server"},
+        ],
+    }
+    paths = _paths_from_raw_list_roots(raw)
+    assert len(paths) == 2
+    assert paths[0] == Path(r"c:\Repos\db-if-portal-sync").resolve()
+    assert paths[1] == Path("C:/Repos/db-inspector-mcp").resolve()
+
+
+@pytest.mark.anyio
+async def test_list_workspace_root_paths_normalizes_bare_paths_from_raw():
+    ctx = MagicMock()
+    ctx.session = MagicMock()
+
+    async def fake_fetch(_ctx):
+        return {"roots": [{"uri": r"c:\Repos\db-if-portal-sync"}]}
+
+    with patch(
+        "db_inspector_mcp.workspace._fetch_list_roots_raw",
+        fake_fetch,
+    ):
+        paths = await _list_workspace_root_paths(ctx)
+
+    assert len(paths) == 1
+    assert paths[0] == Path(r"c:\Repos\db-if-portal-sync").resolve()
 
 
 def test_paths_from_list_roots_validation_error():
@@ -74,7 +132,8 @@ async def test_collect_workspace_candidates_deprioritizes_own_source_dir():
 
     ctx.session.list_roots = fake_list_roots
 
-    candidates = await collect_workspace_candidates(ctx)
+    with patch("db_inspector_mcp.workspace._fetch_list_roots_raw", return_value=None):
+        candidates = await collect_workspace_candidates(ctx)
     assert candidates[0] == project_root.resolve()
     assert candidates[-1] == server_root.resolve()
 
@@ -97,8 +156,9 @@ async def test_manager_resolves_session_to_workspace(tmp_path):
 
     ctx.session.list_roots = fake_list_roots
 
-    with patch("db_inspector_mcp.workspace.verify_readonly_for_registry"):
-        registry, env_map, root = await manager.get_registry_for(ctx)
+    with patch("db_inspector_mcp.workspace._fetch_list_roots_raw", return_value=None):
+        with patch("db_inspector_mcp.workspace.verify_readonly_for_registry"):
+            registry, env_map, root = await manager.get_registry_for(ctx)
 
     assert root == tmp_path.resolve()
     assert "default" in registry.list_backends()
@@ -138,8 +198,9 @@ async def test_manager_prefers_client_project_over_server_repo(tmp_path, monkeyp
 
     ctx.session.list_roots = fake_list_roots
 
-    with patch("db_inspector_mcp.workspace.verify_readonly_for_registry"):
-        _, env_map, root = await manager.get_registry_for(ctx)
+    with patch("db_inspector_mcp.workspace._fetch_list_roots_raw", return_value=None):
+        with patch("db_inspector_mcp.workspace.verify_readonly_for_registry"):
+            _, env_map, root = await manager.get_registry_for(ctx)
 
     assert root == project_root.resolve()
     assert env_map["DB_MCP_SYNC_CONNECTION_STRING"] == "client"
@@ -166,10 +227,50 @@ async def test_manager_recovers_bare_paths_from_validation_error(tmp_path):
     ctx = MagicMock()
     ctx.session.list_roots = failing_list_roots
 
-    with patch("db_inspector_mcp.workspace.verify_readonly_for_registry"):
-        _, _, root = await manager.get_registry_for(ctx)
+    with patch("db_inspector_mcp.workspace._fetch_list_roots_raw", return_value=None):
+        with patch("db_inspector_mcp.workspace.verify_readonly_for_registry"):
+            _, _, root = await manager.get_registry_for(ctx)
 
     assert root == tmp_path.resolve()
+
+
+@pytest.mark.anyio
+async def test_manager_revalidates_cached_root_when_client_roots_change(tmp_path):
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    first_root.mkdir()
+    second_root.mkdir()
+    (first_root / ".env").write_text(
+        "DB_MCP_FIRST_DATABASE=sqlserver\nDB_MCP_FIRST_CONNECTION_STRING=one\n",
+    )
+    (second_root / ".env").write_text(
+        "DB_MCP_SECOND_DATABASE=sqlserver\nDB_MCP_SECOND_CONNECTION_STRING=two\n",
+    )
+
+    manager = WorkspaceManager()
+    ctx = MagicMock()
+    ctx.session = MagicMock()
+    current_roots = [first_root]
+
+    async def fake_list_roots():
+        root = MagicMock()
+        root.uri = str(current_roots[0])
+        return MagicMock(roots=[root])
+
+    ctx.session.list_roots = fake_list_roots
+
+    with patch("db_inspector_mcp.workspace._fetch_list_roots_raw", return_value=None):
+        with patch("db_inspector_mcp.workspace.verify_readonly_for_registry"):
+            _, env_map, root = await manager.get_registry_for(ctx)
+
+            assert root == first_root.resolve()
+            assert env_map["DB_MCP_FIRST_CONNECTION_STRING"] == "one"
+
+            current_roots[0] = second_root
+            _, env_map, root = await manager.get_registry_for(ctx)
+
+            assert root == second_root.resolve()
+            assert env_map["DB_MCP_SECOND_CONNECTION_STRING"] == "two"
 
 
 def test_manager_seed_avoids_rebuild(tmp_path):

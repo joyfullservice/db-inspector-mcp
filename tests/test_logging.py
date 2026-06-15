@@ -10,6 +10,7 @@ import db_inspector_mcp.usage_logging as logging_module
 from db_inspector_mcp.usage_logging import (
     _get_default_log_dir,
     _initialize_logging,
+    log_workspace_resolution_failure,
     refresh_logging_from_env,
     reset_logging,
 )
@@ -182,3 +183,24 @@ class TestRefreshLoggingFromEnv:
     def test_disabled_returns_false(self, tmp_path):
         env_map = {"DB_MCP_ENABLE_LOGGING": "false"}
         assert refresh_logging_from_env(env_map, tmp_path) is False
+
+
+class TestWorkspaceResolutionFailureLogging:
+    """Tests for pre-workspace failure logging."""
+
+    def test_logs_to_default_log_dir(self, tmp_path, monkeypatch):
+        log_dir = tmp_path / "central_logs"
+        monkeypatch.setattr(logging_module, "_get_default_log_dir", lambda: log_dir)
+
+        log_workspace_resolution_failure(
+            "db_list_databases",
+            ValueError("No .env file found in any workspace root provided by the client."),
+            parameters={},
+        )
+
+        log_file = log_dir / "usage.jsonl"
+        assert log_file.exists()
+        content = log_file.read_text(encoding="utf-8")
+        assert "workspace_resolution_failure" in content
+        assert "db_list_databases" in content
+        assert "No .env file found" in content

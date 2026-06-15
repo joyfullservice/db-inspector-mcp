@@ -33,7 +33,11 @@ from .config import (
     set_workspace_context,
 )
 from .security import validate_readonly_sql
-from .usage_logging import refresh_logging_from_env, with_logging
+from .usage_logging import (
+    log_workspace_resolution_failure,
+    refresh_logging_from_env,
+    with_logging,
+)
 from .workspace import get_workspace_manager
 
 
@@ -394,7 +398,15 @@ def _workspace_wrapper(func, logged):
 
     async def with_workspace(ctx: Context, *args, **kwargs):
         manager = get_workspace_manager()
-        registry, env_map, workspace_root = await manager.get_registry_for(ctx)
+        try:
+            registry, env_map, workspace_root = await manager.get_registry_for(ctx)
+        except Exception as exc:
+            log_workspace_resolution_failure(
+                func.__name__,
+                exc,
+                parameters=dict(kwargs),
+            )
+            raise
         token = set_workspace_context(registry, env_map)
         try:
             refresh_logging_from_env(env_map, workspace_root)
