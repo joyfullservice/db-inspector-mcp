@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from db_inspector_mcp.backends.registry import BackendRegistry
+from db_inspector_mcp.resolution_logging import ResolutionInfo
 from db_inspector_mcp.workspace import (
     WorkspaceManager,
     _deprioritize_own_source_dirs,
@@ -133,9 +134,10 @@ async def test_collect_workspace_candidates_deprioritizes_own_source_dir():
     ctx.session.list_roots = fake_list_roots
 
     with patch("db_inspector_mcp.workspace._fetch_list_roots_raw", return_value=None):
-        candidates = await collect_workspace_candidates(ctx)
+        candidates, client_roots = await collect_workspace_candidates(ctx)
     assert candidates[0] == project_root.resolve()
     assert candidates[-1] == server_root.resolve()
+    assert len(client_roots) == 2
 
 
 @pytest.mark.anyio
@@ -158,13 +160,14 @@ async def test_manager_resolves_session_to_workspace(tmp_path):
 
     with patch("db_inspector_mcp.workspace._fetch_list_roots_raw", return_value=None):
         with patch("db_inspector_mcp.workspace.verify_readonly_for_registry"):
-            registry, env_map, root = await manager.get_registry_for(ctx)
+            registry, env_map, root, info = await manager.get_registry_for(ctx)
 
     assert root == tmp_path.resolve()
+    assert info.resolved_via == "roots_list"
     assert "default" in registry.list_backends()
     assert env_map["DB_MCP_DEFAULT_DATABASE"] == "sqlserver"
 
-    registry2, _, root2 = await manager.get_registry_for(ctx)
+    registry2, _, root2, _ = await manager.get_registry_for(ctx)
     assert root2 == root
     assert registry2 is registry
 
@@ -200,9 +203,10 @@ async def test_manager_prefers_client_project_over_server_repo(tmp_path, monkeyp
 
     with patch("db_inspector_mcp.workspace._fetch_list_roots_raw", return_value=None):
         with patch("db_inspector_mcp.workspace.verify_readonly_for_registry"):
-            _, env_map, root = await manager.get_registry_for(ctx)
+            _, env_map, root, info = await manager.get_registry_for(ctx)
 
     assert root == project_root.resolve()
+    assert info.resolved_via == "roots_list"
     assert env_map["DB_MCP_SYNC_CONNECTION_STRING"] == "client"
 
 
@@ -229,9 +233,10 @@ async def test_manager_recovers_bare_paths_from_validation_error(tmp_path):
 
     with patch("db_inspector_mcp.workspace._fetch_list_roots_raw", return_value=None):
         with patch("db_inspector_mcp.workspace.verify_readonly_for_registry"):
-            _, _, root = await manager.get_registry_for(ctx)
+            _, _, root, info = await manager.get_registry_for(ctx)
 
     assert root == tmp_path.resolve()
+    assert info.resolved_via == "roots_list"
 
 
 @pytest.mark.anyio
@@ -261,15 +266,16 @@ async def test_manager_revalidates_cached_root_when_client_roots_change(tmp_path
 
     with patch("db_inspector_mcp.workspace._fetch_list_roots_raw", return_value=None):
         with patch("db_inspector_mcp.workspace.verify_readonly_for_registry"):
-            _, env_map, root = await manager.get_registry_for(ctx)
+            _, env_map, root, _ = await manager.get_registry_for(ctx)
 
             assert root == first_root.resolve()
             assert env_map["DB_MCP_FIRST_CONNECTION_STRING"] == "one"
 
             current_roots[0] = second_root
-            _, env_map, root = await manager.get_registry_for(ctx)
+            _, env_map, root, info = await manager.get_registry_for(ctx)
 
             assert root == second_root.resolve()
+            assert info.resolved_via == "roots_list"
             assert env_map["DB_MCP_SECOND_CONNECTION_STRING"] == "two"
 
 
@@ -293,3 +299,78 @@ def test_manager_close_all_clears_registries(tmp_path):
     manager.close_all()
     assert manager._registries == {}
     assert manager._session_roots == {}
+
+
+@pytest.mark.anyio
+async def test_manager_agent_supplied_root_overrides_wrong_roots_list(tmp_path):
+    """Agent workspace_root beats a sibling project returned by roots/list."""
+    wrong = tmp_path / "wrong-project"
+    correct = tmp_path / "correct-project"
+    wrong.mkdir()
+    correct.mkdir()
+    (wrong / ".env").write_text(
+        "DB_MCP_WRONG_DATABASE=sqlserver\nDB_MCP_WRONG_CONNECTION_STRING=x\n",
+    )
+    (correct / ".env").write_text(
+        "DB_MCP_OFFLINE_DATABASE=sqlserver\nDB_MCP_OFFLINE_CONNECTION_STRING=y\n",
+    )
+
+    manager = WorkspaceManager()
+    ctx = MagicMock()
+    ctx.session = MagicMock()
+
+    wrong_root = MagicMock()
+    wrong_root.uri = str(wrong)
+
+    async def fake_list_roots():
+        return MagicMock(roots=[wrong_root])
+
+    ctx.session.list_roots = fake_list_roots
+
+    with patch("db_inspector_mcp.workspace._fetch_list_roots_raw", return_value=None):
+        with patch("db_inspector_mcp.workspace.verify_readonly_for_registry"):
+            with patch(
+                "db_inspector_mcp.workspace.append_resolution_record",
+            ) as mock_log:
+                _, env_map, root, info = await manager.get_registry_for(
+                    ctx,
+                    str(correct),
+                    tool="test_tool",
+                )
+
+    assert root == correct.resolve()
+    assert info.resolved_via == "agent_supplied"
+    assert env_map["DB_MCP_OFFLINE_CONNECTION_STRING"] == "y"
+    mock_log.assert_called()
+    logged = mock_log.call_args[0][0]
+    assert isinstance(logged, ResolutionInfo)
+    assert logged.tool == "test_tool"
+
+
+@pytest.mark.anyio
+async def test_manager_launch_pin_db_mcp_project_dir(tmp_path, monkeypatch):
+    """DB_MCP_PROJECT_DIR resolves without relying on roots/list."""
+    project = tmp_path / "pinned-project"
+    project.mkdir()
+    (project / ".env").write_text(
+        "DB_MCP_PINNED_DATABASE=sqlserver\nDB_MCP_PINNED_CONNECTION_STRING=pin\n",
+    )
+    monkeypatch.setenv("DB_MCP_PROJECT_DIR", str(project))
+
+    manager = WorkspaceManager()
+    ctx = MagicMock()
+    ctx.session = MagicMock()
+
+    async def empty_list_roots():
+        return MagicMock(roots=[])
+
+    ctx.session.list_roots = empty_list_roots
+
+    with patch("db_inspector_mcp.workspace._fetch_list_roots_raw", return_value=None):
+        with patch("db_inspector_mcp.workspace.verify_readonly_for_registry"):
+            with patch("db_inspector_mcp.workspace.append_resolution_record"):
+                _, env_map, root, info = await manager.get_registry_for(ctx)
+
+    assert root == project.resolve()
+    assert info.resolved_via == "project_dir_pin"
+    assert env_map["DB_MCP_PINNED_CONNECTION_STRING"] == "pin"

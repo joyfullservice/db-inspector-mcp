@@ -66,11 +66,28 @@ class BackendRegistry:
         
         if name not in self._backends:
             available = ", ".join(self._backends.keys())
-            raise ValueError(
-                f"Backend '{name}' not found. Available backends: {available}"
-            )
-        
+            hint = self._suggest_backend_name(name)
+            msg = f"Backend '{name}' not found. Available backends: {available}"
+            if hint and hint != name:
+                msg += f". Did you mean '{hint}'?"
+            raise ValueError(msg)
+
         return self._backends[name]
+
+    def _suggest_backend_name(self, requested: str) -> str | None:
+        """Suggest a close backend name (e.g. Purple_Offline -> offline)."""
+        if not requested:
+            return None
+        req = requested.lower().replace("-", "_")
+        names = list(self._backends.keys())
+        for candidate in names:
+            if candidate.lower() == req:
+                return candidate
+        for candidate in names:
+            c_lower = candidate.lower()
+            if req in c_lower or c_lower in req:
+                return candidate
+        return None
     
     def list_backends(self) -> list[str]:
         """

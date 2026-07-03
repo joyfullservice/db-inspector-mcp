@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from db_inspector_mcp.resolution_logging import ResolutionInfo
 from db_inspector_mcp.security import validate_readonly_sql
 from db_inspector_mcp.tools import (
     _compare_sample_rows,
@@ -73,8 +74,12 @@ def workspace_ctx(mock_backend):
     registry.list_backends.return_value = ["default"]
     registry.get_default_name.return_value = "default"
 
-    async def fake_get_registry_for(ctx):
-        return registry, {}, Path("/fake/workspace")
+    async def fake_get_registry_for(ctx, workspace_root_override=None, tool=None):
+        return registry, {}, Path("/fake/workspace"), ResolutionInfo(
+            workspace_root="/fake/workspace",
+            resolved_via="test",
+            session_id=1,
+        )
 
     with patch("db_inspector_mcp.tools.get_workspace_manager") as mock_mgr, \
          patch("db_inspector_mcp.tools.refresh_logging_from_env"):
@@ -208,8 +213,12 @@ async def test_db_list_databases_includes_dialect():
         mock_access_backend if name == "legacy" else mock_mssql_backend
     )
 
-    async def fake_get_registry_for(ctx):
-        return registry, {}, Path("/fake/workspace")
+    async def fake_get_registry_for(ctx, workspace_root_override=None, tool=None):
+        return registry, {}, Path("/fake/workspace"), ResolutionInfo(
+            workspace_root="/fake/workspace",
+            resolved_via="test",
+            session_id=1,
+        )
 
     with patch("db_inspector_mcp.tools.get_workspace_manager") as mock_mgr, \
          patch("db_inspector_mcp.tools.refresh_logging_from_env"):
@@ -235,6 +244,9 @@ async def test_db_list_databases_includes_dialect():
     assert new_db["status"] == "not_connected"
     assert new_db["object_counts"] == {}
     mock_mssql_backend.get_object_counts.assert_not_called()
+    assert result["workspace_root"] == "/fake/workspace"
+    assert result["resolved_via"] == "test"
+    assert result["session_id"] == 1
 
 
 @pytest.mark.anyio
@@ -245,8 +257,12 @@ async def test_db_sql_help_access_joins():
     registry = MagicMock()
     registry.get.return_value = mock_backend
 
-    async def fake_get_registry_for(ctx):
-        return registry, {}, Path("/fake/workspace")
+    async def fake_get_registry_for(ctx, workspace_root_override=None, tool=None):
+        return registry, {}, Path("/fake/workspace"), ResolutionInfo(
+            workspace_root="/fake/workspace",
+            resolved_via="test",
+            session_id=1,
+        )
 
     with patch("db_inspector_mcp.tools.get_workspace_manager") as mock_mgr, \
          patch("db_inspector_mcp.tools.refresh_logging_from_env"):
@@ -270,8 +286,12 @@ async def test_db_sql_help_access_distinct_mentions_distinctrow():
     registry = MagicMock()
     registry.get.return_value = mock_backend
 
-    async def fake_get_registry_for(ctx):
-        return registry, {}, Path("/fake/workspace")
+    async def fake_get_registry_for(ctx, workspace_root_override=None, tool=None):
+        return registry, {}, Path("/fake/workspace"), ResolutionInfo(
+            workspace_root="/fake/workspace",
+            resolved_via="test",
+            session_id=1,
+        )
 
     with patch("db_inspector_mcp.tools.get_workspace_manager") as mock_mgr, \
          patch("db_inspector_mcp.tools.refresh_logging_from_env"):
@@ -303,8 +323,12 @@ async def test_db_sql_help_access_all():
     registry = MagicMock()
     registry.get.return_value = mock_backend
 
-    async def fake_get_registry_for(ctx):
-        return registry, {}, Path("/fake/workspace")
+    async def fake_get_registry_for(ctx, workspace_root_override=None, tool=None):
+        return registry, {}, Path("/fake/workspace"), ResolutionInfo(
+            workspace_root="/fake/workspace",
+            resolved_via="test",
+            session_id=1,
+        )
 
     with patch("db_inspector_mcp.tools.get_workspace_manager") as mock_mgr, \
          patch("db_inspector_mcp.tools.refresh_logging_from_env"):
@@ -328,8 +352,12 @@ async def test_db_sql_help_invalid_topic():
     registry = MagicMock()
     registry.get.return_value = mock_backend
 
-    async def fake_get_registry_for(ctx):
-        return registry, {}, Path("/fake/workspace")
+    async def fake_get_registry_for(ctx, workspace_root_override=None, tool=None):
+        return registry, {}, Path("/fake/workspace"), ResolutionInfo(
+            workspace_root="/fake/workspace",
+            resolved_via="test",
+            session_id=1,
+        )
 
     with patch("db_inspector_mcp.tools.get_workspace_manager") as mock_mgr, \
          patch("db_inspector_mcp.tools.refresh_logging_from_env"):
@@ -351,8 +379,12 @@ async def test_db_sql_help_defaults_to_all():
     registry = MagicMock()
     registry.get.return_value = mock_backend
 
-    async def fake_get_registry_for(ctx):
-        return registry, {}, Path("/fake/workspace")
+    async def fake_get_registry_for(ctx, workspace_root_override=None, tool=None):
+        return registry, {}, Path("/fake/workspace"), ResolutionInfo(
+            workspace_root="/fake/workspace",
+            resolved_via="test",
+            session_id=1,
+        )
 
     with patch("db_inspector_mcp.tools.get_workspace_manager") as mock_mgr, \
          patch("db_inspector_mcp.tools.refresh_logging_from_env"):
@@ -374,8 +406,12 @@ async def test_db_list_databases_empty_returns_error():
     registry.list_backends.return_value = []
     registry.get_default_name.return_value = None
 
-    async def fake_get_registry_for(ctx):
-        return registry, {}, Path("/fake/workspace")
+    async def fake_get_registry_for(ctx, workspace_root_override=None, tool=None):
+        return registry, {}, Path("/fake/workspace"), ResolutionInfo(
+            workspace_root="/fake/workspace",
+            resolved_via="test",
+            session_id=1,
+        )
 
     with patch("db_inspector_mcp.tools.get_workspace_manager") as mock_mgr, \
          patch("db_inspector_mcp.tools.refresh_logging_from_env"):
@@ -406,8 +442,12 @@ async def test_db_list_databases_does_not_connect_disconnected_backend():
     registry.get_default_name.return_value = "sync"
     registry.get.return_value = backend
 
-    async def fake_get_registry_for(ctx):
-        return registry, {}, Path("/fake/workspace")
+    async def fake_get_registry_for(ctx, workspace_root_override=None, tool=None):
+        return registry, {}, Path("/fake/workspace"), ResolutionInfo(
+            workspace_root="/fake/workspace",
+            resolved_via="test",
+            session_id=1,
+        )
 
     with patch("db_inspector_mcp.tools.get_workspace_manager") as mock_mgr, \
          patch("db_inspector_mcp.tools.refresh_logging_from_env"):

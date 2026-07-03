@@ -14,6 +14,7 @@ import pytest
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.fastmcp.utilities.context_injection import find_context_parameter
 
+from db_inspector_mcp.resolution_logging import ResolutionInfo
 from db_inspector_mcp.tools import mcp
 
 # All tools registered via @db_tool in tools.py (keep in sync when adding tools).
@@ -65,8 +66,12 @@ def patched_workspace(mock_backend):
     registry.list_backends.return_value = ["default"]
     registry.get_default_name.return_value = "default"
 
-    async def fake_get_registry_for(ctx):
-        return registry, {}, Path("/fake/workspace")
+    async def fake_get_registry_for(ctx, workspace_root_override=None, tool=None):
+        return registry, {}, Path("/fake/workspace"), ResolutionInfo(
+            workspace_root="/fake/workspace",
+            resolved_via="test",
+            session_id=1,
+        )
 
     with patch("db_inspector_mcp.tools.get_workspace_manager") as mock_mgr, \
          patch("db_inspector_mcp.tools.refresh_logging_from_env"):
@@ -81,7 +86,9 @@ class TestRegisteredToolContract:
 
     def test_all_expected_tools_registered(self):
         registered = {t.name for t in mcp._tool_manager.list_tools()}
-        assert registered == EXPECTED_TOOL_NAMES
+        assert EXPECTED_TOOL_NAMES <= registered
+        extra = registered - EXPECTED_TOOL_NAMES
+        assert extra <= {"db_debug_session"}, f"unexpected tools: {extra}"
 
     @pytest.mark.parametrize("tool_name", sorted(EXPECTED_TOOL_NAMES))
     def test_tool_metadata_contract(self, tool_name: str):
@@ -109,6 +116,7 @@ class TestDbPreviewSchema:
         assert "query" in props
         assert "max_rows" in props
         assert "database" in props
+        assert "workspace_root" in props
         assert "max_rows" not in schema["required"]
         assert "database" not in schema["required"]
         assert props["max_rows"].get("default") == 100

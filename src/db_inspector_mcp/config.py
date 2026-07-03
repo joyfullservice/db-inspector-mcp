@@ -10,11 +10,15 @@ from dotenv import dotenv_values
 
 from .backends.base import DatabaseBackend
 from .backends.registry import BackendRegistry, get_registry
+from .resolution_logging import ResolutionInfo
 from .security import check_data_access_permission, get_permission_error_message
 
 # Per-tool-call workspace context (set by db_tool decorator).
 _workspace_ctx: ContextVar[tuple[BackendRegistry, dict[str, str]] | None] = ContextVar(
     "workspace_ctx", default=None,
+)
+_resolution_ctx: ContextVar[ResolutionInfo | None] = ContextVar(
+    "resolution_ctx", default=None,
 )
 
 
@@ -39,16 +43,32 @@ def current_env() -> dict[str, str]:
     return parse_workspace_env(root)
 
 
+def current_resolution() -> ResolutionInfo | None:
+    """Return workspace resolution metadata for the active tool call."""
+    return _resolution_ctx.get()
+
+
 def set_workspace_context(
-    registry: BackendRegistry, env_map: dict[str, str],
-) -> object:
-    """Set workspace context; returns token for reset."""
-    return _workspace_ctx.set((registry, env_map))
+    registry: BackendRegistry,
+    env_map: dict[str, str],
+    resolution: ResolutionInfo | None = None,
+) -> tuple[object, object | None]:
+    """Set workspace context; returns tokens for reset."""
+    reg_token = _workspace_ctx.set((registry, env_map))
+    res_token: object | None = None
+    if resolution is not None:
+        res_token = _resolution_ctx.set(resolution)
+    return reg_token, res_token
 
 
-def reset_workspace_context(token: object) -> None:
+def reset_workspace_context(
+    reg_token: object,
+    res_token: object | None = None,
+) -> None:
     """Restore previous workspace context."""
-    _workspace_ctx.reset(token)
+    _workspace_ctx.reset(reg_token)
+    if res_token is not None:
+        _resolution_ctx.reset(res_token)
 
 
 def _find_project_root() -> Path:

@@ -13,6 +13,7 @@ from .config import (
     _find_project_root,
 )
 from .readonly import verify_readonly_for_registry
+from .server_runtime import BOOT_ID, server_pid
 from .workspace import get_workspace_manager
 
 
@@ -66,7 +67,11 @@ def main() -> None:
         return
 
     from . import __version__
-    print(f"db-inspector-mcp v{__version__}", file=sys.stderr)
+    print(
+        f"db-inspector-mcp v{__version__} "
+        f"(boot_id={BOOT_ID}, pid={server_pid()})",
+        file=sys.stderr,
+    )
 
     atexit.register(_cleanup)
 

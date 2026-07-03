@@ -29,6 +29,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from .config import (
     check_data_access,
     current_registry,
+    current_resolution,
     reset_workspace_context,
     set_workspace_context,
 )
@@ -38,7 +39,14 @@ from .usage_logging import (
     refresh_logging_from_env,
     with_logging,
 )
-from .workspace import get_workspace_manager
+from .server_runtime import BOOT_ID, configured_transport, server_pid
+from .workspace import (
+    _fetch_list_roots_raw,
+    _list_workspace_root_paths,
+    _paths_from_raw_list_roots,
+    collect_workspace_candidates,
+    get_workspace_manager,
+)
 
 
 def _resolve_query_column_name(
@@ -209,17 +217,20 @@ mcp = FastMCP(
         "Provides read-only tools for exploring schemas, analyzing queries, and comparing databases.\n\n"
         "**Recommended workflow:**\n"
         "1. **Always call db_list_databases() first** — it discovers available databases, their SQL "
-        "dialects, and object counts. It also initializes backend connections when needed.\n"
-        "2. Check the 'dialect' field ('access', 'mssql', 'postgres') — each has different SQL syntax.\n"
-        "3. Check 'object_counts' in the response (only populated for already-connected backends). "
+        "dialects, and object counts. Confirm `workspace_root` matches your open project folder.\n"
+        "2. When multiple Cursor windows are open, pass `workspace_root` on every tool call "
+        "set to your Cursor Workspace Path (the folder containing `.env`). Cursor's shared MCP "
+        "process may return another window's project via roots/list without this parameter.\n"
+        "3. Check the 'dialect' field ('access', 'mssql', 'postgres') — each has different SQL syntax.\n"
+        "4. Check 'object_counts' in the response (only populated for already-connected backends). "
         "For large databases (>200 tables/views), "
         "use the name_filter parameter on db_list_tables()/db_list_views() to search "
         "instead of listing everything.\n"
-        "4. Use db_list_tables() and db_list_views() to explore schemas.\n"
-        "5. Use db_count_query_results(), db_get_query_columns(), and db_sum_query_column() "
+        "5. Use db_list_tables() and db_list_views() to explore schemas.\n"
+        "6. Use db_count_query_results(), db_get_query_columns(), and db_sum_query_column() "
         "to analyze queries (these tools wrap YOUR query — pass the base query).\n"
-        "6. Use db_compare_queries() to validate migrations across databases.\n"
-        "7. For Access databases: use db_get_access_query_definition(name) to retrieve "
+        "7. Use db_compare_queries() to validate migrations across databases.\n"
+        "8. For Access databases: use db_get_access_query_definition(name) to retrieve "
         "the SQL of saved Access queries by name.\n\n"
         "**SQL Dialect Awareness:**\n"
         "Access SQL differs significantly from standard SQL. Key differences:\n"
@@ -253,7 +264,8 @@ mcp = FastMCP(
         "- db_get_query_columns(query) executes your query with 0 rows to get metadata\n"
         "Pass your base SELECT query; the tool handles aggregation.\n\n"
         "**Tool quick-reference (required parameters marked with *, optional with ?):**\n"
-        "- db_list_databases() — list configured databases, dialects, and status\n"
+        "- db_list_databases(workspace_root?) — list configured databases, dialects, status, "
+        "and resolved workspace_root\n"
         "- db_list_tables(database?, name_filter?) — list tables with row counts\n"
         "- db_list_views(database?, name_filter?) — list views with SQL definitions\n"
         "- db_preview(query*, database?, max_rows?) — sample rows from a SELECT query "
@@ -269,7 +281,8 @@ mcp = FastMCP(
         "- db_sql_help(topic?, database?) — Access SQL syntax reference\n"
         "- db_explain(query*, database?) — execution plan (not supported for Access)\n"
         "- db_measure_query(query*, database?, max_rows?) — measure execution time\n"
-        "- db_check_readonly_status(database?) — verify connection is read-only\n\n"
+        "- db_check_readonly_status(database?) — verify connection is read-only\n"
+        "- db_debug_session(workspace_root?) — diagnostic session/roots info (multi-window debugging)\n\n"
         "**Common mistakes to avoid:**\n"
         "- db_count_query_results() returns only a count integer, NOT row data. "
         "To see actual rows, use db_preview().\n"
@@ -392,14 +405,25 @@ def _workspace_wrapper(func, logged):
         inspect.Parameter.POSITIONAL_OR_KEYWORD,
         annotation=Context,
     )
+    workspace_param = inspect.Parameter(
+        "workspace_root",
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        default=None,
+        annotation=str | None,
+    )
     wrapper_sig = inner_sig.replace(
-        parameters=[ctx_param, *inner_sig.parameters.values()],
+        parameters=[ctx_param, *inner_sig.parameters.values(), workspace_param],
     )
 
     async def with_workspace(ctx: Context, *args, **kwargs):
+        workspace_root_arg = kwargs.pop("workspace_root", None)
         manager = get_workspace_manager()
         try:
-            registry, env_map, workspace_root = await manager.get_registry_for(ctx)
+            registry, env_map, workspace_root, resolution = await manager.get_registry_for(
+                ctx,
+                workspace_root_arg,
+                tool=func.__name__,
+            )
         except Exception as exc:
             log_workspace_resolution_failure(
                 func.__name__,
@@ -407,12 +431,12 @@ def _workspace_wrapper(func, logged):
                 parameters=dict(kwargs),
             )
             raise
-        token = set_workspace_context(registry, env_map)
+        reg_token, res_token = set_workspace_context(registry, env_map, resolution)
         try:
             refresh_logging_from_env(env_map, workspace_root)
             return await _invoke_tool(logged, *args, **kwargs)
         finally:
-            reset_workspace_context(token)
+            reset_workspace_context(reg_token, res_token)
 
     with_workspace.__name__ = func.__name__
     with_workspace.__doc__ = func.__doc__
@@ -421,7 +445,11 @@ def _workspace_wrapper(func, logged):
     # __signature__ drives FastMCP's JSON schema; do not use functools.wraps
     # (hides ctx) or leave *args/**kwargs in the signature (leaks into schema).
     with_workspace.__signature__ = wrapper_sig
-    with_workspace.__annotations__ = {"ctx": Context, **get_type_hints(func)}
+    with_workspace.__annotations__ = {
+        "ctx": Context,
+        "workspace_root": str | None,
+        **get_type_hints(func),
+    }
     return with_workspace
 
 
@@ -1280,12 +1308,12 @@ def db_list_databases() -> dict[str, Any]:
                 "project's .env (with DB_MCP_* variables) was not found for the "
                 "current workspace. Checklist: (1) ensure the workspace you "
                 "opened contains a .env with DB_MCP_DATABASE/DB_MCP_CONNECTION_STRING "
-                "or DB_MCP_<name>_DATABASE/_CONNECTION_STRING entries; (2) if the "
-                "MCP server is configured at the user level, set DB_MCP_PROJECT_DIR "
-                "to the project path; (3) if stderr shows a workspace-roots validation "
-                "error, restart the db-inspector-mcp server (the server recovers bare "
-                "paths from that error automatically). See the server log (stderr) for "
-                "the specific reason."
+                "or DB_MCP_<name>_DATABASE/_CONNECTION_STRING entries; (2) pass "
+                "workspace_root on every tool call with your Cursor Workspace Path "
+                "when multiple windows are open (Cursor's shared MCP process may "
+                "return another window's project via roots/list); (3) if stderr "
+                "shows a workspace-roots validation error, restart the server. "
+                "See the server log (stderr) for the specific reason."
             ),
         }
 
@@ -1310,10 +1338,97 @@ def db_list_databases() -> dict[str, Any]:
             "status": "connected" if connected else "not_connected",
             "object_counts": object_counts,
         })
-    
-    return {
+
+    resolution = current_resolution()
+    payload: dict[str, Any] = {
         "databases": databases,
-        "default": default_name
+        "default": default_name,
+    }
+    if resolution is not None:
+        payload["workspace_root"] = resolution.workspace_root
+        payload["resolved_via"] = resolution.resolved_via
+        payload["session_id"] = resolution.session_id
+    return payload
+
+
+# ---------------------------------------------------------------------------
+# Session / workspace diagnostics (multi-window shared MCP process)
+# ---------------------------------------------------------------------------
+
+@mcp.tool(name="db_debug_session")
+async def db_debug_session(
+    ctx: Context,
+    workspace_root: str | None = None,
+) -> dict[str, Any]:
+    """
+    Diagnostic probe for workspace resolution under Cursor's shared MCP process.
+
+    Reports the transport-level ``mcp-session-id`` (HTTP only), a GC-safe
+    per-session serial, and the count of live sessions — the conclusive signals
+    for whether Cursor gives each window its own MCP session. Logs the outcome
+    to ``~/.db-inspector-mcp/logs/spike.jsonl``.
+
+    How to read it across two windows:
+    - Distinct ``mcp_session_id`` AND/OR distinct ``session_serial`` AND
+      ``live_session_count`` >= 2  => per-window sessions (transport can scope).
+    - Same ``session_serial`` and ``live_session_count`` == 1  => sessions are
+      shared/collapsed; rely on ``workspace_root`` (agent-supplied).
+
+    ``session_id`` (raw id()) is included only for reference; prefer
+    ``session_serial`` because id() addresses can be recycled after GC.
+
+    Use when multiple Cursor windows are open and db_list_databases shows an
+    unexpected workspace_root.
+    """
+    from .resolution_logging import append_resolution_record
+    from .server_runtime import read_mcp_session_id, session_identity
+
+    manager = get_workspace_manager()
+    identity = session_identity(ctx.session)
+    headers = read_mcp_session_id(ctx)
+    raw_roots = await _fetch_list_roots_raw(ctx)
+    root_paths = await _list_workspace_root_paths(ctx)
+    candidates, client_roots = await collect_workspace_candidates(ctx)
+
+    try:
+        registry, env_map, resolved_root, resolution = await manager.get_registry_for(
+            ctx,
+            workspace_root,
+            tool="db_debug_session",
+        )
+        backends = registry.list_backends()
+        append_resolution_record(resolution, spike=True)
+    except Exception as exc:
+        resolution = None
+        resolved_root = None
+        backends = []
+        env_map = {}
+        error = str(exc)
+    else:
+        error = None
+
+    return {
+        "boot_id": BOOT_ID,
+        "pid": server_pid(),
+        "transport": configured_transport(),
+        "mcp_session_id": headers.get("mcp_session_id"),
+        "mcp_protocol_version": headers.get("mcp_protocol_version"),
+        "session_serial": identity.get("serial"),
+        "session_is_new": identity.get("is_new"),
+        "live_session_count": identity.get("live_count"),
+        "session_id": id(ctx.session),
+        "session_repr": repr(ctx.session),
+        "raw_roots_list": raw_roots,
+        "normalized_root_paths": [str(p) for p in root_paths],
+        "client_roots": [str(p) for p in client_roots],
+        "candidates": [str(p) for p in candidates],
+        "workspace_root_override": workspace_root,
+        "resolved_workspace_root": str(resolved_root) if resolved_root else None,
+        "resolved_via": resolution.resolved_via if resolution else None,
+        "backends": backends,
+        "env_db_mcp_keys": sorted(k for k in env_map if k.startswith("DB_MCP_")),
+        "error": error,
+        "spike_log": str(Path.home() / ".db-inspector-mcp" / "logs" / "spike.jsonl"),
     }
 
 

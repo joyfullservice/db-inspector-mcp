@@ -79,6 +79,26 @@ contradictory guidance.
 
 ---
 
+## 2026-06-23 — Agent-supplied workspace_root for Cursor shared MCP process
+
+**Trigger**: With multiple Cursor windows open, user-level stdio MCP servers run in a single `[Shared MCP process]` that multiplexes all windows onto one session. `roots/list` returned a sibling project's folder (`C:\Repos\msaccess-vcs-addin`) for db-if-portal-sync tool calls, loading the wrong `.env` and backends. Process CWD was the user home directory; no documented Cursor setting disables shared-process mode.
+
+**Options explored**:
+- **Per-project `.cursor/mcp.json` with `${workspaceFolder}`** — would pin cwd/env per repo but rejected as primary fix (extra per-repo setup for every consumer).
+- **Server-generated session ID over stdio** — server cannot influence Cursor's broker routing; shared process collapses windows before the server sees them.
+- **streamable-HTTP transport spike** — HTTP is multi-session by design (`Mcp-Session-Id`); may give per-window sessions. Implemented as opt-in (`DB_MCP_TRANSPORT=http`) with `db_debug_session` + `spike.jsonl` for user verification before promoting HTTP as the recommended multi-window setup.
+- **Agent-supplied `workspace_root` on tool calls (chosen primary fix)** — the agent always knows the Cursor Workspace Path; when provided, resolution trusts it over `roots/list` and session cache cannot cross-contaminate windows.
+
+**Decision**: Add optional `workspace_root` parameter to all `@db_tool` tools (agent passes Cursor Workspace Path in multi-window setups). Resolution precedence: (1) agent-supplied path → `agent_supplied`, (2) launch pins `DB_MCP_PROJECT_DIR` / `WORKSPACE_FOLDER_PATHS`, (3) session cache validated against current roots, (4) `roots/list` candidates. Log every resolution to `~/.db-inspector-mcp/logs/resolution.jsonl` with source, raw roots, chosen root, session id, boot_id, pid. `db_list_databases` returns `workspace_root`, `resolved_via`, `session_id`. Stdio is the only supported transport; HTTP plumbing was removed after the spike confirmed it provides no benefit (see below).
+
+**What this rules out**: Relying solely on `roots/list` or session cache in multi-window Cursor without agent confirmation. Using nested `.env` walk-up as the fix (wrong root was a sibling project, not a nested file).
+
+**Spike result (2026-06-23, conclusive — HTTP does NOT help)**: Ran `db_debug_session` across three Cursor windows over streamable-HTTP, reading the transport-level `mcp-session-id` header plus a GC-safe per-session serial (`session_identity` via `WeakKeyDictionary`, fixing the earlier `id()` address-reuse flaw). All three windows (db-if-portal-sync, msaccess-vcs-addin, db-inspector-mcp) reported the **same `mcp_session_id`** (`ae605222…`), the **same `session_serial`** (`93d2c8fe…`), and `live_session_count: 1`. `roots/list` returned the **union of all open windows' folders** to every window, with no indication of the calling window. Conclusion: Cursor collapses all windows onto a single MCP session over **both** stdio and HTTP — there is no client- or transport-level per-window identifier. HTTP adds a manually-run server with zero isolation benefit. **`workspace_root` (agent-supplied) is the only reliable fix.** HTTP transport plumbing (`http_host`, `http_port`, `configure_http_settings`, conditional transport branch in `main.py`) was removed after the spike to reduce maintenance surface. `db_debug_session` and session-identity primitives remain for diagnostics. `configured_transport()` now unconditionally returns `"stdio"`.
+
+**Relevant files**: `workspace.py`, `tools.py`, `config.py`, `resolution_logging.py`, `server_runtime.py`, `main.py`, `backends/registry.py`, `docs/CURSOR_SHARED_MCP.md`, `tests/test_workspace.py`, `tests/test_tools.py`, `tests/test_server_runtime.py`.
+
+---
+
 ## 2026-06-12 — Adopt uv.lock + Dependabot + uv audit for dependency security
 
 **Trigger**: No automated signal existed for out-of-date or vulnerable dependencies. `pyproject.toml` used `>=` floors with no lock file, so CI and local dev resolved different trees, and nothing detected CVEs on a timer — a security update would only be noticed if someone manually ran an audit.

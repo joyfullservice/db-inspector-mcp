@@ -22,6 +22,8 @@ from .config import (
     record_env_mtimes,
 )
 from .readonly import verify_readonly_for_registry
+from .resolution_logging import ResolutionInfo, append_resolution_record
+from .server_runtime import read_mcp_session_id, session_identity
 
 if TYPE_CHECKING:
     from mcp.server.fastmcp import Context
@@ -324,6 +326,50 @@ def _deprioritize_own_source_dirs(candidates: list[Path]) -> list[Path]:
     return other + self_dirs
 
 
+def _path_list_to_strings(paths: list[Path]) -> list[str]:
+    return [str(path.resolve()) for path in paths]
+
+
+def _normalize_workspace_root_arg(value: str) -> Path:
+    """Parse and resolve a workspace root supplied by the client or agent."""
+    text = value.strip().strip('"').strip("'")
+    if not text:
+        raise ValueError("workspace_root must be a non-empty path")
+    return Path(text).expanduser().resolve()
+
+
+def _launch_time_workspace_pins() -> list[Path]:
+    """Return explicit workspace roots from process env (not per-window)."""
+    pins: list[Path] = []
+    seen: set[str] = set()
+
+    def add(path: Path | str | None) -> None:
+        if path is None:
+            return
+        try:
+            resolved = Path(path).expanduser().resolve()
+        except OSError:
+            return
+        key = str(resolved).lower()
+        if key in seen:
+            return
+        seen.add(key)
+        pins.append(resolved)
+
+    project_dir = os.getenv("DB_MCP_PROJECT_DIR")
+    if project_dir:
+        add(project_dir)
+
+    folder_paths = os.getenv("WORKSPACE_FOLDER_PATHS", "").strip()
+    if folder_paths:
+        for part in folder_paths.split(os.pathsep):
+            part = part.strip()
+            if part:
+                add(part)
+
+    return pins
+
+
 def _fallback_workspace_candidates() -> list[Path]:
     """Workspace discovery when MCP roots/list is unavailable."""
     from .config import _find_project_root
@@ -352,10 +398,15 @@ def _fallback_workspace_candidates() -> list[Path]:
     return candidates
 
 
-async def collect_workspace_candidates(ctx: Context) -> list[Path]:
-    """Build an ordered, de-duplicated list of workspace directories to probe."""
+async def collect_workspace_candidates(
+    ctx: Context,
+    *,
+    allow_fallback: bool = True,
+) -> tuple[list[Path], list[Path]]:
+    """Build candidate workspace dirs; return (candidates, client_roots_from_list)."""
     seen: set[str] = set()
     candidates: list[Path] = []
+    client_roots: list[Path] = []
 
     def add(path: Path | None) -> None:
         if path is None:
@@ -371,10 +422,11 @@ async def collect_workspace_candidates(ctx: Context) -> list[Path]:
         candidates.append(resolved)
 
     root_paths = await _list_workspace_root_paths(ctx)
+    client_roots = list(root_paths)
     for path in root_paths:
         add(path)
 
-    if not candidates:
+    if not candidates and allow_fallback:
         print(
             "Using fallback workspace discovery "
             "(DB_MCP_PROJECT_DIR, project root, CWD).",
@@ -394,7 +446,13 @@ async def collect_workspace_candidates(ctx: Context) -> list[Path]:
             + ", ".join(str(path) for path in ordered),
             file=sys.stderr,
         )
-    return ordered
+    return ordered, client_roots
+
+
+async def collect_workspace_candidates_legacy(ctx: Context) -> list[Path]:
+    """Backward-compatible wrapper returning only the candidate list."""
+    candidates, _ = await collect_workspace_candidates(ctx)
+    return candidates
 
 
 @dataclass
@@ -445,9 +503,110 @@ class WorkspaceManager:
             self._registries[key] = entry
             return entry
 
-    async def _resolve_workspace_root(self, ctx: Context) -> Path:
+    def _try_initialize_root(
+        self, workspace: Path,
+    ) -> tuple[_Entry | None, Exception | None]:
+        env_path = workspace / ".env"
+        if not env_path.exists():
+            print(
+                f"Skipping {workspace}: no .env file",
+                file=sys.stderr,
+            )
+            return None, None
+        print(f"Probing workspace root: {workspace}", file=sys.stderr)
+        try:
+            entry = self._get_or_build(workspace)
+            if entry.registry.list_backends():
+                return entry, None
+            print(
+                f"Workspace {workspace} has .env but no backends initialized",
+                file=sys.stderr,
+            )
+        except Exception as exc:
+            print(f"Failed to initialize from {workspace}: {exc}", file=sys.stderr)
+            return None, exc
+        return None, None
+
+    async def _resolve_workspace_root(
+        self,
+        ctx: Context,
+        workspace_root_override: str | None = None,
+        *,
+        tool: str | None = None,
+    ) -> tuple[Path, ResolutionInfo]:
         session_id = id(ctx.session)
-        candidates = await collect_workspace_candidates(ctx)
+        session_repr = repr(ctx.session)
+        identity = session_identity(ctx.session)
+        headers = read_mcp_session_id(ctx)
+        candidates, client_roots = await collect_workspace_candidates(ctx)
+        candidate_strs = _path_list_to_strings(candidates)
+        client_root_strs = _path_list_to_strings(client_roots)
+
+        def make_info(root: Path, resolved_via: str) -> ResolutionInfo:
+            return ResolutionInfo(
+                workspace_root=str(root.resolve()),
+                resolved_via=resolved_via,
+                session_id=session_id,
+                client_roots=client_root_strs,
+                candidates=candidate_strs,
+                mcp_session_repr=session_repr,
+                mcp_session_id=headers.get("mcp_session_id"),
+                session_serial=identity.get("serial"),
+                live_session_count=identity.get("live_count"),
+                tool=tool,
+            )
+
+        # 1. Agent-supplied workspace (trusted over roots/list in shared MCP process).
+        if workspace_root_override:
+            root = _normalize_workspace_root_arg(workspace_root_override)
+            entry, err = self._try_initialize_root(root)
+            if entry is None:
+                if err is not None:
+                    raise err
+                raise ValueError(
+                    f"No usable DB_MCP configuration in workspace_root {root}. "
+                    "Ensure the path contains a .env with DB_MCP_* database entries."
+                )
+            with self._lock:
+                self._session_roots[session_id] = root
+            info = make_info(root, "agent_supplied")
+            print(
+                f"Selected workspace root (agent_supplied): {root}",
+                file=sys.stderr,
+            )
+            append_resolution_record(info)
+            return root, info
+
+        # 2. Launch-time pins (DB_MCP_PROJECT_DIR, WORKSPACE_FOLDER_PATHS).
+        launch_pins = _launch_time_workspace_pins()
+        if launch_pins:
+            last_error: Exception | None = None
+            for root in launch_pins:
+                entry, err = self._try_initialize_root(root)
+                if entry is not None:
+                    with self._lock:
+                        self._session_roots[session_id] = root
+                    via = (
+                        "project_dir_pin"
+                        if os.getenv("DB_MCP_PROJECT_DIR")
+                        else "workspace_folder_paths"
+                    )
+                    info = make_info(root, via)
+                    print(
+                        f"Selected workspace root ({via}): {root}",
+                        file=sys.stderr,
+                    )
+                    append_resolution_record(info)
+                    return root, info
+                if err is not None:
+                    last_error = err
+            if last_error is not None:
+                raise last_error
+            raise ValueError(
+                "Launch-time workspace pin(s) did not yield a configured project: "
+                + ", ".join(str(p) for p in launch_pins)
+            )
+
         candidate_keys = {str(path.resolve()).lower() for path in candidates}
 
         with self._lock:
@@ -462,7 +621,9 @@ class WorkspaceManager:
                             f"Using cached workspace root: {cached.resolve()}",
                             file=sys.stderr,
                         )
-                        return cached.resolve()
+                        info = make_info(cached.resolve(), "session_cache")
+                        append_resolution_record(info)
+                        return cached.resolve(), info
                 except Exception as exc:
                     print(
                         f"Cached workspace root {cached} failed to initialize: {exc}",
@@ -478,36 +639,36 @@ class WorkspaceManager:
                 self._session_roots.pop(session_id, None)
 
         found_env = False
-        last_error: Exception | None = None
+        last_error = None
 
         for workspace in candidates:
             env_path = workspace / ".env"
             if not env_path.exists():
-                print(
-                    f"Skipping {workspace}: no .env file",
-                    file=sys.stderr,
-                )
                 continue
             found_env = True
-            print(f"Probing workspace root: {workspace}", file=sys.stderr)
-            try:
-                entry = self._get_or_build(workspace)
-                if entry.registry.list_backends():
-                    with self._lock:
-                        self._session_roots[session_id] = workspace
-                    print(
-                        f"Selected workspace root: {workspace} "
-                        f"({len(entry.registry.list_backends())} backend(s))",
-                        file=sys.stderr,
-                    )
-                    return workspace
+            entry, err = self._try_initialize_root(workspace)
+            if entry is not None:
+                with self._lock:
+                    self._session_roots[session_id] = workspace
+                via = "roots_list" if client_roots else "fallback"
+                info = make_info(workspace, via)
                 print(
-                    f"Workspace {workspace} has .env but no backends initialized",
+                    f"Selected workspace root: {workspace} "
+                    f"({len(entry.registry.list_backends())} backend(s))",
                     file=sys.stderr,
                 )
-            except Exception as exc:
-                last_error = exc
-                print(f"Failed to initialize from {workspace}: {exc}", file=sys.stderr)
+                append_resolution_record(info)
+                return workspace, info
+            if err is not None:
+                last_error = err
+
+        if not client_roots and not candidates:
+            raise ValueError(
+                "Could not determine the active workspace: MCP roots/list returned "
+                "no folders and no launch-time pin (DB_MCP_PROJECT_DIR) is set. "
+                "Pass workspace_root on tool calls with your Cursor Workspace Path, "
+                "or set DB_MCP_PROJECT_DIR for this server."
+            )
 
         if found_env and last_error is not None:
             raise last_error
@@ -516,16 +677,25 @@ class WorkspaceManager:
                 "Found .env file(s) in workspace roots but no backends could be configured."
             )
         raise ValueError(
-            "No .env file found in any workspace root provided by the client."
+            "No .env file found in any workspace root provided by the client. "
+            "Pass workspace_root with your project's path (the folder containing .env)."
         )
 
     async def get_registry_for(
-        self, ctx: Context,
-    ) -> tuple[BackendRegistry, dict[str, str], Path]:
-        """Resolve session to workspace and return registry, env_map, root."""
-        root = await self._resolve_workspace_root(ctx)
+        self,
+        ctx: Context,
+        workspace_root_override: str | None = None,
+        *,
+        tool: str | None = None,
+    ) -> tuple[BackendRegistry, dict[str, str], Path, ResolutionInfo]:
+        """Resolve session to workspace and return registry, env_map, root, info."""
+        root, info = await self._resolve_workspace_root(
+            ctx,
+            workspace_root_override,
+            tool=tool,
+        )
         entry = self._get_or_build(root)
-        return entry.registry, entry.env_map, root
+        return entry.registry, entry.env_map, root, info
 
     def seed(self, root: Path, registry: BackendRegistry, env_map: dict[str, str]) -> None:
         """Register a pre-built entry (eager startup path)."""
