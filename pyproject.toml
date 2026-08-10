@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "db-inspector-mcp"
-version = "0.5.0"
+version = "0.5.1"
 description = "A lightweight, extensible, cross-database MCP server for database introspection"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -23,7 +23,7 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-    "mcp[cli]>=1.0.0",
+    "mcp[cli]>=1.0.0,<2",
     "pyodbc>=5.0.0",
     "psycopg2-binary>=2.9.0",
     "python-dotenv>=1.0.0",

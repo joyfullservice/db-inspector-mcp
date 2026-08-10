@@ -79,6 +79,22 @@ contradictory guidance.
 
 ---
 
+## 2026-08-10 — Pin mcp to <2 (FastMCP v1 API)
+
+**Trigger**: `uv sync` resolved `mcp` 2.0.0, which removed `mcp.server.fastmcp`. Unit tests failed at collection with `ModuleNotFoundError: No module named 'mcp.server.fastmcp'`. Same breakage was already handled in `msaccess-vcs-mcp`.
+
+**Options explored**:
+- Migrate to mcp 2.x / FastMCP v2 API — correct long-term, but a major refactor unrelated to the immediate test failure.
+- Pin `mcp[cli]>=1.0.0,<2` — restores the FastMCP surface this project imports (`Context`, `FastMCP`, `ToolError`).
+
+**Decision**: Cap the dependency at `<2`, matching `msaccess-vcs-mcp` (`mcp[cli]>=1.28,<2`). Keep the existing `>=1.0.0` lower bound for this package.
+
+**What this rules out**: Adopting mcp 2.x until imports and tool wiring are migrated. Revisit when ready to port off `mcp.server.fastmcp`.
+
+**Relevant files**: `pyproject.toml`, `uv.lock`
+
+---
+
 ## 2026-06-23 — Agent-supplied workspace_root for Cursor shared MCP process
 
 **Trigger**: With multiple Cursor windows open, user-level stdio MCP servers run in a single `[Shared MCP process]` that multiplexes all windows onto one session. `roots/list` returned a sibling project's folder (`C:\Repos\msaccess-vcs-addin`) for db-if-portal-sync tool calls, loading the wrong `.env` and backends. Process CWD was the user home directory; no documented Cursor setting disables shared-process mode.
