@@ -10,6 +10,10 @@ updates:
     # Supply-chain hardening: don't adopt brand-new releases immediately.
     cooldown:
       default-days: 7
+    ignore:
+      # mcp 2.x removed mcp.server.fastmcp; see DECISIONS.md "Pin mcp to <2".
+      - dependency-name: "mcp"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
     directory: "/"

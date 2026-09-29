@@ -23,7 +23,7 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-    "mcp[cli]>=1.0.0,<3",
+    "mcp[cli]>=1.0.0,<2",
     "pyodbc>=5.0.0",
     "psycopg2-binary>=2.9.0",
     "python-dotenv>=1.0.0",

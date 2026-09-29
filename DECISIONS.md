@@ -79,6 +79,23 @@ contradictory guidance.
 
 ---
 
+## 2026-09-29 — Enforce mcp <2 pin via Dependabot ignore
+
+**Trigger**: Dependabot PR #7 widened `mcp[cli]` from `<2` to `<3` and was merged, silently reverting "Pin mcp to <2" below. CI on `main` failed with `ModuleNotFoundError: No module named 'mcp.server.fastmcp'`, and `uv audit` flagged six advisories in `httpx2` 2.10.0, a dependency pulled in only by mcp 2.x. Dependabot PR #12 (bump `httpx2`) also failed, since it was based on the broken `main`.
+
+**Options explored**:
+- **Migrate to mcp 2.x now** — upstream's long-term direction (1.x is security-fix-only), but more than a rename. `workspace.py` `_fetch_list_roots_raw` writes into private session internals (`_request_id`, `_response_streams`, `_write_stream`) and wraps messages in `JSONRPCMessage`, which v2 changed. `tools.py` depends on the internal `context_injection.find_context_parameter`. The 2026-07-28 protocol has no server-to-client back-channel, so `roots/list` workspace detection needs rethinking. Too large for a CI fix.
+- **Accept Dependabot's `httpx2` bump (PR #12) on top of mcp 2.x** — fixes the audit but not the import failure.
+- **Restore `<2` and add a Dependabot `ignore` for mcp semver-major (chosen)** — upstream's v2.0.0 release notes explicitly recommend `<2` for projects not ready to migrate. The ignore rule stops a repeat of PR #7 but still lets 1.x minor and patch security releases through.
+
+**Decision**: Restore `mcp[cli]>=1.0.0,<2` (locks mcp 1.30.0, drops `httpx2`) and ignore mcp major updates in `.github/dependabot.yml`. PyJWT, a transitive dependency via `mcp[cli]`, was upgraded to 2.14.0 for GHSA-w6j9-cwv2-h6wq. 2.14.0 was chosen over the newer 2.15.1 to respect the 7-day Dependabot cooldown.
+
+**What this rules out**: Automated major-version bumps of mcp. The 2.x migration must be a deliberate change that also removes the ignore rule. Revisit when 1.x stops receiving security fixes, when Cursor negotiates the 2026-07-28 protocol, or when a needed feature is 2.x-only.
+
+**Relevant files**: `pyproject.toml`, `uv.lock`, `.github/dependabot.yml`
+
+---
+
 ## 2026-08-10 — Pin mcp to <2 (FastMCP v1 API)
 
 **Trigger**: `uv sync` resolved `mcp` 2.0.0, which removed `mcp.server.fastmcp`. Unit tests failed at collection with `ModuleNotFoundError: No module named 'mcp.server.fastmcp'`. Same breakage was already handled in `msaccess-vcs-mcp`.
