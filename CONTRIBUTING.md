@@ -31,6 +31,16 @@ uv lock              # re-resolve after editing pyproject.toml
 uv lock --upgrade    # refresh all resolutions to the newest versions allowed by the floors
 ```
 
+Resolution skips releases published in the last 7 days (`exclude-newer = "7 days"` in `pyproject.toml`), so "newest" means newest outside that cooldown. To take an urgent security fix that is still inside the cooldown, exempt only that package in `pyproject.toml` with a fixed cutoff just after the fix was published, then run `uv lock --upgrade-package <name>`:
+
+```toml
+[tool.uv]
+exclude-newer = "7 days"
+exclude-newer-package = { pyjwt = "2026-10-05T00:00:00Z" }
+```
+
+The exemption must live in `pyproject.toml`: passing `--exclude-newer-package` on the command line only lasts until the next plain `uv lock`, which reverts the package. Prefer a fixed date over `false` — a forgotten date freezes that one package (which `uv audit` will eventually surface) instead of silently disabling its cooldown. Remove the entry once the fixed version is more than 7 days old.
+
 ### 2. Run Tests
 
 Run everything through `uv run` so it uses the locked environment (no manual activation needed):

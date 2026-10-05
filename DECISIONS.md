@@ -79,6 +79,24 @@ contradictory guidance.
 
 ---
 
+## 2026-10-05 — Enforce the 7-day dependency cooldown in uv resolution
+
+**Trigger**: The scheduled `uv audit` job flagged `pyjwt` 2.14.0 and `urllib3` 2.7.0. The fix had to be locked by hand, and manual `uv lock` ignores the Dependabot cooldown, so staying within it meant checking PyPI upload dates and pinning `pyjwt==2.15.0` over 2.15.1 by hand. The same manual check was needed on 2026-09-29.
+
+**Options explored**:
+- **Keep the cooldown in Dependabot only** — no change, but every manual, agent, or `--upgrade` relock bypasses it unless someone remembers to check dates.
+- **Absolute `exclude-newer` date, bumped periodically** — works on any uv version, but adds a recurring chore and drifts stale.
+- **Relative `exclude-newer = "7 days"` in `[tool.uv]` (chosen)** — uv applies the same window as Dependabot to every resolution. uv stores the span (`exclude-newer-span = "P7D"`) in `uv.lock` and only recomputes the cutoff on a new resolution, so the lock doesn't churn daily.
+- **Shorter window (3 days, GitHub's 2026-07 Dependabot default)** — catches most fast-moving malicious releases with less lag. Kept 7 to match the existing Dependabot setting; both should change together.
+
+**Decision**: Add `exclude-newer = "7 days"` and `required-version = ">=0.9.17"` to `[tool.uv]`. The version floor matters because older uv cannot parse relative durations and warns and ignores the whole `[tool.uv]` table instead of failing. Urgent fixes inside the window use a per-package `exclude-newer-package` entry in `pyproject.toml` with a fixed date. Tested: passing `--exclude-newer-package` on the CLI lasts only until the next plain `uv lock`, which reverts the package (`pyjwt` 2.15.1 went back to 2.15.0). A fixed date is preferred over `false` because a forgotten entry then freezes one package, which `uv audit` will eventually surface, instead of silently removing its cooldown. Procedure documented in `CONTRIBUTING.md`.
+
+**What this rules out**: Locking any release less than 7 days old without an explicit, visible exemption. Dependabot security PRs whose fix is under 7 days old may fail to resolve until an exemption is added, since Dependabot runs uv against this config. This protects only CI and dev; `uvx` users resolve fresh and ignore `[tool.uv]` and `uv.lock`. Revisit if Dependabot security PRs routinely fail on the window, or if the Dependabot cooldown changes.
+
+**Relevant files**: `pyproject.toml`, `uv.lock`, `CONTRIBUTING.md`
+
+---
+
 ## 2026-09-29 — Enforce mcp <2 pin via Dependabot ignore
 
 **Trigger**: Dependabot PR #7 widened `mcp[cli]` from `<2` to `<3` and was merged, silently reverting "Pin mcp to <2" below. CI on `main` failed with `ModuleNotFoundError: No module named 'mcp.server.fastmcp'`, and `uv audit` flagged six advisories in `httpx2` 2.10.0, a dependency pulled in only by mcp 2.x. Dependabot PR #12 (bump `httpx2`) also failed, since it was based on the broken `main`.
