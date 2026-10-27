@@ -79,7 +79,27 @@ contradictory guidance.
 
 ---
 
+## 2026-10-27 — Shorten the cooldown to 3 days, audit daily, fast-path security fixes
+
+**Trigger**: The scheduled `uv audit` on 2026-10-26 flagged `certifi` 2026.7.22 (GHSA-6q48-6c7w-9gw2). The fix, 2026.10.19, was uploaded on 2026-10-20 but was not detected for six days because the audit ran weekly, and Dependabot raised no alert (it has missed every transitive advisory since 2026-09-29, including pyjwt and urllib3). It then waited one more day for the 7-day cooldown. At the same time, the gap between disclosure and exploitation is shrinking as AI-assisted exploit generation spreads (Rapid7 Q3 2026: 3-day average, 71% within 7 days).
+
+**Options explored**:
+- **Drop the cooldown and take every release immediately** — removes all lag on fixes, but re-opens the risk the cooldown exists for. In October 2026 alone, `litellm` 1.107.0 (PyPI, credential stealer running from Python startup hooks, about 2 hours live) and `tensorlake` 0.5.144 (npm, worm that steals MCP configs) shipped through the projects' own release workflows with valid provenance. Both were pulled within hours, so release age was the only control that would have stopped them. Rejected.
+- **Keep 7 days and weekly audits** — no change, but most of the lag on security fixes comes from the weekly schedule, not the cooldown.
+- **3-day cooldown, daily audit, documented fast path for advisory fixes (chosen)** — 3 days is GitHub's Dependabot default and still covers attacks that are detected within hours. A daily audit reduces detection lag from up to 7 days to 1. Advisory-driven exemptions become the standard response, with a short review checklist in `CONTRIBUTING.md`.
+- **Automate exemptions from `uv audit` output** — fastest, but an attacker who publishes a malicious "fix" would get through with no human check. Deferred.
+
+**Decision**: Set `exclude-newer = "3 days"` in `pyproject.toml` and `cooldown.default-days: 3` in `.github/dependabot.yml` (kept equal so Dependabot PRs still resolve). Run the CI workflow daily instead of weekly, which also runs the test job daily. When the audit reports a vulnerability whose fix is inside the window, take it the same day through a per-package `exclude-newer-package` entry, after checking the advisory's fixed version, the publisher, the changelog, and the wheel contents for new `.pth` files or startup hooks.
+
+**What this rules out**: Treating the cooldown as a reason to wait on a security fix. Relying on Dependabot alone to detect transitive vulnerabilities. Revisit if malicious releases start surviving longer than 3 days before removal, if daily CI noise or minutes become a problem (split the audit into its own workflow), or if Dependabot starts reliably reporting transitive uv advisories.
+
+**Relevant files**: `pyproject.toml`, `uv.lock`, `.github/dependabot.yml`, `.github/workflows/ci.yml`, `CONTRIBUTING.md`
+
+---
+
 ## 2026-10-05 — Enforce the 7-day dependency cooldown in uv resolution
+
+> **⚠ Partially superseded** (2026-10-27): The window is now 3 days in both uv and Dependabot, the audit runs daily, and exemptions for advisory fixes are the standard path, not an exception. See "Shorten the cooldown to 3 days, audit daily, fast-path security fixes" above.
 
 **Trigger**: The scheduled `uv audit` job flagged `pyjwt` 2.14.0 and `urllib3` 2.7.0. The fix had to be locked by hand, and manual `uv lock` ignores the Dependabot cooldown, so staying within it meant checking PyPI upload dates and pinning `pyjwt==2.15.0` over 2.15.1 by hand. The same manual check was needed on 2026-09-29.
 
@@ -160,6 +180,8 @@ contradictory guidance.
 - **uv.lock + Dependabot `uv` ecosystem + `uv audit` (chosen)** — single toolchain; Dependabot has native uv support (version updates GA; security updates shipped 2025-12-16). `uv.lock` is a universal cross-platform lockfile that resolves platform markers conditionally.
 
 **Decision**: Commit `uv.lock` for deterministic CI/dev resolution while keeping `pyproject.toml` floors unchanged for library/`uvx` consumers (the lock is a CI/dev artifact, not a constraint on consumers). Two detection layers: Dependabot (`uv` ecosystem, weekly, 7-day cooldown) as the passive detector that opens PRs/alerts, and a weekly scheduled `uv audit` CI job as the backstop that audits the full locked tree — including transitive deps, which Dependabot's uv dependency graph has historically parsed less reliably ([dependabot-core #11913](https://github.com/dependabot/dependabot-core/issues/11913)). Dev and CI both moved to uv (`uv sync --frozen`, `uv run`, `uv build`); the always-applied `.cursor/rules/testing.mdc` and docs were updated to match. No runtime/startup scanning — audits stay in CI only.
+
+> **⚠ Partially superseded** (2026-10-27): The cooldown is now 3 days and the `uv audit` job runs daily. In practice Dependabot has missed transitive advisories, so the audit is the primary detector, not the backstop. See "Shorten the cooldown to 3 days, audit daily, fast-path security fixes" above.
 
 **What this rules out**: pip-compile/pip-tools and the venv+`pip install -e ".[dev]"` dev flow for this repo. Revisit if Dependabot's uv security graph proves unreliable (the `uv audit` backstop is the safety net) or if a non-Windows CI matrix is added. `uv audit` is currently experimental (invoked with `--preview-features audit-command`); if its CLI changes, the fallback is `uv export --format requirements-txt | uvx pip-audit -r -`.
 

@@ -9,7 +9,7 @@ updates:
       - "dependencies"
     # Supply-chain hardening: don't adopt brand-new releases immediately.
     cooldown:
-      default-days: 7
+      default-days: 3
     ignore:
       # mcp 2.x removed mcp.server.fastmcp; see DECISIONS.md "Pin mcp to <2".
       - dependency-name: "mcp"

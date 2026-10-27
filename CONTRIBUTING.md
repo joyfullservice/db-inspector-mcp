@@ -31,15 +31,24 @@ uv lock              # re-resolve after editing pyproject.toml
 uv lock --upgrade    # refresh all resolutions to the newest versions allowed by the floors
 ```
 
-Resolution skips releases published in the last 7 days (`exclude-newer = "7 days"` in `pyproject.toml`), so "newest" means newest outside that cooldown. To take an urgent security fix that is still inside the cooldown, exempt only that package in `pyproject.toml` with a fixed cutoff just after the fix was published, then run `uv lock --upgrade-package <name>`:
+Resolution skips releases published in the last 3 days (`exclude-newer = "3 days"` in `pyproject.toml`), so "newest" means newest outside that cooldown. The cooldown is for routine updates only; it should never delay a security fix.
+
+**Security fixes inside the cooldown:** when `uv audit` reports a vulnerability whose fixed version is younger than 3 days, take the fix right away. Exempt only that package in `pyproject.toml` with a fixed cutoff just after the fix was published, then run `uv lock --upgrade-package <name>`:
 
 ```toml
 [tool.uv]
-exclude-newer = "7 days"
+exclude-newer = "3 days"
 exclude-newer-package = { pyjwt = "2026-10-05T00:00:00Z" }
 ```
 
-The exemption must live in `pyproject.toml`: passing `--exclude-newer-package` on the command line only lasts until the next plain `uv lock`, which reverts the package. Prefer a fixed date over `false` — a forgotten date freezes that one package (which `uv audit` will eventually surface) instead of silently disabling its cooldown. Remove the entry once the fixed version is more than 7 days old.
+Before committing, check that the release is the real fix and not a compromised upload dressed up as one:
+
+- The locked version is the one the advisory names as fixed (or the closest release after it), not simply the newest.
+- The release came from the project's usual publisher: PyPI release history and the project's GitHub tag or release line up, and it carries a trusted-publishing attestation if the project normally has one. An attestation shows where a package was built, not that its code is safe.
+- The changelog or release notes describe the fix, and the version jump is small.
+- The wheel adds no new `.pth` files or startup hooks (browse its contents on [PyPI Inspector](https://inspector.pypi.io/)). Malware in compromised releases has used these to run at Python startup without being imported.
+
+Name the advisory in the commit message. The exemption must live in `pyproject.toml`: passing `--exclude-newer-package` on the command line only lasts until the next plain `uv lock`, which reverts the package. Prefer a fixed date over `false` — a forgotten date freezes that one package (which `uv audit` will eventually surface) instead of silently disabling its cooldown. Remove the entry once the fixed version is more than 3 days old.
 
 ### 2. Run Tests
 
@@ -65,7 +74,7 @@ uv run pytest -m "not integration"
 
 ### 3. Audit Dependencies
 
-A weekly CI job and Dependabot watch for vulnerable dependencies, but you can run the same check locally against the lockfile:
+A daily CI job runs `uv audit` against the lockfile. Dependabot also raises alerts, but it does not reliably catch transitive dependencies, so treat the audit job as the main detector. You can run the same check locally:
 
 ```bash
 uv audit --preview-features audit-command

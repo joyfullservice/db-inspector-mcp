@@ -50,7 +50,7 @@ db-inspector-mcp = "db_inspector_mcp.main:main"
 # Relative exclude-newer durations need uv 0.9.17+; older versions ignore these settings.
 required-version = ">=0.9.17"
 # Supply-chain cooldown for lock resolution; matches the Dependabot cooldown.
-exclude-newer = "7 days"
+exclude-newer = "3 days"
 
 [tool.setuptools.packages.find]
 where = ["src"]
